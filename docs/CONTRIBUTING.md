@@ -3643,6 +3643,72 @@ Introduced in the 2026-10-13 upstream sync (ports opencode PR #54945 / #54911). 
 - **Keep the whitelist tight.** `cacheFormat` is restricted to the two literal values `'anthropic'` / `'none'`. `cacheKey` must be a boolean. `body.encoding` is restricted to `'json'` / `'form'`. Any other value is silently dropped so the stored config can carry forward-compatible fields without breaking current builds. Adding a `'default'` fallback value is a regression — the empty object is the correct "no override" signal.
 - **Defensive guards on `providers` / `providers.<id>`.** The reader defends against array / non-object / malformed entries at every level. A hand-edited corrupt config must never accidentally enable cache breakpoints. The defensive style here is more verbose than a plain `config.providers?.[id]?.compatibility` chain on purpose — the shape is persisted to disk and read from untrusted inputs.
 
+## Managed Policy Namespace (`src/config/userConfig.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `6dc4d4e`). References: [docs/CONFIGURATION.md — Managed Policy Namespace](CONFIGURATION.md#managed-policy-namespace-__managedpolicies__), [docs/ARCHITECTURE.md — Managed Policy Namespace loading](ARCHITECTURE.md#managed-policy-namespace-loading-srcconfiguserconfigts), [docs/CHANGELOG.md — Unreleased](../CHANGELOG.md#unreleased).
+
+- **`__managedPolicies__` is a RESERVED read-time namespace.** It is injected by `loadFullConfig()` and stripped by `saveFullConfig()`. Writing to it from a user-code path is a bug — the next `saveFullConfig()` will erase the write silently. Enforcement sites consume `getManagedPolicies()`; they do not need to know the reserved name.
+- **Policies load BEFORE settings on purpose.** The 2026-10-15 port keeps the two reads in a single `readManagedPreferences()` call but merges them into DIFFERENT keys (`__managedPolicies__` vs. the overwrite of `telemetryEnabled` / `allowedProviders` / `defaultModel` / `proxyUrl`). Reordering the merge so settings win over policies is a regression — the whole point of a managed policy is that no user setting can shadow it.
+- **Non-Darwin is a no-op.** `readManagedPreferences()` returns `null` outside macOS, so the reserved key is never written on Linux / Windows. Do NOT add a cross-platform fallback (reading from an environment variable, for example) without a design discussion — the current contract is "managed policy is an MDM feature on macOS only; everything else is user-trust".
+- **The `defaults` call is scoped and bounded.** The reader shells out to `defaults read ai.alexi.cli <key>` with a 5-second timeout and `2>/dev/null` suppression. Keep the timeout — a hung MDM profile read must NOT wedge CLI startup. Keep the stderr suppression — the "key does not exist" error is informational, not actionable.
+- **`reason` is intentionally unset through `defaults`.** Scalar prefs cannot carry a structured reason; the reader leaves `reason` undefined. Richer metadata belongs in a future JSON policies file at the system path, NOT in a parse of comma-separated-value strings.
+
+## Database Query Error Redaction (`src/core/database/errors.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `a8fc567`). References: [docs/API.md — Database Query Error Redaction](API.md#database-query-error-redaction), [docs/ARCHITECTURE.md — Database Query Error Redaction](ARCHITECTURE.md#database-query-error-redaction-srccoredatabaseerrorsts), [docs/TESTING.md — Testing `formatQueryError` parameter redaction](TESTING.md#testing-formatqueryerror-parameter-redaction).
+
+- **The redaction MUST stay in the message.** The `.cause` attachment is for local debugging; it is NOT a license to leak the raw payload through the message. A change that embeds `JSON.stringify(err.cause)` into the wrapped message is a regression — any observability pipeline that forwards `err.message` would start carrying the raw parameters.
+- **Preserve parameter count.** `params.map(() => '[redacted]')` keeps the count visible. A refactor that collapses the array (`'[redacted]'` single scalar, or an empty array) hides shape-mismatch bugs from operators and is a regression.
+- **Driver agnosticism is a feature.** The helper takes `unknown` for `err` on purpose — native drivers like `better-sqlite3` sometimes throw non-Error values. Narrowing the parameter type to `Error` is a regression that breaks real callers.
+- **Pure module, no I/O.** Do NOT add logger calls, metrics, or filesystem writes. The helper runs on hot driver paths and must stay a trivial function.
+
+## MCP OAuth Loopback Classifier (`src/mcp/oauth-loopback.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `b55f220`). References: [docs/API.md — MCP OAuth Loopback Detection](API.md#mcp-oauth-loopback-detection), [docs/ARCHITECTURE.md — MCP OAuth Loopback Detection](ARCHITECTURE.md#mcp-oauth-loopback-detection-srcmcpoauth-loopbackts), [docs/TESTING.md — Testing MCP OAuth loopback classification](TESTING.md#testing-mcp-oauth-loopback-classification).
+
+- **Keep the `.localhost` suffix boundary.** `host.endsWith('.localhost')` with the leading dot is NON-NEGOTIABLE. Dropping to `host.endsWith('localhost')` would classify `attacker-localhost.example.com` and `notlocalhost.example.com` as loopback, which is a token-exfiltration vulnerability. The test suite pins both; CI will fail if the boundary is removed.
+- **IPv4 range is matched by prefix.** `host.startsWith('127.')` covers the entire `127.0.0.0/8` range. A refactor that narrows to exact `127.0.0.1` + `localhost` is a regression — `127.1.2.3` is loopback and operators who run OAuth clients bound to a non-`127.0.0.1` loopback address need it to work.
+- **Lower-case comparison.** `url.hostname.toLowerCase()` normalises the host before matching. Removing the normalisation re-breaks `Localhost` / `LOCALHOST` copy-paste cases.
+- **Pure function.** No logging, no telemetry, no caching. The classifier is called from the OAuth transport hot path and must stay a single branch of comparisons.
+
+## MCP Codemode Support Tracker (`src/mcp/codemode-support.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `7b5f1bd`). References: [docs/API.md — MCP Codemode Support Tracker](API.md#mcp-codemode-support-tracker), [docs/ARCHITECTURE.md — MCP Codemode Support Tracker](ARCHITECTURE.md#mcp-codemode-support-tracker-srcmcpcodemode-supportts).
+
+- **In-memory only.** The tracker is NOT persisted across process restarts, on purpose — a server that was reconfigured off-process should get a fresh probe on the next Alexi start. Persisting the verdict to disk is a regression; it would make a reconfigured server inherit the stale "unsupported" state until an operator manually cleared the state file.
+- **`forgetServer(name)` MUST be called from `McpClientManager.disconnect()`.** The call site at `src/mcp/client.ts:1476` is load-bearing — a disconnect without the forget would leave the stale verdict in the tracker. Removing it is a regression even if everything "still works" in the happy path.
+- **Three states, not two.** `'unknown' | 'supported' | 'unsupported'` keeps a server that has not been probed distinguishable from one that was probed and failed. Collapsing to a `Set<string>` of "known-unsupported" names is a regression — the probe scheduler needs the three-way distinction.
+- **`reset()` is TEST-ONLY in spirit.** Call it from `beforeEach` in the suite, not from runtime code. Clearing live operator state is not something the tracker should do outside testing.
+
+## Ripgrep JSON `{bytes}` Extractor (`src/tool/tools/ripgrep-grep.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports kilocode `0e6da3104` / `31906a56b`). References: [docs/API.md — Ripgrep JSON Event Text Extractor](API.md#ripgrep-json-event-text-extractor), [docs/ARCHITECTURE.md — Ripgrep JSON Bytes Decoding](ARCHITECTURE.md#ripgrep-json-bytes-decoding-srctoolltoolsripgrep-grepts), [docs/TESTING.md — Testing ripgrep JSON `{bytes}` lossy decoding](TESTING.md#testing-ripgrep-json-bytes-lossy-decoding).
+
+- **Keep the lossy UTF-8 decode, not strict.** Node's default `Buffer.toString('utf8')` replaces invalid sequences with `U+FFFD` instead of throwing. Swapping to a strict decoder (manually, or via `TextDecoder` with `fatal: true`) is a regression — a mixed-encoding file would re-trigger the "silently drop the match" bug the port was designed to fix.
+- **Both `begin` and `match` events route through the extractor.** `src/tool/tools/grep.ts:482,502,503` wires in `rgExtractText` at all three sites. Removing it from one site is a regression — a filename or match that is only representable as `{bytes}` would be dropped at that stage.
+- **Return `undefined` for unknown shapes.** Callers skip the entry when the extractor returns `undefined`; a refactor that returns `''` or throws is a regression because the grep fast-path's control flow is "skip on undefined", not "handle empty string".
+- **Pure function.** No logging on the fallback path — a Latin-1 heavy repository would spam the operator logs. The lossy decode is sufficient diagnostic signal (the model receives `U+FFFD` and can act on it).
+
+## Ripgrep Glob Post-Filter (`src/tool/tools/ripgrep-glob.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports kilocode PR #15017). References: [docs/API.md — Ripgrep Glob Post-Filter](API.md#ripgrep-glob-post-filter), [docs/ARCHITECTURE.md — Ripgrep Glob Post-Filter](ARCHITECTURE.md#ripgrep-glob-post-filter-srctooltoolsripgrep-globts), [docs/TESTING.md — Testing the ripgrep glob post-filter](TESTING.md#testing-the-ripgrep-glob-post-filter).
+
+- **Do NOT re-plumb user patterns into `--glob=<pattern>`.** The entire point of this port is to KEEP the user pattern as a post-filter so ripgrep's `.gitignore` handling wins. Passing a user pattern through `--glob` is a regression — it reinstates the `node_modules` walkthrough that balloons the LLM context budget.
+- **Directory-only patterns return `false` for every file.** Delegating directory restriction to ripgrep's native glob support (which does NOT override `.gitignore`) is the whole mechanism. A refactor that makes `build/` match `build/foo.ts` from the post-filter is a regression.
+- **Bare patterns are promoted at any depth.** `*.ts` → `**/*.ts`. Removing the promotion breaks the user's mental model (they type `*.ts` and expect it to match at any depth, matching `grep --include "*.ts"` on the shell).
+- **Minimatch options are load-bearing.** `{ dot: false, matchBase: false }`. Enabling `matchBase: true` would make `foo.ts` match `src/sub/foo.ts` incidentally and break the anchored workspace-relative case. Enabling `dot: true` would start matching dotfiles unexpectedly.
+- **Operator-authoritative includes still bypass `.gitignore`.** The ripgrep layer honors `experimental.glob_include_ignored` as a true include override. Do NOT fold operator overrides into the post-filter — that would silently drop the "opt specific folders back in" contract.
+
+## MCP Capability Negotiation (`src/mcp/client.ts`)
+
+Updated in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `3aa26f1` + `fbf5f16`). References: [docs/ARCHITECTURE.md — MCP Capability Negotiation](ARCHITECTURE.md#mcp-capability-negotiation-srcmcpclientts).
+
+- **Advertise the full bundle at BOTH connect sites.** The initial connect site (`src/mcp/client.ts:1138-1147`) and the reconnect site (`src/mcp/client.ts:1171-1180`) MUST advertise the identical capability bundle. Dropping the reconnect bundle to `{}` is a regression — a server that gets a retry would see the client as having abandoned the capabilities it previously declared.
+- **`elicitation: {}` is a shape commitment, not a handler commitment.** The empty object says "we are willing to receive `elicit` requests"; it does NOT pin a specific handler. Downstream handlers can be added incrementally. Changing this to `elicitation: null` or `elicitation: false` is a regression — the capability-negotiation protocol treats "key present + empty object" and "key absent" as different signals.
+- **Gate `resources/list` / `prompts/list` on `getServerCapabilities()`.** The capability gate is strictly additive. Removing it reinstates the "every connect fires both probes blind" pattern that burns connect latency and spams `method not found` into operator logs.
+- **Defensive `getServerCapabilities` guard.** The code checks `typeof c.getServerCapabilities === 'function'` because the SDK method is optional for forward compatibility. A refactor that drops the guard is a regression — older SDK builds without the method would throw at connect time.
+- **Preserve the `Promise.all` wait.** Even when the probes are gated off, the aggregate is still awaited so a slow listing cannot leak timers past the connect call. Rewriting the sequence to fire-and-forget is a regression.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

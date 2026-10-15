@@ -8280,3 +8280,306 @@ flowchart LR
 
 The helper is a building block for the session-UI timeline renderer and any CLI post-processor that wants to turn plain-text model output into actionable links. The I/O is `await fs.access` per match, so callers should not run it on hot streaming paths; the intended use is on committed timeline frames.
 
+## Managed Policy Namespace loading (`src/config/userConfig.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream opencode `6dc4d4e`). Lives in `src/config/userConfig.ts` alongside the existing managed-preferences reader. Lets enterprise macOS MDM profiles push non-user-overridable policy statements into Alexi without granting write access to `~/.alexi/config.json`.
+
+### Design
+
+Two orthogonal axes:
+
+1. **Managed settings** (`disableTelemetry`, `allowedProviders`, `defaultModel`, `proxyUrl`) are MDM-authored scalar preferences that override the matching user key at read time.
+2. **Managed policies** (`policies`) are a list of opaque policy identifiers (`require-shell-approval`, `block-provider-xxx`) that enforcement sites consult to decide what to block.
+
+The two load together but merge into DIFFERENT namespaces in `loadFullConfig()`:
+
+```mermaid
+flowchart TD
+    FS[~/.alexi/config.json]
+    MDM[macOS defaults read ai.alexi.cli]
+    FS --> Parse[JSON.parse]
+    MDM --> Read[readManagedPreferences]
+    Read --> Settings[managed settings:\n  disableTelemetry\n  allowedProviders\n  defaultModel\n  proxyUrl]
+    Read --> Policies[managed policies:\n  policies list of ids]
+    Parse --> Merge[loadFullConfig merge]
+    Settings --> Merge
+    Policies --> Reserved[__managedPolicies__ reserved key]
+    Reserved --> Merge
+    Merge --> Config[Record string unknown]
+    Config --> Writer[saveFullConfig]
+    Writer --> Strip[strip __managedPolicies__]
+    Strip --> FS
+```
+
+Precedence at read time (highest wins):
+
+1. Managed policies (`__managedPolicies__` reserved key, injected by `loadFullConfig()`)
+2. Managed settings (overwrite user keys for `telemetryEnabled`, `allowedProviders`, `defaultModel`, `proxyUrl`)
+3. User config file (`~/.alexi/config.json`)
+
+### Reserved-namespace write guard
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller
+    participant Load as loadFullConfig
+    participant MDM as readManagedPreferences
+    participant Save as saveFullConfig
+    participant Disk as ~/.alexi/config.json
+
+    Caller->>Load: loadFullConfig()
+    Load->>Disk: read + JSON.parse
+    Load->>MDM: readManagedPreferences()
+    MDM-->>Load: { policies: [...] }
+    Load->>Load: config.__managedPolicies__ = policies
+    Load-->>Caller: config (with reserved key)
+
+    Caller->>Caller: edits an unrelated user key
+    Caller->>Save: saveFullConfig(config)
+    Save->>Save: delete sanitised.__managedPolicies__
+    Save->>Disk: write sanitised JSON
+```
+
+The reserved `__managedPolicies__` key is injected at read time ONLY and stripped at write time by `saveFullConfig()`. A round-tripped config (load → mutate → save) can therefore never accidentally promote an MDM-authored policy into the user-writable layer — managed policies are authoritative at read time, not user state.
+
+### Reader contract
+
+- `readManagedPreferences(): ManagedConfig | null` — on non-Darwin platforms returns `null` so the reserved key is never written. On Darwin reads scalar prefs via `defaults read ai.alexi.cli <key>` with a 5-second timeout; a missing key, non-zero exit, or parse failure returns `null` for that scalar.
+- `getManagedPolicies(): ManagedPolicy[]` — public helper that calls `loadFullConfig()` and returns the `__managedPolicies__` array (or an empty array when none are configured). Callers do NOT need to know the reserved namespace name.
+- Policies are read as a comma-separated list of ids. `reason` cannot be expressed through `defaults` scalars and is left blank — operators who need richer metadata ship a JSON policies file at the system path (future work).
+
+### Enforcement composition
+
+The reader is intentionally decoupled from enforcement: it exposes the policy list, and sites like `src/permission/policy.ts` decide what to do with each id. This keeps the loader a pure read, lets the policy schema evolve without rippling into the config layer, and makes the migration path trivial — a future "load policies from JSON" source needs only to extend `readManagedPreferences()`.
+
+## Database Query Error Redaction (`src/core/database/errors.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream opencode `a8fc567`). Pure module (no I/O) that wraps a raw driver error with a safe, redacted `Error` whose `message` cannot leak the prepared-statement parameter list.
+
+### Design
+
+```mermaid
+flowchart LR
+    Driver[DB driver throws:\nmessage includes raw params]
+    Driver --> Wrap[formatQueryError err sql params]
+    Wrap --> Message[QueryError message:\nDatabase query failed msg\nsql SQL\nparams redacted list]
+    Wrap --> Cause[cause = original err]
+    Message --> Logger[logger  observability]
+    Cause --> LocalDebug[local debug: Node stack trace]
+```
+
+- **Driver errors routinely embed the parameter list** in `.message`. A failing query carrying an API key, a session blob, or a user prompt will surface that payload through the Node error object's `message` (visible in stack traces), the logger output shipped to central observability, and any crash reporter that captures `error.message`.
+- **Alexi is deployed into SAP AI Core environments whose logs are forwarded to Cloud Logging / SAP Alert Notification.** Silently leaking the raw params into those pipes is a privacy / secrets-handling risk.
+- **The wrapper always redacts and preserves count.** Every element of `params` is replaced with the literal string `[redacted]`; the parameter COUNT is preserved so a shape-mismatch bug is still visible to operators.
+- **`.cause` is attached but never serialised into `message`.** The original error stays reachable for local debugging; forwarding the `message` field alone cannot leak the raw parameters.
+
+### Call surface
+
+```typescript
+export function formatQueryError(err: unknown, sql: string, params: unknown[]): Error;
+```
+
+Driver layer example:
+
+```typescript
+try {
+  statement.run(...params);
+} catch (err) {
+  throw formatQueryError(err, 'INSERT INTO sessions VALUES (?, ?)', params);
+}
+```
+
+The wrapper is driver-agnostic (`better-sqlite3`, `effect-sql`, `node:sqlite`) and tolerant of non-Error values thrown by native drivers — `String(err)` is used when `err instanceof Error` is false.
+
+## MCP OAuth Loopback Detection (`src/mcp/oauth-loopback.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream opencode `b55f220`). Pure helper that classifies the hostname of an OAuth token endpoint as loopback per RFC 6761 so the MCP OAuth flow is willing to send the authorization code / refresh token over plain HTTP from a dev-mode MCP server.
+
+### Rules
+
+```mermaid
+flowchart TD
+    URL[URL.hostname lower-cased]
+    URL --> Match{host matches?}
+    Match -->|host === 'localhost'| Yes[loopback]
+    Match -->|host endsWith .localhost| Yes
+    Match -->|host === 127.0.0.1 or startsWith 127.| Yes
+    Match -->|host === ::1| Yes
+    Match -->|else| No[not loopback]
+```
+
+Returns `true` for:
+
+- `localhost` (case-insensitive — `Localhost` / `LOCALHOST` also match)
+- Any `*.localhost` subname (e.g. `auth.service.localhost`, `my-dev.localhost:3000`)
+- IPv4 loopback `127.0.0.0/8` (any `127.*` address, matched via `startsWith('127.')`)
+- IPv6 loopback `::1`
+
+### Attack-surface guard
+
+The suffix check matches a `.localhost` boundary ONLY. A hostname like `notlocalhost.example.com` or `attacker-localhost.example.com` is NOT classified as loopback, so an external host cannot social-engineer the OAuth flow into exposing tokens over plain HTTP by suffixing `-localhost` to its name. The guard lives at the matcher level (`host.endsWith('.localhost')` requires the leading dot) rather than in a separate review step.
+
+### SAP AI Core relation
+
+SAP AI Core itself authenticates via `AICORE_SERVICE_KEY` client-credentials against SAP's identity zone — this helper is only relevant to third-party MCP servers that use interactive OAuth. The module is a pure function with no cost when OAuth is unused.
+
+## MCP Codemode Support Tracker (`src/mcp/codemode-support.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream opencode `7b5f1bd`). Caches the per-server codemode-support verdict in an in-memory map so a server that rejected the codemode probe is NOT re-queried on every subsequent call.
+
+### State machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> unknown
+    unknown --> supported: markCodemodeSupported
+    unknown --> unsupported: markCodemodeUnsupported
+    supported --> [*]: forgetServer / reset
+    unsupported --> [*]: forgetServer / reset
+```
+
+- Probing is a one-time cost per server. Once marked `unsupported`, callers get `shouldSkipCodemode(serverName) === true` and skip the probe for the lifetime of the Alexi process.
+- `forgetServer(serverName)` is called by `McpClientManager.disconnect()` so a reconfigured server does not inherit a stale verdict after a disconnect/reconnect cycle (`src/mcp/client.ts:1473-1478`).
+- `reset()` is exposed for tests so consecutive fixtures can start from a clean tracker.
+
+### Interaction with disconnect
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller
+    participant Manager as McpClientManager
+    participant Tracker as codemode-support
+
+    Caller->>Manager: disconnect(name)
+    Manager->>Manager: close transport + process
+    Manager->>Manager: connections.delete(name)
+    Manager->>Tracker: forgetServer(name)
+    Manager-->>Caller: ok
+    Note over Manager,Tracker: Next connect reprobes codemode\nagainst the reconfigured server.
+```
+
+### Scope
+
+Unrelated to SAP AI Core (purely about third-party MCP servers). Important for operators who wire up legacy MCP servers that pre-date the codemode convention — without the tracker, every tool call pays the `method not found` round-trip.
+
+## Ripgrep JSON Bytes Decoding (`src/tool/tools/ripgrep-grep.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream kilocode `0e6da3104` / `31906a56b`). Normalises the `{text}` | `{bytes}` field that ripgrep emits inside a `--json` event into a plain string, so matches in non-UTF-8 files are no longer silently dropped by the grep fast-path.
+
+### Decision flow
+
+```mermaid
+flowchart TD
+    Event[rg --json data.path  data.lines]
+    Event --> Shape{data shape?}
+    Shape -->|text string| Text[return data.text verbatim]
+    Shape -->|bytes string base64| Decode[Buffer.from base64 toString utf8 lossy]
+    Decode --> Replacement[U+FFFD on invalid sequences]
+    Replacement --> Return[return decoded string]
+    Shape -->|neither| Undef[return undefined caller skips entry]
+```
+
+- **`{text}`** is passed through verbatim.
+- **`{bytes}`** is base64-decoded then UTF-8-decoded with Node's default lossy decoder, which replaces invalid sequences with `U+FFFD`. This matches ripgrep's own behaviour when invoked without `--encoding none` + explicit codec, so operators see the same substitution they would from running `rg` at the shell.
+- **Any other shape** returns `undefined`; callers treat this as "ripgrep emitted a shape we do not understand" and skip the entry.
+
+### Wiring in the grep fast-path
+
+Both the `begin` event (filename) and the `match` event (file path + line content) in `src/tool/tools/grep.ts:482,502,503` now route through `rgExtractText`. Previously a filename or match that was only representable as `{bytes}` was silently skipped — a grep against a repository that contained even one Latin-1 file lost matches invisibly. With the extractor wired in, the match surfaces with `U+FFFD` placeholders instead.
+
+### SAP AI Core compatibility
+
+Outputs flow through the LLM API as JSON strings. `U+FFFD` is a valid Unicode scalar, so a decoded match is safely JSON-encodable through SAP AI Core; a raw `Buffer` would not be. The lossy decoder is therefore the right default — strict UTF-8 would re-introduce the "drop the match" failure mode this port is designed to fix.
+
+## Ripgrep Glob Post-Filter (`src/tool/tools/ripgrep-glob.ts`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream kilocode PR #15017). Pure helper that compiles a user-supplied glob pattern into a post-filter predicate. Fixes a long-standing escape hatch where `--glob=<pattern>` made ripgrep ignore `.gitignore` for the matched path.
+
+### Why post-filter instead of `--glob`
+
+```mermaid
+flowchart LR
+    User[User pattern star star slash star dot ts]
+    subgraph BeforePort [Before port]
+      User --> RgGlob[--glob=pattern]
+      RgGlob --> Override[rg treats as include override]
+      Override --> Walked[Walks into node_modules<br/>burning LLM context budget]
+    end
+    subgraph AfterPort [After port]
+      User --> Compile[compile pattern]
+      Compile --> Pred[GlobFilter.match]
+      RgWalker[rg walker honors .gitignore] --> Files[file paths]
+      Files --> Pred
+      Pred --> Keep[matches pass through]
+    end
+```
+
+Passing a user pattern to ripgrep as `--glob=<pattern>` makes ripgrep treat it as an INCLUDE OVERRIDE that wins over `.gitignore` / `.ignore` rules — a glob like `**/*.ts` happily walked into `node_modules` (because it is ignored by `.gitignore`, not by a `--glob` rule). The post-filter path lets ripgrep enumerate files per its normal ignore rules and applies the user pattern locally as a minimatch predicate, preserving the intent of `.gitignore` while narrowing the result set.
+
+### Pattern expansion rules
+
+- Blank pattern → match-everything predicate (`match: () => true`). An empty filter is well-defined, not a trap.
+- Pattern ending in `/` → directory-only match, which always returns `false` for a file. Directory restriction is delegated to the ripgrep walker via its native glob support (which, unlike the include case, does NOT override `.gitignore`).
+- Pattern without `/` → promoted to `**/<pattern>` so a bare `*.ts` matches at any depth. Matches the mental model users have when supplying `--include "*.ts"`.
+- Pattern with `/` → used verbatim as a workspace-relative minimatch pattern.
+- Minimatch options: `{ dot: false, matchBase: false }` — dotfiles stay excluded unless the pattern explicitly includes them, and the match is anchored (not basename-folded) so `src/foo.ts` only matches patterns that address that path shape.
+
+### Operator-authoritative overrides still bypass `.gitignore`
+
+Include/exclude override globs declared by the operator (opencode allowlist, `experimental.glob_include_ignored`) still work at the ripgrep layer because they are AUTHORITATIVELY declared, not inferred from a user pattern. The post-filter only applies to the user's `include` string.
+
+## MCP Capability Negotiation (`src/mcp/client.ts`)
+
+Updated in the 2026-10-15 upstream sync (`1.22.47`, ports upstream opencode `3aa26f1` + `fbf5f16`). Two independent capability-handling changes applied to the MCP connect path.
+
+### Advertised client capabilities
+
+Previously the MCP `Client` constructor was invoked with an empty `{ capabilities: {} }` at both the initial connect site and the per-attempt reconnect site. The new form advertises the full spec-shaped bundle at both sites:
+
+```typescript
+new Client(
+  { name: 'alexi', version: '0.1.0' },
+  {
+    capabilities: {
+      roots: { listChanged: true },
+      sampling: {},
+      elicitation: {},
+    },
+  }
+);
+```
+
+- `roots.listChanged: true` — opts in to spec-compliant `roots/list_changed` notifications.
+- `sampling: {}` — opts in to server-initiated `sampling/*` requests.
+- `elicitation: {}` — opts in to the new MCP `elicit` request channel. The empty-object shape commits to the capability without pinning a specific handler shape, so downstream handlers can be added incrementally without a protocol-version bump.
+
+The reconnect site duplicates the bundle verbatim so a server that rejected elicitation on the first attempt still sees the capability on the retry.
+
+### Capability-gated optional metadata probes
+
+```mermaid
+flowchart TD
+    Connect[attemptConnect]
+    Connect --> Init[client.initialize]
+    Init --> Caps[client.getServerCapabilities]
+    Caps --> Tools[listAllTools  required]
+    Caps --> ResCheck{caps.resources defined?}
+    ResCheck -->|yes| ResList[listResources]
+    ResCheck -->|no| ResSkip[skip resources list]
+    Caps --> PromptCheck{caps.prompts defined?}
+    PromptCheck -->|yes| PromptList[listPrompts]
+    PromptCheck -->|no| PromptSkip[skip prompts list]
+    Tools --> Wait[Promise.all]
+    ResList --> Wait
+    PromptList --> Wait
+    ResSkip --> Wait
+    PromptSkip --> Wait
+    Wait --> Done[fetchInitialMetadata resolved]
+```
+
+`fetchInitialMetadata()` now reads `client.getServerCapabilities()` (defensive — the method is treated as optional for forward compatibility with older SDK builds) and gates the `listResources` / `listPrompts` probes on `caps.resources !== undefined` / `caps.prompts !== undefined`. Previously every connect fired both probes blind, racking up `method not found` responses in operator logs and burning connect latency on servers that have no prompts/resources to list.
+
+The gate is strictly additive — a server that DOES advertise the capability still gets the probe, and the result-wait semantics (parallel fire, `.catch` on each promise, `Promise.all` on the aggregate) are preserved verbatim so a slow listing cannot leak timers past the connect call.
+

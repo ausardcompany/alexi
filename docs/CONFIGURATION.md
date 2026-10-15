@@ -2673,6 +2673,65 @@ Any value that does not match the schema is silently dropped by the reader — t
 
 See [docs/PROVIDERS.md — Per-provider compatibility knobs](PROVIDERS.md#per-provider-compatibility-knobs-providersidcompatibility) for the TypeScript surface and [docs/CHANGELOG.md — Unreleased](../CHANGELOG.md#unreleased) for the port history.
 
+## Managed Policy Namespace (`__managedPolicies__`)
+
+Introduced in the 2026-10-15 upstream sync (`1.22.47`, ports upstream opencode `6dc4d4e` "managed configuration gets highest precedence; split policies from settings"). Adds a reserved namespace in `~/.alexi/config.json` for MDM-authored, non-user-overridable policy statements. On non-Darwin platforms this is a no-op — the namespace is never written.
+
+### Shape
+
+Managed policies are not stored by Alexi itself. They are read from the macOS MDM profile at every `loadFullConfig()` call and INJECTED into the returned object under a reserved key:
+
+```json
+{
+  "__managedPolicies__": [
+    { "id": "require-shell-approval" },
+    { "id": "block-provider-xai" }
+  ]
+}
+```
+
+| Field    | Type     | Purpose                                                                   |
+| -------- | -------- | ------------------------------------------------------------------------- |
+| `id`     | `string` | Opaque policy identifier that an enforcement site consults.               |
+| `reason` | `string` | Free-form reason surfaced to operators when the policy fires. Optional.   |
+
+### Precedence
+
+Resolution order at read time (highest wins):
+
+1. **Managed policies** (`__managedPolicies__` reserved key, injected by `loadFullConfig()`)
+2. **Managed settings** — macOS MDM scalar prefs for `disableTelemetry` → `telemetryEnabled`, `allowedProviders`, `defaultModel`, `proxyUrl`
+3. **User config file** at `~/.alexi/config.json`
+
+### Reserved-namespace write guard
+
+`saveFullConfig()` strips `__managedPolicies__` from the config before writing to disk. A round-tripped config (load → mutate → save) can therefore NEVER accidentally promote an MDM-authored policy into the user-writable layer. Managed policies are authoritative at read time only — they are not user state.
+
+### macOS MDM profile keys
+
+| Preference key       | Value shape                                 | Example                                          |
+| -------------------- | ------------------------------------------- | ------------------------------------------------ |
+| `disableTelemetry`   | `1` / `0` / `true` / `false`                | `defaults write ai.alexi.cli disableTelemetry 1` |
+| `allowedProviders`   | Comma-separated provider ids                | `sap-ai-core,sap-anthropic`                      |
+| `defaultModel`       | Model id string                             | `anthropic--claude-4.7-opus`                     |
+| `proxyUrl`           | URL string                                  | `https://proxy.corp.example.com`                 |
+| `policies`           | Comma-separated policy ids                  | `require-shell-approval,block-provider-xai`      |
+
+`reason` is NOT expressible via `defaults` scalars and is left blank by the reader — operators who want richer policy metadata should ship a JSON policies file at the system path (future work).
+
+### Public helpers
+
+- `getManagedPolicies(): ManagedPolicy[]` — public reader exported from `src/config/userConfig.ts`. Returns an empty array when no policies are configured.
+- `readManagedPreferences(): ManagedConfig | null` — exposed so advanced callers can inspect the full MDM-read result (settings AND policies in one object) without going through `loadFullConfig()`.
+
+### Example scenarios
+
+- **Enterprise shell-approval policy.** Set `defaults write ai.alexi.cli policies require-shell-approval` on managed macOS devices so `src/permission/policy.ts` enforces an approval prompt for every shell tool execution, regardless of what the user's `~/.alexi/config.json` says.
+- **Provider blocklist.** `defaults write ai.alexi.cli policies block-provider-xai` paired with `defaults write ai.alexi.cli allowedProviders sap-ai-core,sap-anthropic` keeps a managed device on the enterprise provider set and surfaces a policy reason when any UI consults the policy list.
+- **Local dev opt-out.** On non-Darwin platforms the entire MDM read is a no-op (`readManagedPreferences()` returns `null`), so Linux and Windows developers see only their user config and are not subject to managed policies.
+
+See [docs/API.md — Managed Policy Namespace](API.md#managed-policy-namespace) and [docs/ARCHITECTURE.md — Managed Policy Namespace loading](ARCHITECTURE.md#managed-policy-namespace-loading-srcconfiguserconfigts) for the TypeScript surface and the end-to-end composition with the enforcement site.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

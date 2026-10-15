@@ -7808,3 +7808,148 @@ export function filterXaiImages<T extends MultimodalAttachment>(
 
 Alexi routes multimodal requests through SAP AI Core by default — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
 
+## Managed Policy Namespace
+
+Added in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `6dc4d4e`). Exported from `src/config/userConfig.ts`.
+
+```typescript
+export interface ManagedPolicy {
+  /** Opaque policy identifier (e.g. `require-shell-approval`). */
+  id: string;
+  /** Free-form reason surfaced to operators when the policy fires. */
+  reason?: string;
+}
+
+export function getManagedPolicies(): ManagedPolicy[];
+export function readManagedPreferences(): ManagedConfig | null;
+export function loadFullConfig(): Record<string, unknown>;
+export function saveFullConfig(config: Record<string, unknown>): void;
+```
+
+- `getManagedPolicies()` returns the currently active managed policies (or `[]` when none are configured). Callers do NOT need to know the reserved `__managedPolicies__` namespace name.
+- `loadFullConfig()` precedence (highest wins): managed policies (reserved `__managedPolicies__` key) → managed settings (macOS MDM scalar prefs: `telemetryEnabled`, `defaultModel`, `proxyUrl`, `allowedProviders`) → user config file at `~/.alexi/config.json`.
+- `saveFullConfig(config)` STRIPS `__managedPolicies__` before write so a round-tripped config never accidentally promotes a managed policy into the user-writable layer.
+- On non-Darwin platforms `readManagedPreferences()` returns `null` so the reserved key is never written.
+
+Example — enforcement site consulting the policy list:
+
+```typescript
+import { getManagedPolicies } from '../config/userConfig.js';
+
+function isShellApprovalRequired(): boolean {
+  return getManagedPolicies().some((p) => p.id === 'require-shell-approval');
+}
+```
+
+## Database Query Error Redaction
+
+Added in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `a8fc567`). Exported from `src/core/database/errors.ts`.
+
+```typescript
+export function formatQueryError(err: unknown, sql: string, params: unknown[]): Error;
+```
+
+Wraps a raw driver error with a safe, redacted `Error` whose `message` names the SQL statement, replaces every element of `params` with the literal string `[redacted]`, and preserves the parameter COUNT so a shape-mismatch bug is still visible to operators. The original error is attached as `.cause` for local debugging; `.cause` is NOT serialised into `message`, so forwarding the `message` field alone cannot leak the raw parameters. Pure module — no I/O, safe to call from any driver layer (`better-sqlite3`, `effect-sql`, `node:sqlite`).
+
+```typescript
+try {
+  statement.run(...params);
+} catch (err) {
+  throw formatQueryError(err, 'INSERT INTO sessions VALUES (?, ?)', params);
+}
+```
+
+Returned `Error` shape:
+
+- `name`: `'QueryError'`
+- `message`: `Database query failed: <driver message>\n  sql: <sql>\n  params: ["[redacted]", "[redacted]"]`
+- `cause`: the original error (or raw non-Error value) passed in
+
+## MCP OAuth Loopback Detection
+
+Added in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `b55f220`). Exported from `src/mcp/oauth-loopback.ts`.
+
+```typescript
+export function isLoopback(url: URL): boolean;
+```
+
+Returns `true` when `url.hostname` resolves to a loopback address per RFC 6761 (`localhost` and any `.localhost` subname) OR a loopback IPv4 (`127.0.0.0/8`) OR IPv6 loopback (`::1`). Comparison is case-insensitive. The suffix match requires a `.localhost` boundary — `notlocalhost.example.com` is NOT classified as loopback.
+
+Example usage from an OAuth transport:
+
+```typescript
+import { isLoopback } from './oauth-loopback.js';
+
+function assertSafeTokenEndpoint(url: URL): void {
+  if (url.protocol === 'http:' && !isLoopback(url)) {
+    throw new Error(`Refusing to send OAuth token over plain HTTP to ${url.hostname}`);
+  }
+}
+```
+
+## MCP Codemode Support Tracker
+
+Added in the 2026-10-15 upstream sync (`1.22.47`, ports opencode `7b5f1bd`). Exported from `src/mcp/codemode-support.ts`.
+
+```typescript
+export function markCodemodeUnsupported(serverName: string): void;
+export function markCodemodeSupported(serverName: string): void;
+export function shouldSkipCodemode(serverName: string): boolean;
+export function forgetServer(serverName: string): void;
+export function reset(): void;
+```
+
+- Caches the per-server codemode-support verdict in an in-memory `Map<string, 'unknown' | 'supported' | 'unsupported'>` so a server that rejected the codemode probe is NOT re-queried on every subsequent call.
+- `shouldSkipCodemode(serverName)` is a hard "do not re-probe" signal when the server previously answered negatively.
+- `forgetServer(serverName)` is called by `McpClientManager.disconnect()` so a reconfigured server does not inherit a stale verdict after a disconnect/reconnect cycle.
+- `reset()` is exposed for tests so consecutive fixtures can start from a clean tracker.
+
+## Ripgrep JSON Event Text Extractor
+
+Added in the 2026-10-15 upstream sync (`1.22.47`, ports kilocode `0e6da3104` / `31906a56b`). Exported from `src/tool/tools/ripgrep-grep.ts`.
+
+```typescript
+export interface RgArbitraryData {
+  text?: string;
+  bytes?: string;
+}
+
+export function extractText(data: RgArbitraryData | undefined | null): string | undefined;
+```
+
+- `{text}` is passed through verbatim.
+- `{bytes}` is base64-decoded then UTF-8-decoded with Node's default lossy decoder (invalid sequences replaced with `U+FFFD`).
+- Any other shape returns `undefined`; callers treat this as "ripgrep emitted a shape we do not understand" and skip the entry.
+
+Wired into the grep fast-path at `src/tool/tools/grep.ts:482,502,503` for both the `begin` event (filename) and the `match` event (file path + line content), so a match in a Latin-1 / GBK / mojibake file is no longer silently dropped.
+
+## Ripgrep Glob Post-Filter
+
+Added in the 2026-10-15 upstream sync (`1.22.47`, ports kilocode PR #15017). Exported from `src/tool/tools/ripgrep-glob.ts`.
+
+```typescript
+export interface GlobFilterInput {
+  readonly pattern: string;
+}
+
+export interface GlobFilter {
+  match(file: string): boolean;
+}
+
+export function compile(input: GlobFilterInput): GlobFilter;
+```
+
+- Blank pattern → match-everything predicate.
+- Pattern ending in `/` → directory-only match (always returns `false` for a file). Directory restriction is delegated to the ripgrep walker via its native glob support.
+- Pattern without `/` → promoted to `**/<pattern>` so a bare `*.ts` matches at any depth.
+- Pattern with `/` → used verbatim as a workspace-relative minimatch pattern.
+- Minimatch options: `{ dot: false, matchBase: false }`.
+
+Example:
+
+```typescript
+const filter = compile({ pattern: '*.ts' });
+filter.match('src/foo.ts'); // true
+filter.match('src/foo.md'); // false
+```
+
