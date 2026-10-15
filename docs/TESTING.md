@@ -110,8 +110,8 @@ npm test -- tests/tool/tools/write.test.ts
 # Run tests in a directory
 npm test -- tests/tool/tools/
 
-# Run tests matching a pattern
-npm test -- --grep "write tool"
+# Run tests matching a pattern (Vitest uses -t / --testNamePattern, NOT --grep)
+npm test -- -t "write tool"
 
 # Run hook tests
 npm test -- tests/hooks/
