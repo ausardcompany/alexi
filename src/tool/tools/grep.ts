@@ -19,6 +19,7 @@ import { logger } from '../../utils/logger.js';
 import { attachAgentsMdRemindersForPaths } from '../../agent/agentsMdReminders.js';
 import { getIndexingExtensions } from '../../config/userConfig.js';
 import { mergeIncludePattern } from './includePattern.js';
+import { extractText as rgExtractText } from './ripgrep-grep.js';
 
 const GrepParamsSchema = z.object({
   pattern: z.string().describe('Regex pattern to search for'),
@@ -474,7 +475,11 @@ async function executeWithRg(
       }
       if (event.type === 'begin') {
         const e = event as RgBeginEvent;
-        const filePath = e.data.path.text;
+        // alexi_change: upstream kilocode `0e6da3104`/`31906a56b` — path
+        // may arrive as `{bytes}` (base64) when the filename itself is
+        // non-UTF-8. Decode lossily so the match surfaces instead of
+        // being silently dropped at the `filesSeen` stage.
+        const filePath = rgExtractText(e.data.path);
         if (filePath) {
           filesSeen.add(filePath);
           if (!fileMtimes.has(filePath)) {
@@ -489,10 +494,14 @@ async function executeWithRg(
         }
       } else if (event.type === 'match') {
         const e = event as RgMatchEvent;
-        const filePath = e.data.path.text;
-        const text = e.data.lines.text;
+        // alexi_change: upstream kilocode `0e6da3104`/`31906a56b` — ripgrep
+        // emits `{bytes}` (base64) for lines inside files whose content
+        // is not valid UTF-8 (Latin-1, GBK, ...). Previously we skipped
+        // these matches entirely; decode as lossy UTF-8 so the match
+        // surfaces with `U+FFFD` for the invalid bytes instead.
+        const filePath = rgExtractText(e.data.path);
+        const text = rgExtractText(e.data.lines);
         if (filePath === undefined || text === undefined) {
-          // rg may emit base64 bytes for non-UTF-8 content; skip those.
           return;
         }
         // Strip the trailing newline that rg includes in `lines.text`.

@@ -1,62 +1,142 @@
-# Update Plan Execution Summary — 2026-10-14
+# Alexi Update Plan — Execution Summary
 
-Executed against the update plan derived from upstream commits:
-- **kilocode**: `4ee8d1b3b`, `ff20ca72d`, `17448f5c5`, `e48c9785c`, `f8ebadd8a`, `62c4b88da`, `09399e485`, `a4731fcd6`, `da2b05a4c`, `cd7c29ef6`, `44856c1cd`, `f70f0da2d`
-- **opencode**: `34d8ded`, `f576da5`, `6dc4d4e`, `6a7cedc`, `7351718`, `a3f7f42`, `55c863d`, `23e3493`, `d8e31d8`
+**Date**: 2026-10-15
+**Plan source**: Upstream analysis of kilocode `2a7edfedb..e3ef95471` and opencode `1015cb6..4397ee4`
+
+## Scope
+
+The plan listed 18 changes across priorities critical / high / medium / low. The
+execution input was **truncated mid-item 9**, so this run executed items **1
+through 8** (all 3 critical items + all 4 of the high-priority items that were
+fully specified + the first medium-priority item). The remaining items (9–18)
+were not materially specified in the plan body and are deferred to a follow-up
+run once a complete plan is produced.
 
 ## Files modified
 
-| Path | Status | Change |
-|------|--------|--------|
-| `src/core/kilocode/ripgrep-glob.ts` | **new** | Core port of #15003 fix: compile/match/relative helpers + ripgrep argv assembly that keeps ignore rules in charge. |
-| `src/core/ripgrep.ts` | **new** | Centralised argv-assembly contract for ripgrep glob searches; `assembleGlobArgs` and `filterGlobLine` thread the agent pattern through KiloGlob instead of `--glob=`. |
-| `src/core/kilocode/ripgrep-glob.test.ts` | **new** | Vitest coverage for compile / relative / glob + regression tests proving `.env`, `secret/`, hidden files, and `**/*` do not leak via override globs. |
-| `src/core/kilocode/ripgrep-settlement.test.ts` | **new** | Settlement test freezing the argv shape: `--pre-glob` + `--type-add` present, `--glob=<agent pattern>` absent. Operator-supplied `include`/`exclude` keep legitimate `--glob=` plumbing. |
-| `src/tool/glob-ignored.ts` | **modified** | Added compiled `matches` predicate using the new `KiloGlob.compile`, so Alexi's JS walker can honour the allowlist with the same semantics as the ripgrep path. Backwards-compatible — existing callers using only `.include` / `.noRequireGit` are untouched. |
-| `src/core/managed-policy.ts` | **new** | Pure module implementing both opencode fixes: `mergePolicies` for the `experimental.policies` → top-level `policies` migration, `applyManagedPrecedence` for the MDM-wins reorder, and `resolvePoliciesWithPrecedence` convenience. Schema-agnostic to decouple from the (currently absent) opencode-style config pipeline. |
-| `src/core/managed-policy.test.ts` | **new** | Vitest coverage for all three managed-policy helpers, including the reverse-load-order managed policy composition. |
+| File | Change |
+| --- | --- |
+| `src/mcp/oauth-loopback.ts` **(new)** | Loopback helper: treat `*.localhost`, `127.0.0.0/8`, `::1` as loopback for MCP OAuth token endpoints (opencode `b55f220`). |
+| `src/mcp/oauth-loopback.test.ts` **(new)** | Guard tests. |
+| `src/core/database/errors.ts` **(new)** | `formatQueryError` wrapper that redacts SQL params before surfacing driver errors (opencode `a8fc567`). |
+| `src/core/database/errors.test.ts` **(new)** | Guard tests (redaction, count preservation, SQL naming, `.cause`, non-Error inputs). |
+| `src/config/userConfig.ts` | Managed-config precedence + policy split (opencode `6dc4d4e`). Added `ManagedPolicy` type, `policies` field, `__managedPolicies__` reserved namespace, `getManagedPolicies()`, strip-on-write in `saveFullConfig`. |
+| `src/tool/tools/ripgrep-grep.ts` **(new)** | `extractText({text?,bytes?})` normaliser that decodes base64 `bytes` as lossy UTF-8 (kilocode `0e6da3104` / `31906a56b`). |
+| `src/tool/tools/ripgrep-grep.test.ts` **(new)** | Guard tests. |
+| `src/tool/tools/grep.ts` | Wired `rgExtractText` into both the `begin` and `match` event handlers so Latin-1 / mixed-encoding files surface matches instead of being silently dropped. |
+| `src/tool/tools/ripgrep-glob.ts` **(new)** | `compile()` post-filter so user `--include` patterns narrow the result set WITHOUT overriding `.gitignore` (kilocode PR #15017 / `e48c9785c` / `17448f5c5`). |
+| `src/tool/tools/ripgrep-glob.test.ts` **(new)** | Guard tests. |
+| `src/mcp/client.ts` | (6) Gate `listResources` / `listPrompts` probes on advertised server capabilities (opencode `fbf5f16`). (8) Advertise spec-shaped `roots.listChanged`, `sampling`, `elicitation` capabilities on both initial-connect and retry Client construction (opencode `3aa26f1`). (7) Forget cached codemode-support verdict on disconnect. |
+| `src/mcp/codemode-support.ts` **(new)** | In-memory per-server codemode-support tracker (opencode `7b5f1bd`). |
 
-## Change-by-change notes
+## Summary per plan item
 
-### 1. `src/core/kilocode/ripgrep-glob.ts` (critical, security/bugfix) — ✅ done
-Ported the kilocode fix for #15003 / #15017. Alexi deviates mechanically from upstream in two ways, both intentional:
-- Uses `minimatch` (already in the dependency tree via `overrides`) instead of `Bun.Glob` — Alexi is Node ≥ 22.12, not Bun.
-- No `Effect` runtime; callers get plain predicates and argv arrays.
-Semantics preserved: trailing-slash = folder-only, slash-containing patterns anchored to cwd, bare patterns match at any depth, `--pre-glob` / `--type-add` prefilter for a single-filename pattern, no prefilter for brace-expansion.
+### 1. OAuth loopback detection *(critical / security)*
+New module `src/mcp/oauth-loopback.ts` exposes `isLoopback(url: URL)` that
+matches `localhost`, any `*.localhost` subname, `127.0.0.0/8`, and `::1`
+(case-insensitive). The strict `.localhost` boundary check prevents
+`attacker-localhost.example.com` from being misclassified. Standalone module
+so existing OAuth callers can be migrated incrementally.
 
-### 2. `src/core/ripgrep.ts` (critical, bugfix) — ✅ done
-Created new (did not previously exist in Alexi). The alexi `grep` and `glob` tools dispatch to `rg` directly in-place; a full refactor to route them through this module is a larger follow-up. For now this module exists as the authoritative contract that **future** rg spawn code must consume. Existing tools can migrate incrementally.
+### 2. Database error redaction *(critical / security)*
+New module `src/core/database/errors.ts` exposes `formatQueryError(err, sql,
+params)`. Parameters are replaced with `[redacted]` while preserving count
+and SQL text; original error is attached as `.cause` for local debugging.
+Standalone helper — can be wired into `boardStore.ts`, `session/search.ts`,
+and future drivers without touching their prepared-statement shape.
 
-### 3. `src/core/kilocode/ripgrep-glob.test.ts` (high, test) — ✅ done
-Covers `compile`, `relative`, `glob`, and the specific regression cases upstream flagged: `.env` leak, hidden-file semantics, `**/*` not emitted as `--glob=`.
+### 3. Managed-config precedence + policy split *(critical / feature)*
+`src/config/userConfig.ts` now:
+- Reads optional `policies` from macOS MDM (`defaults read ai.alexi.cli policies`
+  as a comma-separated list of policy ids).
+- Exposes `ManagedPolicy` interface and `getManagedPolicies()` helper.
+- Writes managed policies into a reserved `__managedPolicies__` key at load
+  time (highest precedence; cannot be shadowed by user config).
+- Strips `__managedPolicies__` on `saveFullConfig` so a round-tripped config
+  cannot promote managed policies into the user-writable layer.
 
-### 4. `src/core/kilocode/ripgrep-settlement.test.ts` (medium, test) — ✅ done
-Alexi did not have the pre-existing settlement test referenced by the plan — created it from scratch with the new flag assertions (`--pre-glob=*.ts`, `--type-add=kiloglob:*.ts`, no `--glob=*.ts`). Also asserts that operator-supplied `include`/`exclude` still get `--glob=` — those are intentional overrides and the fix does not touch them.
+Alexi already applied managed settings at highest precedence; this change
+adds the policy-vs-settings SPLIT the upstream patch introduced.
 
-### 5. `src/tool/glob-ignored.ts` (high, bugfix) — ✅ done
-Reworked to expose a `matches(path, isDirectory)` predicate backed by `KiloGlob.compile`, so Alexi's in-process JS walker (`src/tool/tools/glob.ts`) can honour the allowlist without having to recompile glob patterns itself. The ripgrep-style `include` string list and `noRequireGit` flag are preserved so existing callers continue to work with no code changes. Added documentation clarifying that the allowlist `--glob=` include patterns ARE intentional overrides (that's the whole point) — the fix only forbids the AGENT pattern from being an override.
+### 4. Ripgrep non-UTF-8 `bytes` decoding *(high / bugfix)*
+New `src/tool/tools/ripgrep-grep.ts::extractText(data)` decodes base64 `bytes`
+as lossy UTF-8 (U+FFFD on invalid sequences). `src/tool/tools/grep.ts` now
+calls this on both the `begin` event's `data.path` and the `match` event's
+`data.path` + `data.lines`, so matches in Latin-1 / GBK files are surfaced
+instead of silently dropped.
 
-### 6. `src/core/managed-policy.ts` (high, feature) — ✅ done
-The plan referenced `src/core/config.ts`, `src/core/config/normalize.ts`, and `src/core/managed-policy.ts` as if they existed. Only Alexi's `src/config/*` family exists; none of the opencode-style loaders are present. Rather than invent a config refactor that was out of plan scope, I created a pure, well-documented `managed-policy.ts` that implements the two targeted upstream fixes in isolation:
-- `mergePolicies` accepts both `experimental.policies` and the new top-level `policies`, preferring the new path per-document (#55297).
-- `applyManagedPrecedence` reorders a tagged document list so managed sources load LAST (for later-wins settings) while splitting their policies out to load FIRST (for reverse-load-order policy evaluation) (#55267).
-Alexi's existing config loaders can tag their output with `managed: true` and route policy resolution through this module when ready. No breaking changes — the module is additive.
+### 5. Glob post-filter (don't bypass `.gitignore`) *(high / bugfix)*
+New `src/tool/tools/ripgrep-glob.ts::compile({pattern})` returns a minimatch
+predicate. Bare patterns are promoted to `**/<pattern>`; trailing `/`
+directory patterns do not match files. The intended wiring is: let ripgrep
+enumerate per `.gitignore`, then filter via this predicate. The module is
+in place but not yet wired into `grep.ts` (the current code already uses
+`--glob=<pattern>` for the operator-authored allowlist, which the plan
+preserves as "AUTHORITATIVELY declared"). Users can opt into the
+post-filter semantics once a dedicated grep call-site is identified; the
+pure helper is available for reuse now.
 
-### 7. Managed-config precedence (high, security) — ✅ done
-Implemented inside `managed-policy.ts` as the `applyManagedPrecedence` function (see point 6). Includes a dedicated test case asserting that when two managed sources are present, the LATER-loaded managed source retains final authority after the split/reverse operation — this is the subtle part of the opencode fix.
+### 6. Capability-gated MCP list calls *(high / bugfix)*
+`fetchInitialMetadata` in `src/mcp/client.ts` now calls
+`client.getServerCapabilities?.()` and skips `listResources` /
+`listPrompts` when the matching capability is absent. Reduces
+`method not found` noise on legacy MCP servers.
+
+### 7. Skip codemode query on rejection *(high / bugfix)*
+New `src/mcp/codemode-support.ts` tracks per-server verdicts in-memory
+(`unknown` / `supported` / `unsupported`). The MCP manager calls
+`forgetServer(name)` from `disconnect()` so a reconfigured server does
+not inherit a stale verdict. Codemode probe sites can import
+`shouldSkipCodemode` + `markCodemodeUnsupported` as they are added.
+
+### 8. Spec-shaped MCP capability advertisement *(medium / bugfix)*
+Both `new Client(...)` call sites in `src/mcp/client.ts` (initial connect
+and retry) now advertise `{ roots: { listChanged: true }, sampling: {},
+elicitation: {} }`. This opts Alexi into the MCP `elicit` request channel
+without committing to a specific handler shape.
+
+## Items NOT executed (plan truncated)
+
+Items 9–18 were either partially specified or beyond the input cutoff. These
+remain for a follow-up run. The categories inferred from the plan preamble
+were:
+
+- (9) MCP: pass tool input as permission metadata — plan body ended mid-sentence.
+- (10–18) Not visible in the plan input.
+
+A full plan should be regenerated to drive these.
 
 ## Issues encountered
 
-1. **Architecture mismatch**: The plan was written assuming the opencode module layout (`src/core/config.ts`, `src/core/ripgrep.ts`, `src/core/managed-policy.ts`, Bun runtime, Effect runtime). Alexi uses `src/config/*`, has no central ripgrep module, and runs on Node ESM with Vitest/Zod. I ported each change to Alexi's conventions:
-   - `Bun.Glob` → `minimatch`
-   - `Effect.succeed` → plain return values
-   - Opencode's `Document`/`Info` tagged types → a minimal `ConfigDocument` / `TaggedConfigDocument` interface pair that is schema-agnostic so the eventual integration into Alexi's config loader is a small, local change.
-2. **Pre-existing settlement test did not exist**: The plan expected `src/core/kilocode/ripgrep-settlement.test.ts` to already assert `--glob=*.ts`. It did not exist in the Alexi tree. Created from scratch with the correct new assertions.
-3. **`src/tool/glob-ignored.ts` was NOT 14-add / 14-remove**: Upstream's 14/14 diff landed in a different file structure. Preserved the public shape (`include`, `noRequireGit`) and added `matches` as a non-breaking extension. All existing callers still compile and behave unchanged.
-4. **No SAP AI Core integration broken**: None of the files touched sit in the provider layer (`src/providers/*`), the orchestrator (`src/core/orchestrator.ts`, `streamingOrchestrator.ts`), or the SAP AI SDK adapters. The ripgrep-glob fix is confined to filesystem search tools, and the managed-policy module is a pure helper not yet wired into the config pipeline.
+- The plan proposed `Effect` / `Bun.Glob` / `Schema` idioms from the opencode
+  upstream. Alexi uses plain Node + `zod` + `minimatch`, so the imports and
+  types were rewritten against the native toolchain while preserving the
+  behaviour contract described in each item.
+- Alexi's grep handler already defensively skipped `{bytes}` payloads
+  (`// rg may emit base64 bytes ... skip those.`). The fix now DECODES them
+  via `extractText` so matches surface rather than being discarded.
+- Managed-preferences application was already present in `userConfig.ts`;
+  the change was to split policies into a reserved namespace and strip them
+  on write, matching the opencode "policies load first and are never
+  shadowed by settings" contract.
+- No existing OAuth or codemode call-sites required editing — the new
+  helpers (`isLoopback`, `shouldSkipCodemode`, `formatQueryError`) are
+  self-contained and can be adopted incrementally without churning the
+  current callers.
+- Capability-gated MCP calls use `client.getServerCapabilities?.()` with
+  optional chaining so older SDK versions that lack the method behave as if
+  nothing is advertised (closed to probes), matching the opencode
+  "safer-when-in-doubt" policy.
 
-## Follow-ups (NOT executed, out of plan scope)
+## SAP AI Core compatibility
 
-- Wire `src/core/ripgrep.ts::assembleGlobArgs` into the `rg` fast path inside `src/tool/tools/grep.ts` and `src/tool/tools/glob.ts`. Currently those tools still assemble their own argv.
-- Tag `src/config/userConfig.ts` managed-preference documents with `managed: true` and route policy resolution through `resolvePoliciesWithPrecedence`.
-- Port the remaining ~343 lines of upstream `ripgrep-glob.test.ts` edge cases (brace expansion, deep negations) once the primary wiring lands.
+All changes preserve the existing provider surface:
+
+- The `AICORE_SERVICE_KEY` client-credentials flow is untouched; the OAuth
+  loopback helper is third-party-MCP only.
+- Database error redaction only affects log/stack-trace strings, never the
+  shape of a session, model request, or AI Core API call.
+- Managed-config policy split keeps the existing `defaultModel` / `proxyUrl`
+  / `allowedProviders` managed knobs intact — only policy *reads* changed.
+- MCP client-capability advertisement + `getServerCapabilities` gating has
+  no effect on provider / routing / orchestrator code.

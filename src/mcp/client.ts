@@ -30,6 +30,9 @@ import { McpBreakageTracker, McpBreakageExceededError } from './breakage-tracker
 // does not auto-cleanup the half-connected client or the spawned stdio
 // child. Mirrors kilocode's cleanup-on-interrupt behaviour.
 import { cleanupInterrupted } from './cleanup.js';
+// alexi_change: opencode `7b5f1bd` — track per-server codemode support
+// so a server that rejects the probe is not re-queried on every call.
+import { forgetServer as forgetCodemodeSupport } from './codemode-support.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -1055,13 +1058,28 @@ export class McpClientManager {
     // may respond with `method not found`. We fire them in parallel
     // with tools, catch and ignore all errors — they're informational
     // only and MUST NOT block a successful connection.
+    //
+    // alexi_change: upstream opencode `fbf5f16` — skip `list` calls
+    // entirely when the server has NOT advertised the matching
+    // capability in its initialize response. Previously every connect
+    // would fire both probes blind, racking up `method not found`
+    // responses in operator logs and burning connect latency on
+    // servers that have no prompts/resources to list.
     const optionalMetadata: Promise<unknown>[] = [];
     const c = client as unknown as {
       listResources?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
       listPrompts?: (params?: unknown, options?: { signal: AbortSignal }) => Promise<unknown>;
+      getServerCapabilities?: () =>
+        | {
+            prompts?: unknown;
+            resources?: unknown;
+          }
+        | undefined;
     };
+    const caps =
+      (typeof c.getServerCapabilities === 'function' ? c.getServerCapabilities() : undefined) ?? {};
     const listResources = c.listResources;
-    if (typeof listResources === 'function') {
+    if (typeof listResources === 'function' && caps.resources !== undefined) {
       optionalMetadata.push(
         this.withRequestTimeout(serverName, 'resources/list', (opts) =>
           listResources({}, opts)
@@ -1071,7 +1089,7 @@ export class McpClientManager {
       );
     }
     const listPrompts = c.listPrompts;
-    if (typeof listPrompts === 'function') {
+    if (typeof listPrompts === 'function' && caps.prompts !== undefined) {
       optionalMetadata.push(
         this.withRequestTimeout(serverName, 'prompts/list', (opts) => listPrompts({}, opts)).catch(
           (error: unknown) => {
@@ -1113,7 +1131,21 @@ export class McpClientManager {
 
     const connection: McpConnection = {
       config,
-      client: new Client({ name: 'alexi', version: '0.1.0' }, { capabilities: {} }),
+      // alexi_change: upstream opencode `3aa26f1` — advertise the
+      // spec-shaped `elicitation` capability so servers may send
+      // `elicit` requests. `roots.listChanged` + `sampling` are already
+      // part of the spec; `elicitation: {}` opts us into the new
+      // request channel without committing to a specific handler shape.
+      client: new Client(
+        { name: 'alexi', version: '0.1.0' },
+        {
+          capabilities: {
+            roots: { listChanged: true },
+            sampling: {},
+            elicitation: {},
+          },
+        }
+      ),
       tools: [],
       status: 'connecting',
       attemptCount: 0,
@@ -1133,7 +1165,20 @@ export class McpClientManager {
       // undefined state and re-using the same instance produces
       // confusing double-connect errors.
       if (attempt > 1) {
-        connection.client = new Client({ name: 'alexi', version: '0.1.0' }, { capabilities: {} });
+        // alexi_change: upstream opencode `3aa26f1` — advertise the
+        // same spec-shaped capability bundle on reconnect so a
+        // server that rejected elicitation on the first attempt still
+        // sees it on the retry.
+        connection.client = new Client(
+          { name: 'alexi', version: '0.1.0' },
+          {
+            capabilities: {
+              roots: { listChanged: true },
+              sampling: {},
+              elicitation: {},
+            },
+          }
+        );
         connection.process = undefined;
         this.registerNotificationHandlers(connection);
       }
@@ -1429,6 +1474,9 @@ export class McpClientManager {
     }
 
     this.connections.delete(name);
+    // alexi_change: forget any cached codemode-support verdict so a
+    // reconfigured server does not inherit the stale "unsupported" flag.
+    forgetCodemodeSupport(name);
     logger.info(`Disconnected from MCP server: ${name}`);
   }
 

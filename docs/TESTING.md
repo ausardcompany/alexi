@@ -114,8 +114,8 @@ npm test -- tests/tool/tools/write.test.ts
 # Run tests in a directory
 npm test -- tests/tool/tools/
 
-# Run tests matching a pattern
-npm test -- --grep "write tool"
+# Run tests matching a pattern (Vitest uses -t / --testNamePattern, NOT --grep)
+npm test -- -t "write tool"
 
 # Run hook tests
 npm test -- tests/hooks/
@@ -11600,6 +11600,43 @@ it('ignores bare words in prose', async () => {
 2. **Negative cases are first-class.** The whole point of the deterministic matcher is suppressing false positives — pin at least one "bare word in prose" case and one "non-existent path" case alongside the happy path.
 3. **Windows drive letters.** Cover `C:\path\file.ts:12:3` even on Linux hosts to pin the drive-letter branch; `fs.access` on an absolute Windows path on Linux fails cleanly, so the test asserts the match is dropped.
 
+## Testing `formatQueryError` parameter redaction
+
+Added in the 2026-10-15 upstream sync. The helper (`src/core/database/errors.ts`) is a pure function, so the test suite is deliberately simple — no mocks, no fakes, no temp directories. The whole point is to pin the redaction contract so a future refactor cannot silently reintroduce the leak.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { formatQueryError } from '../../src/core/database/errors.js';
+
+describe('formatQueryError', () => {
+  it('redacts every parameter value', () => {
+    const original = new Error('UNIQUE constraint failed: sessions.id');
+    const err = formatQueryError(original, 'INSERT INTO sessions VALUES (?, ?)', [
+      'sk-live-secret-token',
+      { prompt: 'user private data' },
+    ]);
+    expect(err.message).not.toContain('sk-live-secret-token');
+    expect(err.message).not.toContain('user private data');
+    expect(err.message).toContain('[redacted]');
+  });
+
+  it('preserves the parameter COUNT so shape bugs are visible', () => {
+    const err = formatQueryError(new Error('x'), 'SELECT ?', ['a', 'b', 'c']);
+    const match = err.message.match(/\[(.*)\]/);
+    const list = JSON.parse(`[${match![1]}]`);
+    expect(list).toHaveLength(3);
+  });
+
+  it('attaches the original error as cause (for local debugging)', () => {
+    const original = new Error('driver boom');
+    const err = formatQueryError(original, 'SELECT 1', []);
+    expect(err.cause).toBe(original);
+    expect(err.name).toBe('QueryError');
+  });
+
+  it('tolerates non-Error values thrown by native drivers', () => {
+    const err = formatQueryError('raw string', 'SELECT 1', []);
+    expect(err.message).toContain('raw string');
 ## Testing ripgrep argv settlement for agent-supplied globs
 
 The settlement suite at `src/core/kilocode/ripgrep-settlement.test.ts` freezes the externally observable argv shape produced by `assembleGlobArgs` (exported from `src/core/ripgrep.ts`) so a future refactor cannot silently reintroduce the `--glob=<pattern>` override bug that previously made agent-supplied patterns surface `.gitignore`-ignored paths. The regression story is maintained alongside `src/core/kilocode/ripgrep-glob.test.ts`; this file is the SETTLEMENT snapshot (the pinned-forever argv shape), the sibling test is the BEHAVIOURAL regression driver.
@@ -11635,6 +11672,91 @@ describe('ripgrep settlement: argv shape', () => {
 });
 ```
 
+### Patterns worth internalising
+
+1. **Negative assertions on the raw payload.** The suite's load-bearing assertion is `expect(err.message).not.toContain(...)` on each raw param — a positive assertion on `[redacted]` alone would still pass if a bug concatenated BOTH the raw and the redacted form. Pin both the negative and the positive side.
+2. **Count preservation is first-class.** Operators rely on the parameter count to spot shape-mismatch bugs; a passing redaction that silently collapses `['a','b','c']` into `[]` would mask a real driver-call defect. Parse the array back out of the message and assert `.length`.
+3. **`cause` is for local debug only.** Pin `err.cause` to the original error AND assert that the raw param strings do NOT appear in `err.message`. The two together prove the forward-only redaction contract.
+4. **Non-Error inputs are a real case.** Native drivers (`better-sqlite3`, `node:sqlite`) can throw raw strings or thin value objects. Add at least one `formatQueryError('raw string', ...)` fixture so the `err instanceof Error ? err.message : String(err)` branch stays covered.
+
+## Testing MCP OAuth loopback classification
+
+Added in the 2026-10-15 upstream sync. `isLoopback` (`src/mcp/oauth-loopback.ts`) is a pure URL classifier; the test suite is a table of `(url, expected)` pairs with no mocks required.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { isLoopback } from '../../src/mcp/oauth-loopback.js';
+
+describe('isLoopback', () => {
+  it('returns true for `localhost` (case-insensitive)', () => {
+    expect(isLoopback(new URL('http://localhost/token'))).toBe(true);
+    expect(isLoopback(new URL('http://LOCALHOST:8080/token'))).toBe(true);
+  });
+
+  it('returns true for `*.localhost` subdomains', () => {
+    expect(isLoopback(new URL('http://auth.service.localhost/token'))).toBe(true);
+    expect(isLoopback(new URL('http://my-dev.localhost:3000/'))).toBe(true);
+  });
+
+  it('returns true for IPv4 loopback 127.0.0.0/8', () => {
+    expect(isLoopback(new URL('http://127.0.0.1/token'))).toBe(true);
+    expect(isLoopback(new URL('http://127.1.2.3/token'))).toBe(true);
+  });
+
+  it('returns true for IPv6 loopback ::1', () => {
+    expect(isLoopback(new URL('http://[::1]/token'))).toBe(true);
+  });
+
+  it('does NOT match `localhost` as a suffix of unrelated hosts', () => {
+    expect(isLoopback(new URL('https://notlocalhost.example.com/'))).toBe(false);
+    expect(isLoopback(new URL('https://attacker-localhost.example.com/'))).toBe(false);
+  });
+});
+```
+
+### Patterns worth internalising
+
+1. **The attack-surface case is NOT optional.** `attacker-localhost.example.com` and `notlocalhost.example.com` must be covered explicitly — the whole point of the `.localhost` boundary check is to defeat suffix-based spoofing, and a regression that drops the leading dot would silently classify them as loopback. This is the test that stops a future "simplify" refactor from reintroducing the vulnerability.
+2. **Case folding is in-scope.** `LOCALHOST`, `Localhost`, mixed-case subname variants all land in the same bucket; add at least one upper-case fixture.
+3. **IPv4 range coverage.** `127.1.2.3` is in-range but is NOT `127.0.0.1`; pin it so a bug that hard-coded only `127.0.0.1` is caught.
+4. **IPv6 bracket form.** `new URL('http://[::1]/token').hostname` is `::1` (brackets stripped). The classifier must handle that form — pin it to prevent a future bug that compares against `[::1]` literally.
+
+## Testing the MCP codemode support tracker
+
+Added in the 2026-10-15 upstream sync. The tracker (`src/mcp/codemode-support.ts`) is an in-memory state machine; `reset()` is exposed for test isolation.
+
+```typescript
+import { beforeEach, describe, it, expect } from 'vitest';
+import {
+  markCodemodeUnsupported,
+  markCodemodeSupported,
+  shouldSkipCodemode,
+  forgetServer,
+  reset,
+} from '../../src/mcp/codemode-support.js';
+
+beforeEach(() => reset());
+
+describe('codemode-support tracker', () => {
+  it('skips re-probing once a server rejected codemode', () => {
+    markCodemodeUnsupported('server-a');
+    expect(shouldSkipCodemode('server-a')).toBe(true);
+  });
+
+  it('does not skip when the server supports codemode', () => {
+    markCodemodeSupported('server-a');
+    expect(shouldSkipCodemode('server-a')).toBe(false);
+  });
+
+  it('forgets the verdict on disconnect', () => {
+    markCodemodeUnsupported('server-a');
+    forgetServer('server-a');
+    expect(shouldSkipCodemode('server-a')).toBe(false);
+  });
+
+  it('isolates verdicts per server', () => {
+    markCodemodeUnsupported('server-a');
+    expect(shouldSkipCodemode('server-b')).toBe(false);
 Three independent invariants, one per case:
 
 1. **Agent patterns are prefiltered as a ripgrep file type, NOT emitted as an override.** The `--pre-glob` + `--type-add=kiloglob:<pattern>` pair makes ripgrep validate the pattern against its ignore rules first and then prefilter candidates by the glob — the critical property is the negative assertion that `--glob=<agent-pattern>` is NOT present. A `--glob=` entry would make the pattern a ripgrep override and surface `.gitignore`-ignored paths; the whole point of the kilocode-port glob tool is that an agent asking for `*.ts` must not accidentally pull `.gitignore`-ignored build artefacts (`dist/*.ts`, generated `.d.ts`).
@@ -11758,6 +11880,96 @@ describe('resolvePoliciesWithPrecedence — one-shot composition', () => {
 });
 ```
 
+### Patterns worth internalising
+
+1. **`reset()` in `beforeEach` is non-negotiable.** The tracker is a module-level `Map`, so a case that marks `server-a` leaks into the next test unless `reset()` is called. Skipping it produces order-dependent failures that are painful to diagnose.
+2. **Pin the "forget on disconnect" contract.** `forgetServer()` is the integration seam with `McpClientManager.disconnect()`; a regression that drops the call would make a reconfigured server inherit the stale "unsupported" verdict until the next Alexi restart. Keep an explicit test for it.
+3. **Per-server isolation is a real case.** The default `'unknown'` state must coexist with `'unsupported'` for a different server — pin at least one cross-server fixture.
+
+## Testing ripgrep JSON `{bytes}` lossy decoding
+
+Added in the 2026-10-15 upstream sync. `extractText` (`src/tool/tools/ripgrep-grep.ts`) is a pure helper over the two shapes ripgrep emits.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { extractText } from '../../src/tool/tools/ripgrep-grep.js';
+
+describe('extractText', () => {
+  it('passes `text` through verbatim', () => {
+    expect(extractText({ text: 'hello world' })).toBe('hello world');
+  });
+
+  it('decodes `bytes` (base64) as lossy UTF-8', () => {
+    const base64 = Buffer.from('hello world', 'utf-8').toString('base64');
+    expect(extractText({ bytes: base64 })).toBe('hello world');
+  });
+
+  it('replaces invalid UTF-8 with U+FFFD instead of dropping the match', () => {
+    // 0xFF is not valid UTF-8 — Node's default lossy decoder replaces it.
+    const base64 = Buffer.from([0xff, 0x41, 0x42]).toString('base64');
+    const out = extractText({ bytes: base64 });
+    expect(out).toBeDefined();
+    expect(out).toContain('AB');
+    expect(out).toContain('\uFFFD');
+  });
+
+  it('returns undefined for shapes it does not understand', () => {
+    expect(extractText(undefined)).toBeUndefined();
+    expect(extractText(null)).toBeUndefined();
+    expect(extractText({})).toBeUndefined();
+  });
+});
+```
+
+### Patterns worth internalising
+
+1. **The lossy-decode fixture is the point.** Pin a case with a known-invalid byte (`0xFF`) so a future refactor that swaps the decoder for a strict one (which would THROW) is caught at the test boundary, not at a user's `grep` call against a Latin-1 file.
+2. **`undefined` / `null` tolerance.** Ripgrep SDK bindings sometimes report `data.lines` as `undefined` on certain event types; the helper's `data == null` guard means the caller never has to null-check. Pin it.
+3. **Positive AND negative shape cases.** `{ text: ... }` passes through, `{ bytes: ... }` decodes, `{}` returns `undefined`. All three must be pinned so a bug that unifies the two valid paths incorrectly (returning `undefined` for `{text}`) is caught.
+
+## Testing the ripgrep glob post-filter
+
+Added in the 2026-10-15 upstream sync. `compile` (`src/tool/tools/ripgrep-glob.ts`) is a pure factory for a predicate; the test suite enumerates the four pattern-shape cases.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { compile } from '../../src/tool/tools/ripgrep-glob.js';
+
+describe('ripgrep glob compile', () => {
+  it('blank pattern matches everything', () => {
+    const f = compile({ pattern: '' });
+    expect(f.match('src/foo.ts')).toBe(true);
+    expect(f.match('node_modules/pkg/index.js')).toBe(true);
+  });
+
+  it('directory-only pattern never matches a file', () => {
+    const f = compile({ pattern: 'build/' });
+    expect(f.match('build/output.js')).toBe(false);
+    expect(f.match('src/foo.ts')).toBe(false);
+  });
+
+  it('pattern without slash is matched at any depth', () => {
+    const f = compile({ pattern: '*.ts' });
+    expect(f.match('foo.ts')).toBe(true);
+    expect(f.match('src/foo.ts')).toBe(true);
+    expect(f.match('a/b/c/foo.ts')).toBe(true);
+    expect(f.match('foo.js')).toBe(false);
+  });
+
+  it('workspace-relative pattern anchors to the given path', () => {
+    const f = compile({ pattern: 'src/**/*.ts' });
+    expect(f.match('src/foo.ts')).toBe(true);
+    expect(f.match('src/sub/bar.ts')).toBe(true);
+    expect(f.match('other/foo.ts')).toBe(false);
+  });
+});
+```
+
+### Patterns worth internalising
+
+1. **Pin the directory-only case explicitly.** `build/` returning `false` for a file looks counter-intuitive but is deliberate — directory restriction is delegated to the ripgrep walker. Dropping the test means a future "fix" that makes `build/` match any file under `build/` would silently reintroduce the `node_modules` walkthrough bug this port was designed to prevent.
+2. **Depth-insensitive bare patterns.** The `*.ts` → `**/*.ts` promotion is the whole point of this helper; pin it with at least three depths so a regression that drops the auto-promotion is caught.
+3. **Workspace-relative anchoring.** `src/**/*.ts` must NOT match `other/src/foo.ts`. Pin a negative case alongside the positive one so a future minimatch option tweak (e.g. accidentally enabling `matchBase`) is caught.
 ### Patterns worth internalising (managed-settings precedence)
 
 1. **Pin BOTH shapes of the policy source.** The two-shape back-compat (`info.policies` vs `info.experimental?.policies`) is the migration contract. A regression that reads only the new shape is silently broken for every deployment still shipping the legacy field. One case per shape, every time.

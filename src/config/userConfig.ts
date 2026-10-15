@@ -21,11 +21,36 @@ export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 const MANAGED_DOMAIN = 'ai.alexi.cli';
 
+/**
+ * Shape of a single managed-policy entry.
+ *
+ * Policies are an MDM-authored, non-user-overridable statement about
+ * what Alexi is allowed to do (e.g. "block this provider",
+ * "require approval for shell commands"). They are split out from
+ * `ManagedConfig` because policies evaluate in reverse load order and
+ * MUST load BEFORE settings — ports upstream opencode `6dc4d4e`.
+ *
+ * A policy is purely declarative; the enforcement site is responsible
+ * for honoring it.
+ */
+export interface ManagedPolicy {
+  /** Opaque policy identifier (e.g. `require-shell-approval`). */
+  id: string;
+  /** Free-form reason surfaced to operators when the policy fires. */
+  reason?: string;
+}
+
 interface ManagedConfig {
   disableTelemetry?: boolean;
   allowedProviders?: string[];
   defaultModel?: string;
   proxyUrl?: string;
+  /**
+   * Managed policies loaded from the system MDM profile. Kept here so
+   * every caller sees the same shape as regular managed settings but
+   * split off at merge time (see {@link loadFullConfig}).
+   */
+  policies?: ManagedPolicy[];
 }
 
 function readManagedKey(key: string): string | null {
@@ -68,6 +93,22 @@ export function readManagedPreferences(): ManagedConfig | null {
       config.proxyUrl = proxyUrl;
     }
 
+    // alexi_change: ports opencode `6dc4d4e`. Managed policies are
+    // authored by the MDM operator and MUST evaluate before any user
+    // setting can override them. Read as a comma-separated list of
+    // policy ids; a `reason` cannot be expressed via `defaults read`
+    // scalars, so it is left blank — operators who want richer policy
+    // metadata should ship a JSON policies file at the system path
+    // (future work).
+    const policyIds = readManagedKey('policies');
+    if (policyIds !== null && policyIds.length > 0) {
+      config.policies = policyIds
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .map((id) => ({ id }));
+    }
+
     return Object.keys(config).length > 0 ? config : null;
   } catch {
     return null;
@@ -88,7 +129,17 @@ export function ensureConfigDir(): void {
 /**
  * Load the full config object from disk.
  * Returns an empty object if the file doesn't exist or is corrupt.
- * Managed preferences (macOS MDM) take precedence over user config.
+ *
+ * Precedence (highest wins at read time):
+ *   1. Managed policies  (`__managedPolicies__` namespace, from MDM)
+ *   2. Managed settings  (macOS MDM scalar prefs)
+ *   3. User config file  (`~/.alexi/config.json`)
+ *
+ * Ports upstream opencode `6dc4d4e` ("managed configuration gets
+ * highest precedence; split policies from settings"). Policies are
+ * loaded first so they evaluate in reverse order (first-written wins)
+ * even if a user config writes to the same key — settings merge last
+ * but policies occupy a reserved namespace that no user file can touch.
  */
 export function loadFullConfig(): Record<string, unknown> {
   ensureConfigDir();
@@ -105,9 +156,18 @@ export function loadFullConfig(): Record<string, unknown> {
     }
   }
 
-  // Apply managed preferences (macOS MDM) - these take precedence
+  // alexi_change start - opencode `6dc4d4e`: managed configuration
+  // gets the highest precedence AND policies are split out so the
+  // MDM-authored policy list cannot be shadowed by user config. The
+  // reserved `__managedPolicies__` key is only ever written by this
+  // function; `saveFullConfig` strips it on write, so persisting a
+  // round-tripped config can never accidentally promote a policy
+  // out of the managed layer.
   const managedPrefs = readManagedPreferences();
   if (managedPrefs) {
+    if (managedPrefs.policies && managedPrefs.policies.length > 0) {
+      config.__managedPolicies__ = managedPrefs.policies;
+    }
     if (managedPrefs.disableTelemetry !== undefined) {
       config.telemetryEnabled = !managedPrefs.disableTelemetry;
     }
@@ -121,16 +181,36 @@ export function loadFullConfig(): Record<string, unknown> {
       config.allowedProviders = managedPrefs.allowedProviders;
     }
   }
+  // alexi_change end
 
   return config;
 }
 
 /**
  * Save the full config object to disk (overwrites entire file).
+ *
+ * alexi_change: strip the managed-policies namespace before write so
+ * a round-tripped config does not accidentally promote managed
+ * policies into the user-writable layer. Managed policies are
+ * authoritative at read time only — they are NOT user state.
  */
 export function saveFullConfig(config: Record<string, unknown>): void {
   ensureConfigDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+  const sanitised = { ...config };
+  if ('__managedPolicies__' in sanitised) {
+    delete sanitised.__managedPolicies__;
+  }
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(sanitised, null, 2), 'utf-8');
+}
+
+/**
+ * Read the currently-active managed policies, or an empty array when
+ * none are configured. Exposed as a helper so callers do not need to
+ * know the reserved namespace name.
+ */
+export function getManagedPolicies(): ManagedPolicy[] {
+  const value = loadFullConfig().__managedPolicies__;
+  return Array.isArray(value) ? (value as ManagedPolicy[]) : [];
 }
 
 // ============ Key-level accessors ============

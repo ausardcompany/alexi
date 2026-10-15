@@ -4,236 +4,96 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
-```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-14
+Generated: 2026-10-15
 Based on upstream commits analyzed:
-- kilocode: 4ee8d1b3b, ff20ca72d, 17448f5c5, e48c9785c, f8ebadd8a, 62c4b88da, 09399e485, a4731fcd6, da2b05a4c, cd7c29ef6, 44856c1cd, f70f0da2d
-- opencode: 34d8ded, f576da5, 6dc4d4e, 6a7cedc, 7351718, a3f7f42, 55c863d, 23e3493, d8e31d8
+- **kilocode**: 2a7edfedb..e3ef95471 (90 commits) - highlights: ripgrep encoding/glob fixes, MCP OAuth hardening, Kilo AI gateway URL, conda telemetry, terminal routing restart ownership
+- **opencode**: 1015cb6..4397ee4 (78 commits) - highlights: MCP capability-gated calls, loopback OAuth tokens, policy consolidation, config normalization, compaction output limit, plugin permission assertions, MCP tool input metadata, codemode skip, DB query param redaction, continue after output limit
 
 ## Summary
-- Total changes planned: 11
-- Critical: 2 | High: 4 | Medium: 3 | Low: 2
+- Total changes planned: 18
+- **Critical**: 3 | **High**: 7 | **Medium**: 6 | **Low**: 2
+
+---
 
 ## Changes
 
-### 1. Fix glob patterns bypassing .gitignore (ripgrep override issue)
-**File**: `src/core/kilocode/ripgrep-glob.ts` (NEW)
+### 1. Treat `*.localhost` as loopback for MCP OAuth token endpoints
+**File**: `src/mcp/oauth-provider.ts` (and/or `src/mcp/auth.ts`)
 **Priority**: critical
-**Type**: security | bugfix
-**Reason**: Upstream kilocode fix #15003/#15017 — passing agent-supplied patterns as `--glob=<pattern>` makes them ripgrep **overrides**, which win over `.gitignore`. This causes `**/*` globs to walk `node_modules`, `.git`, and other ignored directories, exposing secrets (`.env`, `secret/`) and dramatically slowing searches. Must be fixed to preserve ignore semantics.
-
-**New file**:
-```typescript
-// Glob matching that keeps ripgrep's ignore rules in charge (#15003).
-//
-// Passing the agent's pattern as `--glob=<pattern>` makes it a ripgrep override, and overrides win
-// over `.gitignore`. Instead, let ripgrep list the files its ignore rules allow and apply the
-// pattern here with gitignore-style rules.
-
-export interface Input {
-  readonly pattern: string
-  readonly hidden?: boolean
-  readonly include?: readonly string[]
-}
-
-export interface Walk {
-  readonly args: readonly string[]
-  readonly match: (file: string) => boolean
-  readonly keep: (file: string | undefined) => boolean
-}
-
-/** Match a cwd-relative path the way ripgrep matches an override glob. */
-export function compile(pattern: string) {
-  const dir = pattern.endsWith("/")
-  const body = pattern.replace(/\/+$/, "")
-  const text = body.includes("/") ? body.replace(/^\//, "") : `**/${body}`
-  const glob = new Bun.Glob(text)
-  const folders = text.endsWith("/**") ? new Bun.Glob(`${text}/*`) : glob
-  return (path: string, folder: boolean) => {
-    if (folder) return folders.match(path)
-    return !dir && glob.match(path)
-  }
-}
-
-/** Extract last path segment to use as a ripgrep file type for prefiltering. */
-function prefilter(pattern: string): { typeArgs: readonly string[]; preGlob?: string } {
-  const name = pattern.split("/").at(-1) ?? ""
-  if (!name || name.includes("{") || name.includes("}")) return { typeArgs: [] }
-  return {
-    typeArgs: [`--type-add=kiloglob:${name}`, "--type=kiloglob"],
-    preGlob: name,
-  }
-}
-
-export function relative(line: string): string {
-  return line.replace(/^(?:\.[\\/])+/u, "").replace(/^[\\/]+/u, "").replaceAll("\\", "/")
-}
-
-export function glob(input: Input): Walk {
-  const matcher = compile(input.pattern)
-  const pre = prefilter(input.pattern)
-  const args = [
-    ...pre.typeArgs,
-    ...(pre.preGlob ? [`--pre-glob=${pre.preGlob}`] : []),
-  ]
-  const match = (file: string) => matcher(file, false)
-  const keep = (file: string | undefined) => {
-    if (file === undefined) return false
-    return match(file)
-  }
-  return { args, match, keep }
-}
-```
-
-### 2. Update ripgrep.ts to apply pattern after ignore rules
-**File**: `src/core/ripgrep.ts`
-**Priority**: critical
-**Type**: bugfix
-**Reason**: Companion to change #1 — wires the new `KiloGlob` module into the glob invocation path, drops rejected paths after ripgrep applies ignore rules.
-
-**Current code**:
-```typescript
-export interface GlobInput {
-  readonly noRequireGit?: boolean
-  readonly include?: readonly string[]
-  readonly exclude?: readonly string[]
-}
-
-// ... in glob command construction:
-`--glob=${input.pattern}`,
-...(input.include ?? []).map((glob) => `--glob=${glob}`),
-...(input.exclude ?? []).map((glob) => `--glob=!${glob}`),
-
-// parser:
-parse: (line) =>
-  Effect.succeed(
-    line.replace(/^(?:\.[\\/])+/u, "")
-        .replace(/^[\\/]+/u, "")
-        .replaceAll("\\", "/"),
-  ),
-```
-
-**New code**:
-```typescript
-import * as KiloGlob from "./kilocode/ripgrep-glob"
-
-export interface GlobInput {
-  readonly noRequireGit?: boolean
-  readonly include?: readonly string[]
-  readonly exclude?: readonly string[]
-  readonly filter?: (path: string) => boolean  // drop paths before the result limit
-}
-
-// ... in glob command construction:
-...KiloGlob.glob(input).args,  // apply the pattern after ignore rules
-...(input.include ?? []).map((glob) => `--glob=${glob}`),
-...(input.exclude ?? []).map((glob) => `--glob=!${glob}`),
-
-// parser:
-parse: (line) => {
-  const file = KiloGlob.relative(line)
-  const walker = KiloGlob.glob(input)
-  const kept = walker.keep(file) && (!input.filter || input.filter(file))
-  return Effect.succeed(kept ? file : undefined)
-},
-```
-
-### 3. Add test coverage for ripgrep-glob
-**File**: `src/core/kilocode/ripgrep-glob.test.ts` (NEW)
-**Priority**: high
-**Type**: test
-**Reason**: The glob/gitignore interaction is subtle; without tests this regresses easily. Mirror upstream `ripgrep-glob.test.ts` (343 lines) covering `.gitignore`, `.env` exclusion, hidden files, `out/*` + `!out/keep.txt` style negations, and brace expansion edge cases.
-
-**New code** (test skeleton):
-```typescript
-import { describe, expect } from "bun:test"
-import { Effect } from "effect"
-import { Ripgrep } from "../ripgrep"
-
-const gitignore = ["build/", "node_modules/", "*.gen.ts", "out/*", "!out/keep.txt", ".cache/", ".env", "secret/"]
-
-describe("ripgrep-glob", () => {
-  it("respects .gitignore for **/* pattern", async () => {
-    // populate fixture tmpdir, run Ripgrep.glob({ pattern: "**/*" })
-    // assert node_modules/, build/, .env NOT present
-    // assert out/keep.txt present, out/drop.txt not present
-  })
-  it("prefilters with ripgrep file type when pattern has a filename segment", async () => {
-    // run with pattern "*.ts" and assert --type-add=kiloglob:*.ts in args
-  })
-  it("preserves hidden file semantics", async () => {
-    // hidden files match when pattern matches; hidden folders only when pattern matches folder
-  })
-  // ... port upstream cases
-})
-```
-
-### 4. Update ripgrep-settlement test for new glob args
-**File**: `src/core/kilocode/ripgrep-settlement.test.ts`
-**Priority**: medium
-**Type**: test
-**Reason**: Existing test asserts `--glob=*.ts` presence; new flow uses `--pre-glob` + `--type-add` instead.
-
-**Current code**:
-```typescript
-expect(passed).toContain("--glob=*.ts")
-```
-
-**New code**:
-```typescript
-// The include glob is applied after ignore rules: validated by ripgrep, prefiltered as a file type.
-expect(passed).toContain("--pre-glob=*.ts")
-expect(passed).toContain("--type-add=kiloglob:*.ts")
-expect(passed).not.toContain("--glob=*.ts")
-```
-
-### 5. Update glob-ignored tool to use new glob semantics
-**File**: `src/tool/glob-ignored.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: 14 lines changed upstream. Ensures the tool aligns with the new `ripgrep-glob` module and passes include/exclude through correctly.
-
-**Change**: Review upstream `packages/opencode/src/kilocode/tool/glob-ignored.ts` diff and apply the equivalent 14 add / 14 remove lines. The main behavioral delta is removal of raw `--glob=${pattern}` plumbing in favor of calling the new `KiloGlob` helpers.
-
-### 6. Stabilize top-level `policies` config
-**File**: `src/core/config.ts`, `src/core/config/normalize.ts`, `src/core/managed-policy.ts`
-**Priority**: high
-**Type**: feature
-**Reason**: opencode #55297 promotes `experimental.policies` to top-level `policies`. Alexi should accept both forms during migration (back-compat) but prefer the new path. Also required by downstream policy enforcement.
-
-**Current code** (`managed-policy.ts` statements fn):
-```typescript
-.flatMap((entry) => entry.info.experimental?.policies ?? [])
-```
-
-**New code**:
-```typescript
-.flatMap((entry) => entry.info.policies ?? entry.info.experimental?.policies ?? [])
-```
-
-**Also in** `config/normalize.ts`: split `normalizeExperimental` so a dedicated `normalizePolicies` function merges `experimental.policies`, top-level `policies`, and v1 provider lists into a single top-level `policies` array (later sources win within a document).
-
-### 7. Give managed configuration highest precedence
-**File**: `src/core/config.ts`
-**Priority**: high
 **Type**: security
-**Reason**: opencode #55267 — managed/MDM settings must override all user config. Previously MDM preferences and system directory sat at *lowest* priority. This is a security-impacting fix for enterprise deployments (relevant for SAP AI Core integration where IT administrators push policy via MDM).
+**Reason**: Upstream opencode commit `b55f220` fixes an OAuth security corner case where MCP token endpoints resolved to `*.localhost` were not treated as loopback, breaking local OAuth flows and risking header/credential leakage patterns. Alexi's MCP OAuth implementation needs the same loopback detection.
+
+**Current code**:
+```typescript
+function isLoopback(url: URL): boolean {
+  return (
+    url.hostname === "localhost" ||
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "::1"
+  )
+}
+```
+
+**New code**:
+```typescript
+function isLoopback(url: URL): boolean {
+  const host = url.hostname.toLowerCase()
+  // RFC 6761: *.localhost names are reserved as loopback.
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.startsWith("127.")
+  )
+}
+```
+
+---
+
+### 2. Redact SQL parameters in database query error messages
+**File**: `src/database/errors.ts` (or wherever DB errors are formatted)
+**Priority**: critical
+**Type**: security
+**Reason**: Upstream opencode commit `a8fc567` scrubs params from database query errors to avoid leaking user data (API keys, session content) through stack traces/logs. Important for SAP AI Core deployments where logs may be shipped to central observability.
+
+**New code**:
+```typescript
+export function formatQueryError(err: unknown, sql: string, params: unknown[]): Error {
+  const message = err instanceof Error ? err.message : String(err)
+  const redactedParams = params.map(() => "[redacted]")
+  return new Error(
+    `Database query failed: ${message}\n` +
+    `  sql: ${sql}\n` +
+    `  params: ${JSON.stringify(redactedParams)}`,
+  )
+}
+```
+
+Wire into any `Drizzle` / `better-sqlite3` error wrapping.
+
+---
+
+### 3. Managed configuration gets highest precedence; split policies from settings
+**File**: `src/core/config.ts`
+**Priority**: critical
+**Type**: feature / security
+**Reason**: Upstream opencode commit `6dc4d4e` gives MDM/managed configuration (system directory + preferences) highest priority so enterprise admins (SAP context) can enforce policy. Policies are split off and loaded first so file-based policy authority is preserved while settings load last.
 
 **Current code**:
 ```typescript
 const systemSupplementary = [
-  ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
-  ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
+  ...(sources.preferences ? yield* loadPreferences(sources.preferences) : []),
+  ...(sources.system?.present ? yield* loadDirectory(sources.system.path) : []),
 ]
 ```
 
 **New code**:
 ```typescript
-// Managed settings load LAST so they override everything.
-// Policies evaluate in reverse load order, so managed policies split off and
-// load FIRST to retain final file-based authority.
+// Managed settings load last (highest priority); MDM preferences outrank system dir.
+// Policies evaluate in reverse load order, so split and load managed policies first.
 const managed = [
   ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
   ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
@@ -251,11 +111,192 @@ const managedPolicies = managed
   .toReversed()
 const managedSettings = managed.map((entry) =>
   entry.type === "document" && entry.info.policies
-    ? new Document({ ...entry, info: new Info({
-{"prompt_tokens":22529,"completion_tokens":4096,"total_tokens":26625,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+    ? new Document({ ...entry, info: new Info({ ...entry.info, policies: undefined }) })
+    : entry,
+)
+// ... assemble: [managedPolicies, ...direct, globalSupplementary, ...projectSupplementary, managedSettings]
+```
 
-[Session: 3d83e915-da82-4193-a854-8e448e521750]
-[Messages: 2, Tokens: 26625]
+---
+
+### 4. Ripgrep: handle non-UTF-8 output via base64 `bytes` decoding
+**File**: `src/core/ripgrep.ts` + new `src/core/ripgrep-grep.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream kilocode commits `0e6da3104` / `31906a56b` fix crashes/incorrect text when grepping files with mixed/legacy encodings (Latin-1, etc.). Ripgrep emits `{bytes}` (base64) instead of `{text}` for non-UTF-8. Decode lossy-UTF-8 to show U+FFFD rather than failing schema validation.
+
+**New file** `src/core/ripgrep-grep.ts`:
+```typescript
+import { Schema, SchemaGetter } from "effect"
+
+/** ripgrep `arbitrary data` ({text} or {bytes}) normalized to {text}. */
+export const Data = Schema.Union([
+  Schema.Struct({ text: Schema.String }),
+  Schema.Struct({ bytes: Schema.String }),
+]).pipe(
+  Schema.decodeTo(Schema.Struct({ text: Schema.String }), {
+    decode: SchemaGetter.transform((data) =>
+      "text" in data
+        ? { text: data.text }
+        : { text: Buffer.from(data.bytes, "base64").toString("utf8") },
+    ),
+    encode: SchemaGetter.passthrough({ strict: false }),
+  }),
+)
+```
+
+**Modify** `src/core/ripgrep.ts`:
+```typescript
+import * as KiloGrep from "./ripgrep-grep"
+
+const RawMatch = Schema.Struct({
+  type: Schema.Literals(["match", "context"]),
+  data: Schema.Struct({
+    path: KiloGrep.Data,
+    lines: KiloGrep.Data,
+    line_number: PositiveInt,
+    absolute_offset: NonNegativeInt,
+    submatches: Schema.Array(
+      Schema.Struct({
+        match: KiloGrep.Data,
+        start: NonNegativeInt,
+        end: NonNegativeInt,
+      }),
+    ),
+  }),
+})
+```
+
+---
+
+### 5. Apply glob/include patterns AFTER ripgrep ignore rules (respect .gitignore)
+**File**: `src/core/ripgrep.ts` + new `src/core/ripgrep-glob.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream kilocode PR #15017 (`e48c9785c`, `17448f5c5`) fixes glob patterns bypassing `.gitignore`. Passing `--glob=<pattern>` makes ripgrep treat it as an override that wins over ignore rules, causing `node_modules` to be walked. Instead, let ripgrep list files per ignore rules and apply the pattern locally.
+
+**New file** `src/core/ripgrep-glob.ts`:
+```typescript
+export interface Input {
+  readonly pattern: string
+  readonly hidden?: boolean
+  readonly include?: readonly string[]
+}
+
+export interface Walk {
+  readonly args: readonly string[]
+  readonly match: (file: string) => boolean
+}
+
+export function compile(pattern: string) {
+  const dir = pattern.endsWith("/")
+  const body = pattern.replace(/\/+$/, "")
+  const text = body.includes("/") ? body.replace(/^\//, "") : `**/${body}`
+  const glob = new Bun.Glob(text)
+  const folders = text.endsWith("/**") ? new Bun.Glob(`${text}/*`) : glob
+  return (path: string, folder: boolean) => {
+    if (folder) return folders.match(path)
+    return !dir && glob.match(path)
+  }
+}
+
+export function glob(input: Input): Walk {
+  // Prefilter via ripgrep type if last path segment is a simple name
+  const match = compile(input.pattern)
+  return {
+    args: [], // no --glob override; apply post-filter
+    match: (file) => match(file, false),
+  }
+}
+```
+
+**Modify** `src/core/ripgrep.ts` `glob` call site:
+```typescript
+// before:
+//   `--glob=${input.pattern}`,
+// after:
+...KiloGlob.glob(input).args,
+```
+Add a post-filter step before applying the result `limit`:
+```typescript
+.pipe(
+  Stream.filter((entry) => KiloGlob.glob(input).match(entry.path) && (input.filter?.(entry.path) ?? true)),
+  Stream.take(input.limit ?? Infinity),
+)
+```
+
+---
+
+### 6. MCP: skip list/call for unadvertised capabilities
+**File**: `src/mcp/client.ts`
+**Priority**: high
+**Type**: bugfix / performance
+**Reason**: Upstream opencode commit `fbf5f16` avoids `method not found` errors from MCP servers that don't advertise prompts/resources. Reduces noisy telemetry and failed probes.
+
+**Current code**:
+```typescript
+const prompts = await client.listPrompts()
+const resources = await client.listResources()
+```
+
+**New code**:
+```typescript
+const caps = client.getServerCapabilities?.() ?? {}
+const prompts = caps.prompts ? await client.listPrompts().catch(() => ({ prompts: [] })) : { prompts: [] }
+const resources = caps.resources ? await client.listResources().catch(() => ({ resources: [] })) : { resources: [] }
+```
+
+---
+
+### 7. MCP: skip codemode query for servers that reject it
+**File**: `src/mcp/client.ts` (or wherever Alexi probes codemode)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream opencode commit `7b5f1bd` prevents repeated failures and keeps server registration successful even when codemode is unsupported.
+
+**New code**:
+```typescript
+const codemode = await Effect.tryPromise(() => client.callTool({ name: "codemode" })).pipe(
+  Effect.catchAll(() => Effect.succeed({ supported: false } as const)),
+)
+if (!("supported" in codemode) || codemode.supported !== false) {
+  // register codemode handler
+}
+```
+
+---
+
+### 8. MCP: advertise spec-shaped elicitation capability
+**File**: `src/mcp/client.ts`
+**Priority**: medium
+**Type**: bugfix
+**Reason**: Upstream opencode commit `3aa26f1` aligns Alexi's client capability advertisement with the MCP spec so servers can send elicit requests.
+
+**Current code**:
+```typescript
+capabilities: {
+  roots: { listChanged: true },
+  sampling: {},
+}
+```
+
+**New code**:
+```typescript
+capabilities: {
+  roots: { listChanged: true },
+  sampling: {},
+  elicitation: {}, // spec-shaped capability
+}
+```
+
+---
+
+### 9. MCP: pass tool input as permission metadata
+**File**: `src/
+{"prompt_tokens":36471,"completion_tokens":4096,"total_tokens":40567,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: 0829b9e3-e4d3-467a-9968-8ec7132b9115]
+[Messages: 2, Tokens: 40567]
 
 ## Execution Instructions
 
