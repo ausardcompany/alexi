@@ -2831,111 +2831,102 @@ Resolution order at read time (highest wins):
 
 See [docs/API.md — Managed Policy Namespace](API.md#managed-policy-namespace) and [docs/ARCHITECTURE.md — Managed Policy Namespace loading](ARCHITECTURE.md#managed-policy-namespace-loading-srcconfiguserconfigts) for the TypeScript surface and the end-to-end composition with the enforcement site.
 
-## OpenAI-Compatible Tool-Content Normalization (`normalizeNullToolContent`)
+## `normalizeNullToolContent` provider flag
 
-Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
-
-Alexi's chat path routes through SAP AI Core Orchestration and does NOT consult this flag by default. The normalizer only matters for proxy adapters or BYOK endpoints that forward chat traffic to a strict OpenAI-compatible deployment and need to rewrite tool-role messages whose `content` field is explicitly `null` into `content: ""`. The flag is a per-call option, not a global environment variable.
-
-### Flag semantics
-
-| Flag value                            | Behaviour                                                                       |
-| ------------------------------------- | ------------------------------------------------------------------------------- |
-| `normalizeNullToolContent: false`     | Pass through unchanged. Preserves `null` content on tool-role messages.         |
-| `normalizeNullToolContent: true`      | Rewrite `null` → `""` on tool-role messages only. Other messages pass through.  |
-| omitted (`undefined`)                 | Same as `false` — default behaviour.                                            |
+Introduced in the 2026-10-16 upstream sync (`1.22.48`, ports upstream kilocode `8d5c126dc`). Opts a specific provider entry in `~/.alexi/config.json` into the strict OpenAI-compatible tool-content normalization implemented by `src/providers/openai-compatible.ts`. The default is OFF — SAP AI Core Orchestration and most proxy adapters do NOT need this flag.
 
 ### When to enable
 
-Enable `normalizeNullToolContent: true` ONLY when the downstream endpoint has been observed to reject tool-role messages with `null` content (HTTP `400` with a body like `"content: expected string, got null"`). Representative cases:
+Set `normalizeNullToolContent: true` on a provider ONLY when its backing endpoint rejects tool-role messages that carry explicit `null` content with a `400`/`422` error. The symptom is a stream that fails on the second turn of a tool-calling conversation, after the assistant has emitted a tool call and the orchestrator posts the tool result back with `role: 'tool'` and `content: null` (to signal "no body, see `tool_calls`"). Strict endpoints that match this profile include:
 
-- Early SAP AI Core OpenAI deployments before the orchestration API absorbed the OpenAI tool-call wire shape.
-- Local proxy wrappers that use a legacy `openai` Python SDK version with a strict JSON validator.
-- Some corporate gateway adapters that normalize the inbound request body against an older schema.
+- Early SAP AI Core proxy deployments that pre-date the current permissive request shape.
+- Corporate proxy wrappers that re-serialize the payload through a stricter JSON Schema than the upstream API expects.
+- A small number of self-hosted OpenAI-compatible gateways (Ollama, LocalAI, vLLM, LM Studio) where the local server throws on `content: null`.
 
-Do NOT enable it when forwarding to the SAP AI Core Orchestration API via `src/providers/sapOrchestration.ts` — the orchestration API accepts `null` tool content and the normalizer would corrupt payloads that use `null` to mean "see `tool_calls`".
+Enabling the flag on an endpoint that does NOT need it is still safe — the normalizer only rewrites `null`/`undefined` content on `role: 'tool'` messages, and empty-string content is a valid payload for every OpenAI-compatible endpoint we know of. The reason the flag defaults to OFF is that providers which legitimately emit `null` content to signal "no body, see `tool_calls`" lose that signal when the normalizer runs, and the empty string is a lossy replacement.
 
-### Call-site integration
+### Shape
 
-The normalizer is wired at the provider-adapter layer. There is no environment variable override today; adapters compute the flag from their own deployment config and pass it through:
+The flag lives under the per-provider `compatibility` block documented in [Per-Provider Compatibility Block](#per-provider-compatibility-block-providersidcompatibility):
 
-```typescript
-import { normalizeToolContentAll } from '../providers/openai-compatible.js';
-
-function buildStrictOpenAIBody(messages, config) {
-  const normalized = normalizeToolContentAll(messages, {
-    normalizeNullToolContent: config.strictOpenAI === true,
-  });
-  return { model: config.model, messages: normalized };
-}
-```
-
-See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) for the exported helpers (`normalizeToolContent`, `normalizeToolContentAll`), the pure-function contract (never mutates its input), and the decision flow diagram.
-
-## `agent_manager` Named-Agent Delegation (`config.agent`)
-
-Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `f01b273c1`, `e703b5637`, `4fcf08b5e`). Lives at `src/tool/tools/agent-manager.ts`.
-
-The `agent_manager` tool's `create` action now accepts an optional `agent` name alongside the existing `mode`, `model`, `provider`, and `excludeLocalState` config fields. The named agent is used as the primary agent for the new session, replacing the workspace default:
-
-```jsonc
+```json
 {
-  "action": "create",
-  "config": {
-    "model": "anthropic--claude-4.7-opus",
-    "provider": "sap-ai-core",
-    "agent": "security-reviewer"
+  "providers": {
+    "sap-anthropic-strict": {
+      "compatibility": {
+        "normalizeNullToolContent": true
+      }
+    }
   }
 }
 ```
 
-### Selectable-agent filter
+| Field                      | Type      | Default | Purpose                                                                                        |
+| -------------------------- | --------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `normalizeNullToolContent` | `boolean` | `false` | When `true`, rewrites `null`/`undefined` content on tool-role messages to `''` before dispatch. |
 
-The named agent must satisfy ALL of the following when looked up in `getAgentRegistry()`:
+Any non-boolean value is silently coerced to `false` by the reader so a hand-edited corrupt config never accidentally enables normalization.
 
-| Rule                                   | Reason                                                                             |
-| -------------------------------------- | ---------------------------------------------------------------------------------- |
-| `mode !== 'subagent'`                  | Subagents are not primary-selectable; use the `task` tool for internal delegation. |
-| `deprecated !== true`                  | Deprecated agents cannot be selected.                                              |
-| `options.internal !== true`            | Internal agents are hidden from the selectable surface.                            |
-| `options.hidden !== true`              | Hidden agents are not surfaced through this field.                                 |
+### Interaction with other knobs
 
-Name lookup is in order of precedence (first match wins): exact `name` match, exact `id` match, `aliases` includes the trimmed name. The upstream `4fcf08b5e` trim is preserved — `' security-reviewer '` is accepted and resolves to `security-reviewer`.
+- Independent of `cacheFormat` and `cacheKey` — the flag only affects tool-role content on the request path.
+- Independent of the global SAP AI Core gateway override (`SAP_AI_GATEWAY_URL`) — the normalizer runs AFTER request assembly, regardless of which endpoint the provider finally dispatches to.
+- Does NOT affect the response path. If the upstream endpoint emits a tool-role message with `null` content in the response stream, the client parses it faithfully.
 
-### Rejection shape
+See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) for the TypeScript surface.
 
-A rejected name produces an error that enumerates every selectable agent so the orchestrator LLM can self-correct:
+## `agent_manager` named-agent delegation (`config.agent`)
 
-```json
-{
-  "success": false,
-  "error": "Unknown or non-selectable agent: foo. Selectable agents: build, security-reviewer, writer"
-}
+Introduced in the 2026-10-16 upstream sync (`1.22.48`, ports upstream kilocode `f01b273c1`, `e703b5637`, `4fcf08b5e`). Extends the `agent_manager` tool's `create` action with an optional `agent` field inside the `config` object so a new Agent Manager session can run as a user-authored primary agent instead of the workspace default. This is a tool-schema addition, not a user-config field — it is called out here because operators configure the registry of selectable agents via `.alexi/agent/*.md` (project) and `~/.config/kilo/agent/*.md` (global) files, and the lookup used by this field consults that registry.
+
+### Selectable-agent contract
+
+A name supplied via `config.agent` must resolve to an entry in `getAgentRegistry().list()` that satisfies ALL of:
+
+- `mode === 'primary'` or `mode === 'all'` — `mode: 'subagent'` entries are rejected because they are reserved for the `task` tool.
+- `deprecated !== true`.
+- `options.internal !== true` AND `options.hidden !== true` — hidden entries do not surface in UI pickers.
+
+The resolver tries exact `name` first, then exact `id`, then any `alias`. A rejected name returns `success: false` with an error that enumerates the selectable agent names so the model (or the operator reading the error) can self-correct.
+
+### Minimal registry example
+
+```markdown
+<!-- .alexi/agent/review.md -->
+---
+name: review
+mode: primary
+---
+
+You are a code-review agent. Scope: diffs only, no filesystem writes.
 ```
 
-### Success envelope
-
-The resolved agent id is echoed back in `session.agent` so callers can confirm the named agent was accepted and not silently dropped by a lookup miss:
+With this file in place, `alexi` can delegate to the agent via the `agent_manager` tool:
 
 ```json
 {
   "action": "create",
-  "session": {
-    "id": "session-1760608601234",
-    "status": "created",
-    "model": "anthropic--claude-4.7-opus",
-    "provider": "sap-ai-core",
-    "agent": "security-reviewer"
-  },
-  "message": "Created new agent session: session-1760608601234"
+  "config": {
+    "agent": "review",
+    "model": "anthropic--claude-4.7-opus"
+  }
 }
 ```
 
-### Scope
+A result payload echoes back the resolved agent id so the caller can confirm:
 
-The field is omit-to-default: when absent (`null` / blank / unset), the new session uses the workspace default agent. The companion tool-description file `src/tool/tools/agent-manager.txt` includes an explicit guard sentence — the `task` tool's "Available agent types" list is NOT valid for `agent_manager`'s `agent` field, because that list enumerates subagents, which this field rejects.
+```json
+{
+  "action": "create",
+  "session": { "id": "session-...", "status": "created", "agent": "review" }
+}
+```
 
-See [docs/CONTRIBUTING.md — Named-Agent Delegation](CONTRIBUTING.md#named-agent-delegation-srctooltoolsagent-managerts) for the registry filter rules and [docs/API.md — `agent_manager` tool](API.md#agent_manager-tool-configprovider) for the full tool-call surface.
+### Not the same as `task`
+
+The `task` tool's "Available agent types" list enumerates subagents and is NOT valid here. Reserve `agent_manager.config.agent` for cases where the user wants a visible, named-agent Agent Manager session; use `task` for internal subagent research.
+
+See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) is unrelated; the authoritative tool docs live at [docs/TOOLS.md](TOOLS.md) and the registry format at [docs/CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Related Documentation
 

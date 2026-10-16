@@ -4077,6 +4077,59 @@ export function resolveCopilotProviderPackage(
 
 Looks up the correct provider-compat package for a Copilot fallback routing decision from an injected models.dev snapshot, falling back to `openai-compatible` when the snapshot has no entry. Dependency injection keeps the helper free of a hard dependency on the on-disk file layout (see `src/providers/catalog.ts` for how Alexi loads provider manifests today).
 
+## OpenAI-Compatible Tool-Content Normalizer
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync, ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's main chat path routes through SAP AI Core Orchestration exclusively. A handful of proxy adapters still forward requests to strict OpenAI-compatible endpoints — early SAP AI Core deployments and a few corporate proxy wrappers reject tool-role messages that carry explicit `null` content, requiring an empty string instead. Historically Alexi (and upstream) would unconditionally rewrite `null` → `''` on tool messages, which caused regressions for providers that legitimately emit `null` content to signal "no body, see `tool_calls`". The normalizer gates that rewrite behind an explicit flag so strict-OpenAI deployments can opt in without regressing the common path.
+
+### Public surface
+
+```typescript
+// src/providers/openai-compatible.ts
+
+export interface OpenAICompatibleMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+
+export interface NormalizeToolContentOptions {
+  /** When true, rewrites tool-role messages with null/undefined content to ''. Default: false. */
+  normalizeNullToolContent?: boolean;
+}
+
+export function normalizeToolContent<T extends OpenAICompatibleMessage>(
+  message: T,
+  options?: NormalizeToolContentOptions
+): T;
+
+export function normalizeToolContentAll<T extends OpenAICompatibleMessage>(
+  messages: readonly T[],
+  options?: NormalizeToolContentOptions
+): T[];
+```
+
+### Contract
+
+- **Default is a no-op.** When `options` is omitted or `normalizeNullToolContent` is falsy, the single-message helper returns its input unchanged (same reference) and the array helper returns a shallow copy of the input (`messages.slice()`). This matches upstream — the common path is "do not rewrite".
+- **Opt-in rewrite is scoped.** When `normalizeNullToolContent: true`, the single-message helper rewrites a message ONLY when `message.role === 'tool'` AND `message.content === null || message.content === undefined`. Every other role, and every tool-role message with any non-null content (including `''`, `0`, `false`, or structured JSON), passes through untouched.
+- **Never mutates input.** On a rewrite the helper returns a shallow copy `{ ...message, content: '' }` so caller-owned references are preserved. The array helper calls the single-message helper per entry under opt-in; non-opt-in callers get a defensive shallow copy of the array.
+- **SAP AI Core Orchestration is unaffected.** The main provider (`src/providers/sapOrchestration.ts`) does not invoke the normalizer — it is called only by proxy adapters that explicitly set the flag on their deployment configuration.
+
+### Minimal usage
+
+```typescript
+import { normalizeToolContentAll } from '../src/providers/openai-compatible.js';
+
+// Opt in only on strict endpoints that reject null tool content:
+const safeMessages = normalizeToolContentAll(messages, {
+  normalizeNullToolContent: provider.compatibility?.normalizeNullToolContent === true,
+});
+```
+
+The flag is intentionally per-call, not global: a single process may front multiple endpoints with divergent strictness. See [docs/CONFIGURATION.md — `normalizeNullToolContent` provider flag](CONFIGURATION.md#normalizenulltoolcontent-provider-flag) for how to wire the flag into `~/.alexi/config.json`.
+
 ## xAI Image-Mime Filter
 
 Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode 2026-10 fix). Lives in `src/providers/xai-image-filter.ts`.
