@@ -4101,6 +4101,92 @@ export function filterXaiImages<T extends MultimodalAttachment>(
 
 Alexi routes multimodal requests through SAP AI Core and does not yet have a native xAI adapter — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
 
+## OpenAI-Compatible Tool-Content Normalizer
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's chat path routes through SAP AI Core Orchestration exclusively, but adapter code that forwards requests to a strict OpenAI-compatible endpoint (local proxy, Azure OpenAI, SAP-AI-Core-fronted OpenAI deployment) sometimes needs to rewrite tool-role messages whose `content` field is explicitly `null`. Historically Alexi (and upstream) unconditionally rewrote `null` → `""` on every tool message. That caused regressions where providers that legitimately return `null` content — the OpenAI convention for "no body, see `tool_calls`" — had their payloads mangled on the way out.
+
+The normalization is now opt-in: the module default is "pass through unchanged" and callers that proxy to a strict endpoint must set `normalizeNullToolContent: true` explicitly.
+
+### Public surface
+
+```typescript
+export interface OpenAICompatibleMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+
+export interface NormalizeToolContentOptions {
+  /**
+   * When `true`, replaces a tool-role message's `null` content with an
+   * empty string. When `false` or omitted, the message passes through
+   * untouched. Default: `false` (preserve upstream shape).
+   */
+  normalizeNullToolContent?: boolean;
+}
+
+export function normalizeToolContent<T extends OpenAICompatibleMessage>(
+  message: T,
+  options?: NormalizeToolContentOptions
+): T;
+
+export function normalizeToolContentAll<T extends OpenAICompatibleMessage>(
+  messages: readonly T[],
+  options?: NormalizeToolContentOptions
+): T[];
+```
+
+### Semantics
+
+- `normalizeToolContent(msg)` and `normalizeToolContent(msg, { normalizeNullToolContent: false })` return the input unchanged.
+- `normalizeToolContent(msg, { normalizeNullToolContent: true })` returns the input unchanged UNLESS `msg.role === 'tool'` AND `msg.content == null`, in which case a shallow copy with `content: ''` is returned.
+- The function NEVER mutates its input — a non-matching message is passed through by reference; a matching message is returned as a new object with the rewritten `content` and every other field spread verbatim.
+- `normalizeToolContentAll(messages)` returns a shallow copy (`.slice()`) when the flag is off; when the flag is on it maps each entry through `normalizeToolContent`, so a tool-role `null`-content entry is replaced in-array and every other entry is kept.
+
+### When to opt in
+
+Opt in only when the downstream endpoint has been observed to reject tool-role messages with `null` content (HTTP `400` with a body like `"content: expected string, got null"`). Representative cases:
+
+- Early SAP AI Core OpenAI deployments before the orchestration API absorbed the OpenAI tool-call wire shape.
+- Local proxy wrappers that use a legacy `openai` Python SDK version with a strict JSON validator.
+- Some corporate gateway adapters that normalize the inbound request body against an older schema.
+
+Do NOT opt in when forwarding to the SAP AI Core Orchestration API through `src/providers/sapOrchestration.ts` — the orchestration API accepts `null` tool content and the normalizer would corrupt payloads that use `null` to mean "see `tool_calls`".
+
+### Decision flow
+
+```mermaid
+flowchart LR
+    Msg[Outgoing message] --> Flag{normalizeNullToolContent?}
+    Flag -->|false / omitted| Pass[Return unchanged]
+    Flag -->|true| RoleCheck{role === 'tool'<br/>and content == null?}
+    RoleCheck -->|no| Pass
+    RoleCheck -->|yes| Rewrite[Shallow copy<br/>content: '']
+    Rewrite --> Out[Return rewritten]
+    Pass --> Out
+```
+
+### Call-site integration
+
+A proxy adapter that forwards to a strict endpoint can apply the normalizer at request-build time:
+
+```typescript
+import { normalizeToolContentAll } from '../src/providers/openai-compatible.js';
+
+function buildStrictOpenAIRequest(messages, config) {
+  const normalized = normalizeToolContentAll(messages, {
+    normalizeNullToolContent: config.strictOpenAI === true,
+  });
+  return { model: config.model, messages: normalized };
+}
+```
+
+Because the module is a pure function with no side effects at import time, it is safe to add to any provider adapter without altering the SAP AI Core happy path.
+
+See [docs/CONFIGURATION.md — OpenAI-Compatible Tool-Content Normalization](CONFIGURATION.md#openai-compatible-tool-content-normalization-normalizenulltoolcontent) for the operator-facing opt-in flag and the "when to enable" matrix.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

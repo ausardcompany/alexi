@@ -2831,6 +2831,112 @@ Resolution order at read time (highest wins):
 
 See [docs/API.md — Managed Policy Namespace](API.md#managed-policy-namespace) and [docs/ARCHITECTURE.md — Managed Policy Namespace loading](ARCHITECTURE.md#managed-policy-namespace-loading-srcconfiguserconfigts) for the TypeScript surface and the end-to-end composition with the enforcement site.
 
+## OpenAI-Compatible Tool-Content Normalization (`normalizeNullToolContent`)
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's chat path routes through SAP AI Core Orchestration and does NOT consult this flag by default. The normalizer only matters for proxy adapters or BYOK endpoints that forward chat traffic to a strict OpenAI-compatible deployment and need to rewrite tool-role messages whose `content` field is explicitly `null` into `content: ""`. The flag is a per-call option, not a global environment variable.
+
+### Flag semantics
+
+| Flag value                            | Behaviour                                                                       |
+| ------------------------------------- | ------------------------------------------------------------------------------- |
+| `normalizeNullToolContent: false`     | Pass through unchanged. Preserves `null` content on tool-role messages.         |
+| `normalizeNullToolContent: true`      | Rewrite `null` → `""` on tool-role messages only. Other messages pass through.  |
+| omitted (`undefined`)                 | Same as `false` — default behaviour.                                            |
+
+### When to enable
+
+Enable `normalizeNullToolContent: true` ONLY when the downstream endpoint has been observed to reject tool-role messages with `null` content (HTTP `400` with a body like `"content: expected string, got null"`). Representative cases:
+
+- Early SAP AI Core OpenAI deployments before the orchestration API absorbed the OpenAI tool-call wire shape.
+- Local proxy wrappers that use a legacy `openai` Python SDK version with a strict JSON validator.
+- Some corporate gateway adapters that normalize the inbound request body against an older schema.
+
+Do NOT enable it when forwarding to the SAP AI Core Orchestration API via `src/providers/sapOrchestration.ts` — the orchestration API accepts `null` tool content and the normalizer would corrupt payloads that use `null` to mean "see `tool_calls`".
+
+### Call-site integration
+
+The normalizer is wired at the provider-adapter layer. There is no environment variable override today; adapters compute the flag from their own deployment config and pass it through:
+
+```typescript
+import { normalizeToolContentAll } from '../providers/openai-compatible.js';
+
+function buildStrictOpenAIBody(messages, config) {
+  const normalized = normalizeToolContentAll(messages, {
+    normalizeNullToolContent: config.strictOpenAI === true,
+  });
+  return { model: config.model, messages: normalized };
+}
+```
+
+See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) for the exported helpers (`normalizeToolContent`, `normalizeToolContentAll`), the pure-function contract (never mutates its input), and the decision flow diagram.
+
+## `agent_manager` Named-Agent Delegation (`config.agent`)
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `f01b273c1`, `e703b5637`, `4fcf08b5e`). Lives at `src/tool/tools/agent-manager.ts`.
+
+The `agent_manager` tool's `create` action now accepts an optional `agent` name alongside the existing `mode`, `model`, `provider`, and `excludeLocalState` config fields. The named agent is used as the primary agent for the new session, replacing the workspace default:
+
+```jsonc
+{
+  "action": "create",
+  "config": {
+    "model": "anthropic--claude-4.7-opus",
+    "provider": "sap-ai-core",
+    "agent": "security-reviewer"
+  }
+}
+```
+
+### Selectable-agent filter
+
+The named agent must satisfy ALL of the following when looked up in `getAgentRegistry()`:
+
+| Rule                                   | Reason                                                                             |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| `mode !== 'subagent'`                  | Subagents are not primary-selectable; use the `task` tool for internal delegation. |
+| `deprecated !== true`                  | Deprecated agents cannot be selected.                                              |
+| `options.internal !== true`            | Internal agents are hidden from the selectable surface.                            |
+| `options.hidden !== true`              | Hidden agents are not surfaced through this field.                                 |
+
+Name lookup is in order of precedence (first match wins): exact `name` match, exact `id` match, `aliases` includes the trimmed name. The upstream `4fcf08b5e` trim is preserved — `' security-reviewer '` is accepted and resolves to `security-reviewer`.
+
+### Rejection shape
+
+A rejected name produces an error that enumerates every selectable agent so the orchestrator LLM can self-correct:
+
+```json
+{
+  "success": false,
+  "error": "Unknown or non-selectable agent: foo. Selectable agents: build, security-reviewer, writer"
+}
+```
+
+### Success envelope
+
+The resolved agent id is echoed back in `session.agent` so callers can confirm the named agent was accepted and not silently dropped by a lookup miss:
+
+```json
+{
+  "action": "create",
+  "session": {
+    "id": "session-1760608601234",
+    "status": "created",
+    "model": "anthropic--claude-4.7-opus",
+    "provider": "sap-ai-core",
+    "agent": "security-reviewer"
+  },
+  "message": "Created new agent session: session-1760608601234"
+}
+```
+
+### Scope
+
+The field is omit-to-default: when absent (`null` / blank / unset), the new session uses the workspace default agent. The companion tool-description file `src/tool/tools/agent-manager.txt` includes an explicit guard sentence — the `task` tool's "Available agent types" list is NOT valid for `agent_manager`'s `agent` field, because that list enumerates subagents, which this field rejects.
+
+See [docs/CONTRIBUTING.md — Named-Agent Delegation](CONTRIBUTING.md#named-agent-delegation-srctooltoolsagent-managerts) for the registry filter rules and [docs/API.md — `agent_manager` tool](API.md#agent_manager-tool-configprovider) for the full tool-call surface.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs
