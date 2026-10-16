@@ -30,6 +30,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
   - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
   - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
+- [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -7482,6 +7483,106 @@ Key patterns for this class of test:
    implicit via missing package, `() => true` via `vi.doMock`). A migration
    contract is only really pinned when the negative case fires under both
    conditions.
+
+## Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)
+
+`src/utils/url-redact.ts` ships three public symbols that are called from every log site that may interpolate a URL or a structured auth payload: `isSensitiveKey(name)`, `redactUrl(url)`, and `redactCredentials(value)` (plus the `REDACTED` placeholder constant). `src/utils/logger.ts` wraps the first via `redactUrlsFromString(text)` and `formatError(err)`, and the two network tools (`src/tool/tools/webfetch.ts`, `src/tool/tools/browser.ts`) now route every error-return branch through them. Because the helpers are the last line of defence against OAuth tokens / API keys leaking into log files, their contract is pinned by `tests/utils/url-redact.test.ts` with no mocks — the WHATWG `URL` parser and the pattern list are exercised directly.
+
+### Fixture pattern
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import {
+  REDACTED,
+  isSensitiveKey,
+  redactCredentials,
+  redactUrl,
+} from '../../src/utils/url-redact.js';
+
+describe('redactUrl', () => {
+  it('redacts sensitive query params while preserving non-sensitive ones', () => {
+    expect(redactUrl('https://cb.example.com/callback?code=SECRET&state=xyz')).toBe(
+      `https://cb.example.com/callback?code=${REDACTED}&state=xyz`
+    );
+  });
+
+  it('never leaves the raw secret value in the output', () => {
+    const out = redactUrl('https://provider.example.com/v1/complete?api_key=sk-live-DEADBEEF');
+    expect(out).not.toContain('sk-live-DEADBEEF');
+  });
+
+  it('passes non-URL input through unchanged', () => {
+    expect(redactUrl('not a url')).toBe('not a url');
+    expect(redactUrl('ECONNRESET: socket hang up')).toBe('ECONNRESET: socket hang up');
+  });
+});
+```
+
+### Contract matrix
+
+The 15 cases in `tests/utils/url-redact.test.ts` pin the full behavioural contract. When adding a new entry to `SENSITIVE_KEY_PATTERNS` or widening the `redactCredentials` plain-object policy, add a line to the matching matrix test — not a new describe block — so a reader of the file can see every supported key at a glance.
+
+| Area | Contract pinned | Example case |
+|------|-----------------|--------------|
+| `isSensitiveKey` positives | 23 credential-like names are flagged (`token`, `access_token`, `refresh_token`, `id_token`, `code`, `key`, `api_key`, `api-key`, `apiKey`, `secret`, `client_secret`, `clientSecret`, `password`, `passwd`, `pwd`, `authorization`, `Authorization`, `auth`, `credential`, `credentials`, `signature`, `sig`, `session_id`, `sessionId`) | `expect(isSensitiveKey('refresh_token')).toBe(true)` |
+| `isSensitiveKey` negatives | Pagination / sort / id / name / state / query are NOT flagged, blank input returns `false` | `expect(isSensitiveKey('state')).toBe(false)` |
+| `redactUrl` query redaction | Only values of sensitive keys are blanked; non-sensitive keys round-trip verbatim | `?code=SECRET&state=xyz` → `?code=[REDACTED]&state=xyz` |
+| `redactUrl` round-trip | Output is still parseable by `new URL(...)` and `searchParams.get('token')` returns the literal `[REDACTED]` placeholder (not `%5BREDACTED%5D`) | `new URL(redactUrl('...')).searchParams.get('token') === REDACTED` |
+| `redactUrl` component preservation | Scheme, host, port, pathname are retained; the URL still says WHICH endpoint failed | `https://api.example.com:8443/v2/path/sub?token=T&page=2` → port `8443`, pathname `/v2/path/sub` kept |
+| `redactUrl` hash | Any non-empty hash is redacted wholesale as `#[REDACTED]` (OAuth implicit-flow access tokens live there) | `#access_token=xyz&token_type=bearer` → `#[REDACTED]` |
+| `redactUrl` fast paths | A URL with no query, no hash, and no sensitive param is returned verbatim (no trailing-slash normalisation) | `redactUrl('http://localhost:3000/') === 'http://localhost:3000/'` |
+| `redactUrl` non-URL passthrough | Arbitrary strings, empty string, and error-message-looking strings pass through unchanged | `redactUrl('ECONNRESET: socket hang up')` returns input |
+| `redactUrl` protocol guard | Any scheme other than `http:` / `https:` returns input unchanged (prevents false-positive redaction of parseable `scheme:` error prefixes) | input preserved |
+| `redactCredentials` shallow | Credential field value replaced with `[REDACTED]`; non-sensitive siblings untouched | `{ apiKey: 'SECRET', endpoint: 'https://e' }` → `{ apiKey: '[REDACTED]', endpoint: 'https://e' }` |
+| `redactCredentials` deep | Nested headers / transport configs are recursively redacted (e.g. `transport.headers.Authorization`) | `transport.headers.Authorization` → `[REDACTED]`, `content-type` kept |
+| `redactCredentials` full key matrix | Every supported credential key in a flat object is redacted in a single assertion loop | `for (const k of Object.keys(input)) expect(out[k]).toBe(REDACTED)` |
+| `redactCredentials` arrays | Walks element-wise, preserving array shape | `[{token: 'a'}, {ok: true}]` → first element redacted, second kept |
+| `redactCredentials` primitives | Returns strings / numbers / booleans / `null` / `undefined` unchanged | `redactCredentials(42) === 42` |
+| `redactCredentials` non-plain objects | `Date`, `URL`, `RegExp` are returned by reference, NOT walked (prevents constructor-identity loss) | `redactCredentials(new Date(0))` returns the SAME `Date` instance |
+| `redactCredentials` immutability | The input tree is NOT mutated during the walk | `JSON.stringify(input)` before === after |
+| SAP AI Core service key | The realistic `AICORE_SERVICE_KEY` JSON shape (`{ clientid, clientsecret, url, identityzone }`) has only `clientsecret` redacted | `clientid`, `url`, `identityzone` kept verbatim |
+
+### Testing the logger / tool integration
+
+`src/utils/logger.ts` now routes `formatError(err, includeStack)` through `redactUrlsFromString(text)` on every path (Error message, Error stack, non-Error fallback). When adding a test that asserts on a log line, assert on the full redacted output — not the raw `err.message` — because the output is what any downstream log consumer actually sees:
+
+```typescript
+import { formatError } from '../../src/utils/logger.js';
+
+it('redacts credential params but preserves pagination', () => {
+  const err = new Error(
+    'upstream failed https://api.example.com/v1?access_token=SECRET&page=2'
+  );
+  const line = formatError(err, false);
+  expect(line).not.toContain('SECRET');
+  expect(line).toContain('access_token=[REDACTED]');
+  expect(line).toContain('page=2');
+});
+```
+
+Both `src/tool/tools/webfetch.ts` and `src/tool/tools/browser.ts` now route their error-return branches through the surgical redactor. Tests for those tools should assert the redacted shape on the `error` field of a failed `ToolResult`, not reach into the raw `fetch()` / Puppeteer error. The two error paths to cover for `webfetch`:
+
+```typescript
+// 1. The `Invalid URL format: ...` branch (user-supplied URL fails new URL())
+expect(result.error).toBe('Invalid URL format: https://cb.example.com/?code=[REDACTED]');
+
+// 2. The generic catch-all branch (fetch() threw with URL in message)
+expect(result.error).not.toContain('sk-live-DEADBEEF');
+expect(result.error).toMatch(/access_token=\[REDACTED\]/);
+```
+
+For `browser`, the two Puppeteer `TimeoutError` paths (initial `goto()` and `waitForNavigation()`) return the message `Navigation timeout for URL: ${redactUrl(params.url)}`:
+
+```typescript
+expect(result.error).toBe('Navigation timeout for URL: https://api.example.com/?token=[REDACTED]');
+```
+
+### When to use which helper
+
+- **`redactUrl(url)`** — The input is a KNOWN single URL. Fast path: returns input unchanged if there is no query, no hash, and no sensitive key. Use at log sites that interpolate a known-URL value (`\`fetched ${redactUrl(url)}\``).
+- **`redactUrlsFromString(text)`** — The input is FREE-FORM text that may embed zero or more URLs (an error message, a stack trace, a provider error payload). Walks every `http(s)://` substring and redacts each individually.
+- **`redactCredentials(value)`** — The input is a STRUCTURED payload (MCP transport config, provider auth state, SAP AI Core service-key JSON). Key names reveal the secret-carrying slots. Returns a deep-cloned tree for plain-object branches so callers can mutate safely.
+- **`scrubUrl` / `scrubUrlsFromString`** (pre-existing in `src/utils/logger.ts`) — Aggressive variants that blanket-redact the ENTIRE query string. Use only when the surrounding context is adversarial (public-facing audit logs, support bundles shared with external parties) and losing debuggability is an acceptable trade-off.
 
 ## Best Practices
 
