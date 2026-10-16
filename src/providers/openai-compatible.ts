@@ -61,7 +61,7 @@ export function normalizeToolContent<T extends OpenAICompatibleMessage>(
   if (!options?.normalizeNullToolContent) {
     return message;
   }
-  if (message.role === 'tool' && message.content == null) {
+  if (message.role === 'tool' && (message.content === null || message.content === undefined)) {
     return { ...message, content: '' };
   }
   return message;
