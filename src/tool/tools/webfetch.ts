@@ -5,6 +5,8 @@
 import { z } from 'zod';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
 import { normalizeUrls } from '../../utils/url.js';
+import { redactUrl } from '../../utils/url-redact.js';
+import { redactUrlsFromString } from '../../utils/logger.js';
 
 /**
  * Maximum number of bytes we will buffer from a single webfetch response.
@@ -121,9 +123,13 @@ Usage:
       try {
         parsedUrl = new URL(url);
       } catch {
+        // Redact credential-like query params before echoing the user-
+        // supplied URL back in an error. Protects against OAuth
+        // callback URLs (?code=..., ?token=...) leaking into logs even
+        // when the URL itself is otherwise invalid.
         return {
           success: false,
-          error: `Invalid URL format: ${params.url}`,
+          error: `Invalid URL format: ${redactUrl(params.url)}`,
         };
       }
 
@@ -214,9 +220,13 @@ Usage:
           error: 'Request timed out or was aborted',
         };
       }
+      // fetch() frequently embeds the request URL (with its query string)
+      // in the thrown error message — redact credential-like params
+      // before surfacing it to the caller.
+      const raw = err instanceof Error ? err.message : String(err);
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: redactUrlsFromString(raw),
       };
     }
   },
