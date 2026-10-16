@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // We mock it at the module level so no real HTTP client is constructed.
 const langfuseConstructorSpy = vi.fn();
 const traceSpy = vi.fn();
+const generationSpy = vi.fn();
+const generationEndSpy = vi.fn();
 const shutdownAsyncSpy = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('langfuse', () => {
@@ -34,9 +36,14 @@ vi.mock('langfuse', () => {
       traceSpy(args);
       return {
         id: 'trace-id',
-        generation: (): unknown => ({
-          end: (): void => undefined,
-        }),
+        generation: (gArgs: unknown): unknown => {
+          generationSpy(gArgs);
+          return {
+            end: (endArgs: unknown): void => {
+              generationEndSpy(endArgs);
+            },
+          };
+        },
       };
     }
     shutdownAsync(): Promise<void> {
@@ -48,6 +55,7 @@ vi.mock('langfuse', () => {
 
 import {
   _resetLangfuseTelemetryForTests,
+  classifyLangfuseError,
   finishLangfuseGeneration,
   failLangfuseGeneration,
   isEnvTruthy,
@@ -89,6 +97,8 @@ describe('langfuse-telemetry', () => {
     }
     langfuseConstructorSpy.mockClear();
     traceSpy.mockClear();
+    generationSpy.mockClear();
+    generationEndSpy.mockClear();
     shutdownAsyncSpy.mockClear();
     _resetLangfuseTelemetryForTests();
   });
@@ -345,6 +355,227 @@ describe('langfuse-telemetry', () => {
       expect(startLangfuseGeneration(undefined, { name: 'n', model: 'm' })).toBeUndefined();
       expect(() => finishLangfuseGeneration(undefined, {})).not.toThrow();
       expect(() => failLangfuseGeneration(undefined, new Error('x'))).not.toThrow();
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // classifyLangfuseError + failLangfuseGeneration error-span correlation
+  // (issue #2057, Cline PR #15100 parity).
+  // --------------------------------------------------------------------------
+  describe('error-span correlation', () => {
+    describe('classifyLangfuseError', () => {
+      it('marks content-filter rejections as terminal', () => {
+        const err = Object.assign(new Error('policy blocked'), {
+          name: 'ContentFilterError',
+          code: 'content_filter',
+        });
+        expect(classifyLangfuseError(err)).toEqual({
+          errorType: 'ContentFilterError',
+          errorMessage: 'policy blocked',
+          isTerminal: true,
+        });
+      });
+
+      it('marks permanent auth failures as terminal', () => {
+        const err = Object.assign(new Error('reauth required'), {
+          name: 'ReauthenticationRequiredError',
+        });
+        expect(classifyLangfuseError(err)).toEqual({
+          errorType: 'ReauthenticationRequiredError',
+          errorMessage: 'reauth required',
+          isTerminal: true,
+        });
+      });
+
+      it('marks free-tier rate limit as terminal (permanent quota)', () => {
+        const err = Object.assign(new Error('free tier quota exceeded'), {
+          name: 'FreeTierRateLimitError',
+          code: 'free_tier_rate_limit',
+          statusCode: 429,
+        });
+        expect(classifyLangfuseError(err)).toEqual({
+          errorType: 'FreeTierRateLimitError',
+          errorMessage: 'free tier quota exceeded',
+          isTerminal: true,
+        });
+      });
+
+      it('marks generic 429 (paid-tier rate limit) as transient', () => {
+        const err = Object.assign(new Error('rate limit'), {
+          name: 'ProviderRateLimitError',
+          code: 'provider_rate_limit',
+          statusCode: 429,
+        });
+        expect(classifyLangfuseError(err)).toEqual({
+          errorType: 'ProviderRateLimitError',
+          errorMessage: 'rate limit',
+          isTerminal: false,
+        });
+      });
+
+      it('marks HTTP 401/403 as terminal (auth)', () => {
+        const err401 = Object.assign(new Error('unauthorized'), { statusCode: 401 });
+        expect(classifyLangfuseError(err401).isTerminal).toBe(true);
+        const err403 = Object.assign(new Error('forbidden'), { statusCode: 403 });
+        expect(classifyLangfuseError(err403).isTerminal).toBe(true);
+      });
+
+      it('marks HTTP 400/404/422 as terminal (validation)', () => {
+        for (const status of [400, 404, 422]) {
+          const err = Object.assign(new Error('bad'), { statusCode: status });
+          expect(classifyLangfuseError(err).isTerminal).toBe(true);
+        }
+      });
+
+      it('marks HTTP 5xx and 429 as transient', () => {
+        for (const status of [500, 502, 503, 429]) {
+          const err = Object.assign(new Error('upstream'), { statusCode: status });
+          expect(classifyLangfuseError(err).isTerminal).toBe(false);
+        }
+      });
+
+      it('marks network errors (ECONNRESET, ETIMEDOUT) as transient', () => {
+        const reset = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        expect(classifyLangfuseError(reset).isTerminal).toBe(false);
+        const timeout = Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+        expect(classifyLangfuseError(timeout).isTerminal).toBe(false);
+      });
+
+      it('extracts status from response.status (axios-style)', () => {
+        const err = Object.assign(new Error('nope'), {
+          response: { status: 403 },
+        });
+        expect(classifyLangfuseError(err).isTerminal).toBe(true);
+      });
+
+      it('defaults unknown errors to transient so blips are not mis-flagged', () => {
+        expect(classifyLangfuseError(new Error('mystery'))).toEqual({
+          errorType: 'Error',
+          errorMessage: 'mystery',
+          isTerminal: false,
+        });
+      });
+
+      it('coerces non-Error values to a string message', () => {
+        expect(classifyLangfuseError('bare string')).toEqual({
+          errorType: 'Error',
+          errorMessage: 'bare string',
+          isTerminal: false,
+        });
+      });
+    });
+
+    async function enabledDecision(): Promise<ReturnType<typeof resolveAiSdkTelemetry>> {
+      stubEnv('ALEXI_LANGFUSE_ALL_PROVIDERS', '1');
+      stubEnv('LANGFUSE_BASE_URL', 'https://cloud.langfuse.com');
+      stubEnv('LANGFUSE_PUBLIC_KEY', 'pk-x');
+      stubEnv('LANGFUSE_SECRET_KEY', 'sk-x');
+      return resolveAiSdkTelemetry(BYOK_MODEL);
+    }
+
+    it('failLangfuseGeneration auto-classifies errors into error-span metadata', async () => {
+      const decision = await enabledDecision();
+      const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+      const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+      const err = Object.assign(new Error('unauthorized'), {
+        name: 'AuthError',
+        statusCode: 401,
+      });
+      failLangfuseGeneration(gen, err);
+      expect(generationEndSpy).toHaveBeenCalledTimes(1);
+      expect(generationEndSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'ERROR',
+          statusMessage: 'unauthorized',
+          metadata: {
+            errorType: 'AuthError',
+            errorMessage: 'unauthorized',
+            isTerminal: true,
+          },
+        })
+      );
+    });
+
+    it('failLangfuseGeneration marks transient network errors with isTerminal=false', async () => {
+      const decision = await enabledDecision();
+      const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+      const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+      const err = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+      failLangfuseGeneration(gen, err);
+      expect(generationEndSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'ERROR',
+          metadata: expect.objectContaining({
+            isTerminal: false,
+          }),
+        })
+      );
+    });
+
+    it('failLangfuseGeneration honours an explicit context override', async () => {
+      const decision = await enabledDecision();
+      const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+      const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+      failLangfuseGeneration(gen, new Error('raw msg'), {
+        errorType: 'CustomClassifiedError',
+        errorMessage: 'redacted',
+        isTerminal: true,
+      });
+      expect(generationEndSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'ERROR',
+          statusMessage: 'redacted',
+          metadata: {
+            errorType: 'CustomClassifiedError',
+            errorMessage: 'redacted',
+            isTerminal: true,
+          },
+        })
+      );
+    });
+
+    it('failLangfuseGeneration classifies content-filter errors as terminal', async () => {
+      const decision = await enabledDecision();
+      const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+      const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+      const err = Object.assign(new Error('blocked by content policy'), {
+        name: 'ContentFilterError',
+        code: 'content_filter',
+      });
+      failLangfuseGeneration(gen, err);
+      expect(generationEndSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            errorType: 'ContentFilterError',
+            errorMessage: 'blocked by content policy',
+            isTerminal: true,
+          },
+        })
+      );
+    });
+
+    it('failLangfuseGeneration is still a no-op when generation is undefined', () => {
+      expect(() => failLangfuseGeneration(undefined, new Error('x'))).not.toThrow();
+      expect(generationEndSpy).not.toHaveBeenCalled();
+    });
+
+    it('successful finishLangfuseGeneration does NOT attach error-span metadata', async () => {
+      const decision = await enabledDecision();
+      const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+      const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+      finishLangfuseGeneration(gen, {
+        output: 'ok',
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      });
+      expect(generationEndSpy).toHaveBeenCalledTimes(1);
+      const endArgs = generationEndSpy.mock.calls[0][0] as {
+        level?: string;
+        metadata?: Record<string, unknown>;
+      };
+      expect(endArgs.level).toBeUndefined();
+      // No error context fields on a success end.
+      expect(endArgs.metadata).not.toMatchObject({ errorType: expect.anything() });
+      expect(endArgs.metadata).not.toMatchObject({ isTerminal: expect.anything() });
     });
   });
 });

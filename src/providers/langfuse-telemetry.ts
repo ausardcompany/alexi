@@ -37,6 +37,11 @@
 import type { Langfuse, LangfuseGenerationClient, LangfuseTraceClient } from 'langfuse';
 
 import { env } from '../config/env.js';
+import {
+  isContentFilterError,
+  isPermanentAuthFailure,
+  isRateLimitError,
+} from '../core/error-backoff.js';
 
 // ============================================================================
 // Env var names (operators grep for these)
@@ -459,20 +464,227 @@ export function finishLangfuseGeneration(
 }
 
 /**
+ * Structured error-span correlation context attached to a failed
+ * Langfuse generation (issue #2057, Cline PR #15100 parity).
+ *
+ * - `errorType` — the error class name used for dashboard filtering
+ *   (e.g. `ContentFilterError`, `FreeTierRateLimitError`, `AuthError`,
+ *   `NetworkError`). When omitted, {@link classifyLangfuseError}
+ *   derives it from the error's `name`, `code`, or constructor.
+ * - `errorMessage` — human-readable description for debugging.
+ *   Callers are responsible for redaction (see #2051); we never
+ *   touch credentials here.
+ * - `isTerminal` — operator hint that distinguishes permanent config
+ *   failures (`true`: auth, validation, content filter, 4xx except
+ *   429) from transient blips the retry budget is expected to
+ *   absorb (`false`: network, 5xx, 429 / rate limit).
+ */
+export interface LangfuseErrorContext {
+  errorType?: string;
+  errorMessage?: string;
+  isTerminal?: boolean;
+}
+
+/**
+ * HTTP status codes considered terminal (permanent config failure)
+ * per the error contract in `AGENTS.md`. 429 is NOT in this set —
+ * it's a transient rate-limit the retry budget will absorb.
+ */
+const TERMINAL_HTTP_STATUSES = new Set([400, 401, 403, 404, 422]);
+
+/**
+ * Extract an HTTP status code from an error, when present. Looks at the
+ * common surface shapes used by SAP SDK, fetch, and axios wrappers:
+ * `statusCode`, `status`, `response.status`.
+ */
+function extractStatusCode(err: unknown): number | undefined {
+  if (!err || typeof err !== 'object') {
+    return undefined;
+  }
+  const candidate = err as {
+    statusCode?: unknown;
+    status?: unknown;
+    response?: { status?: unknown };
+  };
+  if (typeof candidate.statusCode === 'number') {
+    return candidate.statusCode;
+  }
+  if (typeof candidate.status === 'number') {
+    return candidate.status;
+  }
+  if (
+    candidate.response &&
+    typeof candidate.response === 'object' &&
+    typeof candidate.response.status === 'number'
+  ) {
+    return candidate.response.status;
+  }
+  return undefined;
+}
+
+/**
+ * Match the error-code strings `ErrorBackoff` emits for network-level
+ * transients. Mirrors the agent-workflow transient regex in
+ * `AGENTS.md#error-classification` so Langfuse labelling stays
+ * consistent with the retry budget.
+ */
+function isNetworkTransient(err: unknown): boolean {
+  if (!err || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { code?: unknown; message?: unknown };
+  const code = typeof candidate.code === 'string' ? candidate.code : '';
+  if (
+    code === 'ECONNRESET' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ENOTFOUND' ||
+    code === 'EPIPE' ||
+    code === 'EAGAIN' ||
+    code === 'EBUSY'
+  ) {
+    return true;
+  }
+  const msg = typeof candidate.message === 'string' ? candidate.message : '';
+  return /socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|fetch failed/i.test(msg);
+}
+
+/**
+ * Classify an error into Langfuse error-span context fields. Pure
+ * function — safe to call without an active Langfuse client.
+ *
+ * Classification rules (aligned with `AGENTS.md#error-classification`
+ * and the retry contract in `docs/ARCHITECTURE.md#error-handling`):
+ *
+ * Terminal (permanent, operator must fix):
+ *   - Content-filter rejections (`ContentFilterError`)
+ *   - Permanent auth failures (`NoRefreshTokenError`,
+ *     `ReauthenticationRequiredError`)
+ *   - Free-tier rate-limit (quota permanently blocks until window reset,
+ *     treated as fatal by `ErrorBackoff.isFatal`)
+ *   - HTTP 400, 401, 403, 404, 422
+ *
+ * Transient (retry budget expected to absorb):
+ *   - HTTP 429 (generic rate limit) and HTTP 5xx
+ *   - Network errors (ECONNRESET, ETIMEDOUT, ENOTFOUND, ...)
+ *   - xAI capacity errors
+ *
+ * The returned `errorType` prefers the error class name
+ * (`err.name` / constructor name) so dashboards can filter by named
+ * error families without parsing messages.
+ */
+export function classifyLangfuseError(err: unknown): LangfuseErrorContext {
+  const errorMessage = err instanceof Error ? err.message : String(err);
+
+  let errorType = 'Error';
+  if (err && typeof err === 'object') {
+    const candidate = err as { name?: unknown; constructor?: { name?: unknown } };
+    if (typeof candidate.name === 'string' && candidate.name.length > 0) {
+      errorType = candidate.name;
+    } else if (
+      candidate.constructor &&
+      typeof candidate.constructor.name === 'string' &&
+      candidate.constructor.name.length > 0 &&
+      candidate.constructor.name !== 'Object'
+    ) {
+      errorType = candidate.constructor.name;
+    }
+  }
+
+  // Terminal classes first — these short-circuit the HTTP-status check.
+  if (isContentFilterError(err) || isPermanentAuthFailure(err)) {
+    return { errorType, errorMessage, isTerminal: true };
+  }
+
+  // Free-tier rate limit is permanent per the error contract even
+  // though its underlying HTTP code is 429. We detect it structurally
+  // via the error name so cross-module re-imports still match.
+  if (err && typeof err === 'object') {
+    const candidate = err as { name?: unknown; code?: unknown };
+    if (candidate.name === 'FreeTierRateLimitError' || candidate.code === 'free_tier_rate_limit') {
+      return { errorType, errorMessage, isTerminal: true };
+    }
+  }
+
+  // Transient rate-limit (generic 429) comes before the HTTP-status
+  // check so we classify 429 as transient regardless of how the
+  // provider surfaced the status code.
+  if (isRateLimitError(err)) {
+    return { errorType, errorMessage, isTerminal: false };
+  }
+
+  const status = extractStatusCode(err);
+  if (status !== undefined) {
+    if (TERMINAL_HTTP_STATUSES.has(status)) {
+      return { errorType, errorMessage, isTerminal: true };
+    }
+    // 429 handled above; other 4xx fall through to terminal; 5xx is
+    // transient. `429` would be caught by `isRateLimitError` above
+    // only when the error carries the rate-limit `code`/`name`
+    // marker — a raw `statusCode === 429` still routes here.
+    if (status === 429) {
+      return { errorType, errorMessage, isTerminal: false };
+    }
+    if (status >= 400 && status < 500) {
+      return { errorType, errorMessage, isTerminal: true };
+    }
+    if (status >= 500 && status < 600) {
+      return { errorType, errorMessage, isTerminal: false };
+    }
+  }
+
+  if (isNetworkTransient(err)) {
+    return { errorType, errorMessage, isTerminal: false };
+  }
+
+  // Unknown error shape: default to transient so dashboards do not
+  // mis-flag an unclassified blip as a permanent config failure.
+  // Operators can refine the classifier if they see noise.
+  return { errorType, errorMessage, isTerminal: false };
+}
+
+/**
  * Record an error on a Langfuse generation and end it. Safe with
  * `generation === undefined`.
+ *
+ * Issue #2057 extends this to attach structured error-span correlation
+ * (`errorType`, `errorMessage`, `isTerminal`) as Langfuse metadata so
+ * terminal stream failures surface as filterable error spans in the
+ * dashboard. The caller can either supply an explicit {@link
+ * LangfuseErrorContext} override OR rely on {@link
+ * classifyLangfuseError} to derive the fields from the thrown error.
+ *
+ * The call signature stays backward-compatible: existing call sites
+ * that pass only `(generation, error)` continue to work and will
+ * auto-classify the error.
  */
 export function failLangfuseGeneration(
   generation: LangfuseGenerationClient | undefined,
-  error: unknown
+  error: unknown,
+  context?: LangfuseErrorContext
 ): void {
   if (!generation) {
     return;
   }
+  const classified = classifyLangfuseError(error);
+  const errorType = context?.errorType ?? classified.errorType;
+  const errorMessage = context?.errorMessage ?? classified.errorMessage;
+  const isTerminal = context?.isTerminal ?? classified.isTerminal;
+  const metadata: Record<string, unknown> = {};
+  if (errorType !== undefined) {
+    metadata.errorType = errorType;
+  }
+  if (errorMessage !== undefined) {
+    metadata.errorMessage = errorMessage;
+  }
+  if (isTerminal !== undefined) {
+    metadata.isTerminal = isTerminal;
+  }
   try {
     generation.end({
       level: 'ERROR',
-      statusMessage: error instanceof Error ? error.message : String(error),
+      statusMessage: errorMessage ?? (error instanceof Error ? error.message : String(error)),
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
   } catch (err) {
     debugLangfuse(
