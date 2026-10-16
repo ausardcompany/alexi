@@ -5546,12 +5546,12 @@ beforeEach(() => {
 
 ## Testing BYOK Langfuse Telemetry
 
-The BYOK Langfuse telemetry module (`src/providers/langfuse-telemetry.ts`, introduced in `1.22.36`) is covered by two complementary suites: a 350-line unit suite that pins the observable contract (opt-in gating, env parsing, merge rules, span-lifecycle no-ops) and a 191-line integration suite that boots a real HTTP receiver and verifies the SDK-emitted payload.
+The BYOK Langfuse telemetry module (`src/providers/langfuse-telemetry.ts`, introduced in `1.22.36`, extended with error-span correlation in commit `b2cdb689` for issue #2057) is covered by two complementary suites: a 575-line unit suite that pins the observable contract (opt-in gating, env parsing, merge rules, span-lifecycle no-ops, AND the full error-classification matrix) and a 260-line integration suite that boots a real HTTP receiver and verifies the SDK-emitted payload for both the happy path and the terminal-error path.
 
 ### Test files
+- `src/providers/__tests__/langfuse-telemetry.test.ts` (575 lines) — unit coverage. Mocks the `langfuse` SDK at the module level so no network traffic is attempted; exercises `isEnvTruthy`, `readDirectLangfuseTelemetryConfig`, `resolveAiSdkTelemetry`, `readEnvTraceAttributes`, `withLangfuseTraceAttributes`, the span lifecycle helpers, AND the full `classifyLangfuseError` matrix with `failLangfuseGeneration` error-span correlation (see [Error-span correlation](#error-span-correlation-on-stream-failures-issue-2057) below).
 
-- `src/providers/__tests__/langfuse-telemetry.test.ts` (350 lines) — unit coverage. Mocks the `langfuse` SDK at the module level so no network traffic is attempted; exercises `isEnvTruthy`, `readDirectLangfuseTelemetryConfig`, `resolveAiSdkTelemetry`, `readEnvTraceAttributes`, `withLangfuseTraceAttributes`, and the span lifecycle helpers.
-- `tests/providers/langfuse-telemetry-integration.test.ts` (191 lines) — integration coverage. Starts a `node:http` server on a random port, points `LANGFUSE_BASE_URL` at it, drives one trace + generation lifecycle, and asserts on the batched ingestion payload the real SDK sends.
+- `tests/providers/langfuse-telemetry-integration.test.ts` (260 lines) — integration coverage. Starts a `node:http` server on a random port, points `LANGFUSE_BASE_URL` at it, drives one trace + generation lifecycle, asserts on the batched ingestion payload the real SDK sends, AND exercises a terminal-401 error flow to pin the error-span metadata contract.
 
 ### Mocking the langfuse SDK (unit suite)
 
@@ -5679,6 +5679,54 @@ The 2-second deadline keeps the test from hanging the suite when the SDK fails t
 - **Prefer `_resetLangfuseTelemetryForTests()` over `vi.resetModules()`.** The reset helper drains the module-level `clientCache` without re-running top-level imports, so the mock applied with `vi.mock('langfuse', ...)` stays in effect.
 - **Assert on the direct-exporter stamp.** Every integration suite that touches this module MUST verify `sdkIntegration === 'alexi-langfuse-direct'` on at least one emitted batch. If the stamp ever regresses to the default (`'default'`), the entire security boundary between BYOK and the OTLP relay is broken silently.
 - **Always point `LANGFUSE_BASE_URL` at a loopback port in integration tests.** Never let the test accidentally emit to `https://cloud.langfuse.com` — a stray hostname in a fixture would ship synthetic traces to a real project.
+
+### Error-span correlation (issue #2057)
+
+The new `describe('error-span correlation', ...)` block in `src/providers/__tests__/langfuse-telemetry.test.ts` has two sub-blocks and seven lifecycle cases. See [`docs/PROVIDERS.md#error-span-correlation-on-stream-failures-issue-2057-commit-b2cdb689`](PROVIDERS.md#error-span-correlation-on-stream-failures-issue-2057-commit-b2cdb689) for the user-facing contract.
+
+**Classifier matrix (`describe('classifyLangfuseError', ...)`)**. Each case Object-assigns a Node `Error` with the fields the module inspects (`name`, `code`, `statusCode`, `response.status`) and asserts on the full `{ errorType, errorMessage, isTerminal }` tuple:
+
+```typescript
+it('marks free-tier rate limit as terminal (permanent quota)', () => {
+  const err = Object.assign(new Error('free tier quota exceeded'), {
+    name: 'FreeTierRateLimitError',
+    code: 'free_tier_rate_limit',
+    statusCode: 429,
+  });
+  expect(classifyLangfuseError(err)).toEqual({
+    errorType: 'FreeTierRateLimitError',
+    errorMessage: 'free tier quota exceeded',
+    isTerminal: true,
+  });
+});
+```
+
+Covered scenarios: content-filter → terminal; permanent auth (`ReauthenticationRequiredError`) → terminal; free-tier rate limit → terminal (even though the HTTP code is 429); generic 429 → transient; HTTP 401/403 → terminal; HTTP 400/404/422 → terminal; HTTP 500/502/503/429 → transient; network errors (`ECONNRESET`, `ETIMEDOUT`) → transient; axios-style `response.status` → classified via the nested field; unknown-shape errors → transient; non-`Error` values coerced to string.
+
+**Lifecycle cases (`describe('error-span correlation', ...)` outside the classifier block)**. Drive the full `startLangfuseTrace → startLangfuseGeneration → failLangfuseGeneration` path and assert on the `generationEndSpy` arguments:
+
+- Auto-classified 401 → `generation.end` called once with `{ level: 'ERROR', statusMessage: 'unauthorized', metadata: { errorType: 'AuthError', errorMessage: 'unauthorized', isTerminal: true } }`.
+- Transient network error (`ECONNRESET`) → metadata `isTerminal: false` while level stays `ERROR`.
+- Explicit context override → caller-supplied `{ errorType, errorMessage, isTerminal }` wins over the classifier (needed for redaction and custom error families).
+- Content-filter error → `isTerminal: true` even without an HTTP status code.
+- `generation === undefined` is a no-op (byte-identical to the pre-#2057 contract) and MUST NOT call `generation.end`.
+- Successful `finishLangfuseGeneration` does NOT attach `errorType` / `isTerminal` metadata — a success span never looks like an error span.
+
+The spy harness is extended with `generationSpy` + `generationEndSpy` to capture the `generation()` and `end()` arguments; `beforeEach` clears both. See the mocked SDK block near the top of the test file.
+
+**Integration case (`tests/providers/langfuse-telemetry-integration.test.ts`)**. The second `it(...)` case drives a real 401 through the real `langfuse` SDK, flushes the batch to the loopback receiver, and walks the recorded events for the first `generation-update` or `observation-update` entry with `body.level === 'ERROR'`. It asserts:
+
+```typescript
+expect(errorUpdate?.body.level).toBe('ERROR');
+expect(errorUpdate?.body.statusMessage).toBe('unauthorized');
+expect(errorUpdate?.body.metadata).toMatchObject({
+  errorType: 'AuthError',
+  errorMessage: 'unauthorized',
+  isTerminal: true,
+});
+```
+
+This is the cross-cutting invariant: the metadata the unit test asserts on the end-call payload actually survives the SDK's batching, serialisation, and HTTP POST and lands on the ingestion endpoint in a shape a Langfuse dashboard can filter.
 
 ## Testing Hooks
 

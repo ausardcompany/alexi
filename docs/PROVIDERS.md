@@ -3568,9 +3568,16 @@ export function finishLangfuseGeneration(
   generation: LangfuseGenerationClient | undefined,
   data: { output?: unknown; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }; finishReason?: string }
 ): void;
+export interface LangfuseErrorContext {
+  errorType?: string;
+  errorMessage?: string;
+  isTerminal?: boolean;
+}
+export function classifyLangfuseError(err: unknown): LangfuseErrorContext;
 export function failLangfuseGeneration(
   generation: LangfuseGenerationClient | undefined,
-  error: unknown
+  error: unknown,
+  context?: LangfuseErrorContext
 ): void;
 ```
 
@@ -3618,12 +3625,49 @@ The dynamic `import('langfuse')` keeps the SDK out of the hot boot path when BYO
 
 Both the non-streaming and streaming chat paths call `resolveAiSdkTelemetry()` once per request and emit a parallel Langfuse trace alongside the OTLP span. The two integrations are independent — enabling one does not require the other:
 
-- `src/providers/sapOrchestration.ts:1734-1774` (non-streaming `chatCompletion`): starts a `sap-ai-core.chat` trace, nests one `generation`, calls `failLangfuseGeneration` on `classifyRateLimitError`, calls `finishLangfuseGeneration` on success with `{ output, usage, finishReason }`.
-- `src/providers/sapOrchestration.ts:1850-1946` (streaming `chatCompletionStream`): same lifecycle; `failLangfuseGeneration` is called on both the initial dispatch error AND on stream-mid errors so a partially-emitted stream still records an error observation.
+- `src/providers/sapOrchestration.ts:1734-1774` (non-streaming `chatCompletion`): starts a `sap-ai-core.chat` trace, nests one `generation`, calls `failLangfuseGeneration` on error (auto-classifying `errorType` / `errorMessage` / `isTerminal` from the thrown value — see [Error-span correlation on stream failures](#error-span-correlation-on-stream-failures-issue-2057-commit-b2cdb689)), calls `finishLangfuseGeneration` on success with `{ output, usage, finishReason }`.
+- `src/providers/sapOrchestration.ts:1850-1946` (streaming `chatCompletionStream`): same lifecycle; `failLangfuseGeneration` is called on both the initial dispatch error AND on stream-mid errors so a partially-emitted stream still records an error observation. Both error paths route through `classifyLangfuseError` so terminal 4xx / content-filter / auth failures surface as `isTerminal: true` dashboard-filterable spans and transient 5xx / 429 / network blips surface as `isTerminal: false`.
+
+### Error-span correlation on stream failures (issue #2057, commit `b2cdb689`)
+
+A stream failure that reaches `failLangfuseGeneration` now attaches structured error-span metadata to the Langfuse generation it ends, instead of just emitting a bare `level: 'ERROR'` observation. The metadata lets a dashboard filter on named error families (`ContentFilterError`, `FreeTierRateLimitError`, `AuthError`, `NetworkError`), separate permanent operator-side failures from transient blips the retry budget will absorb, and keep a readable `statusMessage` for the human looking at the span.
+
+The classifier is a pure function — safe to call outside an active Langfuse client — and aligns with the error contract in [`AGENTS.md#error-classification`](../AGENTS.md) and [`docs/ARCHITECTURE.md#error-handling`](ARCHITECTURE.md#error-handling):
+
+| Error family                                                                        | `isTerminal` | Rationale                                                                                              |
+| ----------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------ |
+| `ContentFilterError` (policy block)                                                 | `true`       | The upstream rejected the content; retrying with the same payload cannot succeed.                       |
+| `NoRefreshTokenError`, `ReauthenticationRequiredError`                              | `true`       | Permanent auth failures — operator must re-authenticate before retry can succeed.                       |
+| `FreeTierRateLimitError` (name OR `code: 'free_tier_rate_limit'`)                   | `true`       | Free-tier quota is permanently blocked until the window resets; `ErrorBackoff.isFatal` already stops retry. |
+| HTTP `400`, `401`, `403`, `404`, `422`                                              | `true`       | Validation / auth / shape errors — permanent config failures per the error contract.                   |
+| Generic HTTP `429` (rate limit)                                                     | `false`      | Transient paid-tier limit — `ErrorBackoff` is expected to absorb this with exponential backoff.         |
+| HTTP `5xx` (`500`, `502`, `503`, ...)                                               | `false`      | Transient upstream blips; the retry budget covers them.                                                 |
+| Network: `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND`, `EPIPE`, `EAGAIN`, `EBUSY` | `false` | Match the agent-workflow transient regex in `AGENTS.md`.                                                |
+| Unknown / unclassified                                                              | `false`      | Default to transient so an unseen blip is not mis-flagged as a permanent config failure.                |
+
+The classifier is defensive about error shape. `extractStatusCode` consults `err.statusCode`, `err.status`, and `err.response.status` so SAP SDK, fetch, and axios wrappers all route into the same classification. The `errorType` prefers `err.name`, then the constructor name, falling back to `'Error'` so dashboards can filter by named error families without parsing messages.
+
+Call-site contract:
+
+```typescript
+// Backward-compatible call: auto-classify from the thrown error.
+failLangfuseGeneration(generation, err);
+
+// Override path: supply explicit context for redacted or custom-classified errors.
+failLangfuseGeneration(generation, err, {
+  errorType: 'CustomClassifiedError',
+  errorMessage: 'redacted',
+  isTerminal: true,
+});
+```
+
+The emitted `generation.end({ level: 'ERROR', statusMessage, metadata })` sets `metadata.errorType`, `metadata.errorMessage`, and `metadata.isTerminal`. Successful ends via `finishLangfuseGeneration` continue to emit no `level` and no error-correlation metadata — a success span never looks like an error span. Callers are responsible for redacting credentials from `errorMessage` before passing an override; `classifyLangfuseError` never touches message content beyond coercing a non-`Error` value to a string.
+
+Both `src/providers/sapOrchestration.ts:1850-1946` call sites (streaming dispatch error AND stream-mid error) now route through the auto-classifying path, so a partially-emitted stream still records an error observation with the correct `isTerminal` flag.
 
 ### Testing
 
-See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract (350 lines of unit coverage in `src/providers/__tests__/langfuse-telemetry.test.ts`, 191-line HTTP-server integration test in `tests/providers/langfuse-telemetry-integration.test.ts`).
+See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract. The unit suite in `src/providers/__tests__/langfuse-telemetry.test.ts` (now 575 lines) covers the opt-in gate, env parsing, merge rules, span-lifecycle no-ops, AND the full `classifyLangfuseError` matrix (content filter, permanent auth, free-tier rate limit, 429 transient, 4xx terminal, 5xx transient, network transient, axios `response.status`, unknown-shape fallback, non-`Error` coercion). The integration suite in `tests/providers/langfuse-telemetry-integration.test.ts` (260 lines) adds a dedicated case that drives a terminal 401 through `failLangfuseGeneration` and asserts the real SDK ships `metadata: { errorType, errorMessage, isTerminal: true }` on the `generation-update` batch.
 
 ## Auxiliary-Task Model Selection
 
