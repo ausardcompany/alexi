@@ -5547,12 +5547,12 @@ beforeEach(() => {
 
 ## Testing BYOK Langfuse Telemetry
 
-The BYOK Langfuse telemetry module (`src/providers/langfuse-telemetry.ts`, introduced in `1.22.36`) is covered by two complementary suites: a 350-line unit suite that pins the observable contract (opt-in gating, env parsing, merge rules, span-lifecycle no-ops) and a 191-line integration suite that boots a real HTTP receiver and verifies the SDK-emitted payload.
+The BYOK Langfuse telemetry module (`src/providers/langfuse-telemetry.ts`, introduced in `1.22.36`, extended with error-span correlation in commit `b2cdb689` for issue #2057) is covered by two complementary suites: a 575-line unit suite that pins the observable contract (opt-in gating, env parsing, merge rules, span-lifecycle no-ops, AND the full error-classification matrix) and a 260-line integration suite that boots a real HTTP receiver and verifies the SDK-emitted payload for both the happy path and the terminal-error path.
 
 ### Test files
+- `src/providers/__tests__/langfuse-telemetry.test.ts` (575 lines) — unit coverage. Mocks the `langfuse` SDK at the module level so no network traffic is attempted; exercises `isEnvTruthy`, `readDirectLangfuseTelemetryConfig`, `resolveAiSdkTelemetry`, `readEnvTraceAttributes`, `withLangfuseTraceAttributes`, the span lifecycle helpers, AND the full `classifyLangfuseError` matrix with `failLangfuseGeneration` error-span correlation (see [Error-span correlation](#error-span-correlation-on-stream-failures-issue-2057) below).
 
-- `src/providers/__tests__/langfuse-telemetry.test.ts` (350 lines) — unit coverage. Mocks the `langfuse` SDK at the module level so no network traffic is attempted; exercises `isEnvTruthy`, `readDirectLangfuseTelemetryConfig`, `resolveAiSdkTelemetry`, `readEnvTraceAttributes`, `withLangfuseTraceAttributes`, and the span lifecycle helpers.
-- `tests/providers/langfuse-telemetry-integration.test.ts` (191 lines) — integration coverage. Starts a `node:http` server on a random port, points `LANGFUSE_BASE_URL` at it, drives one trace + generation lifecycle, and asserts on the batched ingestion payload the real SDK sends.
+- `tests/providers/langfuse-telemetry-integration.test.ts` (260 lines) — integration coverage. Starts a `node:http` server on a random port, points `LANGFUSE_BASE_URL` at it, drives one trace + generation lifecycle, asserts on the batched ingestion payload the real SDK sends, AND exercises a terminal-401 error flow to pin the error-span metadata contract.
 
 ### Mocking the langfuse SDK (unit suite)
 
@@ -5680,6 +5680,116 @@ The 2-second deadline keeps the test from hanging the suite when the SDK fails t
 - **Prefer `_resetLangfuseTelemetryForTests()` over `vi.resetModules()`.** The reset helper drains the module-level `clientCache` without re-running top-level imports, so the mock applied with `vi.mock('langfuse', ...)` stays in effect.
 - **Assert on the direct-exporter stamp.** Every integration suite that touches this module MUST verify `sdkIntegration === 'alexi-langfuse-direct'` on at least one emitted batch. If the stamp ever regresses to the default (`'default'`), the entire security boundary between BYOK and the OTLP relay is broken silently.
 - **Always point `LANGFUSE_BASE_URL` at a loopback port in integration tests.** Never let the test accidentally emit to `https://cloud.langfuse.com` — a stray hostname in a fixture would ship synthetic traces to a real project.
+
+### Error-span correlation (issue #2057)
+
+The new `describe('error-span correlation', ...)` block in `src/providers/__tests__/langfuse-telemetry.test.ts` has two sub-blocks and seven lifecycle cases. See [`docs/PROVIDERS.md#error-span-correlation-on-stream-failures-issue-2057-commit-b2cdb689`](PROVIDERS.md#error-span-correlation-on-stream-failures-issue-2057-commit-b2cdb689) for the user-facing contract.
+
+**Classifier matrix (`describe('classifyLangfuseError', ...)`)**. Each case Object-assigns a Node `Error` with the fields the module inspects (`name`, `code`, `statusCode`, `response.status`) and asserts on the full `{ errorType, errorMessage, isTerminal }` tuple:
+
+```typescript
+it('marks free-tier rate limit as terminal (permanent quota)', () => {
+  const err = Object.assign(new Error('free tier quota exceeded'), {
+    name: 'FreeTierRateLimitError',
+    code: 'free_tier_rate_limit',
+    statusCode: 429,
+  });
+  expect(classifyLangfuseError(err)).toEqual({
+    errorType: 'FreeTierRateLimitError',
+    errorMessage: 'free tier quota exceeded',
+    isTerminal: true,
+  });
+});
+```
+
+Covered scenarios: content-filter → terminal; permanent auth (`ReauthenticationRequiredError`) → terminal; free-tier rate limit → terminal (even though the HTTP code is 429); generic 429 → transient; HTTP 401/403 → terminal; HTTP 400/404/422 → terminal; HTTP 500/502/503/429 → transient; network errors (`ECONNRESET`, `ETIMEDOUT`) → transient; axios-style `response.status` → classified via the nested field; unknown-shape errors → transient; non-`Error` values coerced to string.
+
+**Lifecycle cases (`describe('error-span correlation', ...)` outside the classifier block)**. Drive the full `startLangfuseTrace → startLangfuseGeneration → failLangfuseGeneration` path and assert on the `generationEndSpy` arguments:
+
+- Auto-classified 401 → `generation.end` called once with `{ level: 'ERROR', statusMessage: 'unauthorized', metadata: { errorType: 'AuthError', errorMessage: 'unauthorized', isTerminal: true } }`.
+- Transient network error (`ECONNRESET`) → metadata `isTerminal: false` while level stays `ERROR`.
+- Explicit context override → caller-supplied `{ errorType, errorMessage, isTerminal }` wins over the classifier (needed for redaction and custom error families).
+- Content-filter error → `isTerminal: true` even without an HTTP status code.
+- `generation === undefined` is a no-op (byte-identical to the pre-#2057 contract) and MUST NOT call `generation.end`.
+- Successful `finishLangfuseGeneration` does NOT attach `errorType` / `isTerminal` metadata — a success span never looks like an error span.
+
+The spy harness is extended with `generationSpy` + `generationEndSpy` to capture the `generation()` and `end()` arguments; `beforeEach` clears both. See the mocked SDK block near the top of the test file.
+
+**Integration case (`tests/providers/langfuse-telemetry-integration.test.ts`)**. The second `it(...)` case drives a real 401 through the real `langfuse` SDK, flushes the batch to the loopback receiver, and walks the recorded events for the first `generation-update` or `observation-update` entry with `body.level === 'ERROR'`. It asserts:
+
+```typescript
+expect(errorUpdate?.body.level).toBe('ERROR');
+expect(errorUpdate?.body.statusMessage).toBe('unauthorized');
+expect(errorUpdate?.body.metadata).toMatchObject({
+  errorType: 'AuthError',
+  errorMessage: 'unauthorized',
+  isTerminal: true,
+});
+```
+
+This is the cross-cutting invariant: the metadata the unit test asserts on the end-call payload actually survives the SDK's batching, serialisation, and HTTP POST and lands on the ingestion endpoint in a shape a Langfuse dashboard can filter.
+
+### Credential redaction (issue #2057 safety net)
+
+The follow-up safety net introduced in commit `2afacd26` is covered by an eleven-case `describe('credential redaction (issue #2057 safety net)', ...)` block inside `src/providers/__tests__/langfuse-telemetry.test.ts`. See [`docs/PROVIDERS.md#credential-redaction-safety-net-issue-2057-commit-2afacd26`](PROVIDERS.md#credential-redaction-safety-net-issue-2057-commit-2afacd26) for the user-facing contract.
+
+The suite tests the exported `redactCredentialsFromString` helper directly AND verifies that `classifyLangfuseError` / `failLangfuseGeneration` apply it on both the auto-classified path and the caller-override path. Each case constructs a free-form string that mimics a real provider-error leakage, asserts that the leaked token is NOT present in the output, and asserts that the surrounding non-secret text is preserved:
+
+```typescript
+import {
+  classifyLangfuseError,
+  failLangfuseGeneration,
+  redactCredentialsFromString,
+  startLangfuseGeneration,
+  startLangfuseTrace,
+} from '../langfuse-telemetry.js';
+
+it('redactCredentialsFromString strips bearer tokens', () => {
+  const text = 'request failed: Authorization: Bearer sk-abc123XYZ_longenoughtoken';
+  expect(redactCredentialsFromString(text)).toBe(
+    'request failed: Authorization: Bearer [REDACTED]'
+  );
+});
+
+it('redactCredentialsFromString strips JSON clientsecret fields', () => {
+  const text = 'bad config: {"clientid":"foo","clientsecret":"abcdefg12345"}';
+  const result = redactCredentialsFromString(text);
+  expect(result).toContain('"clientsecret":"[REDACTED]"');
+  expect(result).not.toContain('abcdefg12345');
+});
+
+it('redactCredentialsFromString strips PEM private keys', () => {
+  const pem =
+    '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAK...\n-----END RSA PRIVATE KEY-----';
+  expect(redactCredentialsFromString(`err: ${pem} tail`)).toBe('err: [REDACTED_PEM] tail');
+});
+```
+
+Full matrix (eleven cases):
+
+| Case                                                              | Pattern                                          | Assertion                                                                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| Bearer token inline                                               | `Authorization: Bearer sk-abc123XYZ_longenoughtoken` | Exact replacement to `Bearer [REDACTED]`; surrounding `request failed:` prefix is preserved.          |
+| Basic auth value                                                  | `Basic YWRtaW46cGFzc3dvcmQ=`                     | Exact replacement to `Basic [REDACTED]`.                                                              |
+| JSON `clientsecret` field                                         | `{"clientid":"foo","clientsecret":"abcdefg12345"}` | Output contains `"clientsecret":"[REDACTED]"` AND does NOT contain the raw secret.                     |
+| Loose `key=value` secret                                          | `api_key=sk-live-abcdef12345, other=visible`     | Output contains `[REDACTED]`; the raw secret is gone; adjacent `other=visible` pair is preserved.      |
+| PEM private key (multi-line)                                      | `-----BEGIN RSA PRIVATE KEY-----…-----END RSA PRIVATE KEY-----` | Entire block replaced by `[REDACTED_PEM]`; surrounding `err:` prefix and ` tail` suffix are preserved. |
+| JWT-shaped token                                                  | `<header>.<payload>.<signature>` (three base64url segments, 40+/10+/10+ chars) | Output contains `[REDACTED_JWT]`; the raw token prefix is gone.                                        |
+| URL query-string token (delegated to `scrubUrlsFromString`)       | `https://api.example.com/cb?access_token=mysecret&foo=bar` | The raw `mysecret` is gone; `[REDACTED]` is present.                                                   |
+| Clean error message (negative case)                               | `provider returned 401 unauthorized`             | Identity — the scrubber does NOT touch legitimate operator-facing error text.                          |
+| Empty-string input                                                | `''`                                             | Returns `''` without throwing.                                                                        |
+| `failLangfuseGeneration` auto-classification scrubbing            | Error whose `.message` contains a bearer token   | Both `statusMessage` AND `metadata.errorMessage` on the captured `generation.end` call are scrubbed. |
+| `failLangfuseGeneration` explicit context override scrubbing      | `context.errorMessage` passed with a raw secret  | Caller-supplied override is re-scrubbed; the raw secret does not reach the SDK.                       |
+
+A twelfth case (`classifyLangfuseError returns a redacted errorMessage`) walks the pure-function path end-to-end: a 403 error whose `.message` contains a bearer token is classified as `{ errorType, errorMessage: '...Bearer [REDACTED]', isTerminal: true }`, pinning that redaction and classification compose correctly.
+
+Design rules the test file encodes implicitly:
+
+- **Prefer negative assertions.** `expect(result).not.toContain('<raw secret>')` catches a regression even when the replacement pattern changes shape. Pair with a positive `expect(result).toContain('[REDACTED]')` so a test that nukes the whole output passes but is still visibly over-redacting.
+- **Keep input strings realistic.** The fixtures mimic real SAP SDK and fetch error-message shapes (`request failed: Authorization: Bearer <token>`, `bad config: {"clientid":"foo","clientsecret":"<secret>"}`) rather than isolated bare tokens. A regression in boundary matching surfaces here.
+- **The dual assertion on `statusMessage` + `metadata.errorMessage`** is load-bearing: both legs must stay scrubbed because a Langfuse dashboard surfaces each field independently. A regression that only scrubs one leaves credentials visible in the other.
+
+The eleven cases run inside the mocked-SDK unit suite — no new integration-level case is needed because the pre-existing 401 integration test in `tests/providers/langfuse-telemetry-integration.test.ts` already pins that `statusMessage` / `metadata.errorMessage` survive SDK batching and reach the ingestion endpoint verbatim.
 
 ## Testing Hooks
 
@@ -12078,3 +12188,72 @@ describe('ripgrep glob compile', () => {
 3. **Pin the policy strip on `managedSettings`.** Both `info.policies` AND `info.experimental.policies` are stripped from the LAST-loaded fork; an empty `experimental` must be omitted entirely rather than left as `{}`. Both halves are needed because the orchestration treats non-policy settings separately from policies — leaving the policy fields on the managed-settings fork would double-apply the managed policy under later-wins ordering.
 4. **Keep tests schema-agnostic.** The module is deliberately pure and takes minimal `{ path, info }` records — fixtures should match that shape. Pulling in the full project config schema binds the suite to an unrelated layer and makes refactors noisier.
 5. **No `fs`, no `os`, no `env`.** This module has no I/O surface. A test that reaches for `mkdtemp` is testing the wrong module — put file-loading tests on the config loader (`src/config/userConfig.test.ts`) and keep this suite synchronous and parallel-safe.
+
+### Testing `getAgentUsage` (agent usage aggregation)
+
+Introduced in `tests/core/agentUsage.test.ts` alongside `src/core/agentUsage.ts` (commit `99ca2c5d feat(core): add per-agent usage aggregation query module`). The suite pins the fourteen contract surfaces the module exposes, driven by on-disk session JSON fixtures written through a `beforeEach` scaffold.
+
+The scaffold recipe mirrors every other filesystem-touching tool test in the repository:
+
+```typescript
+// tests/core/agentUsage.test.ts
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
+
+import { CostTracker } from '../../src/core/costTracker.js';
+import type { Message, Session, SessionMetadata } from '../../src/core/sessionManager.js';
+import { getAgentUsage } from '../../src/core/agentUsage.js';
+
+describe('getAgentUsage', () => {
+  let sessionsDir: string;
+  let tempDir: string;
+  let tracker: CostTracker;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-usage-'));
+    sessionsDir = path.join(tempDir, 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    // Isolate the cost tracker so the suite never touches ~/.alexi/cost-history.json.
+    // The pricing table is static on the class, so a fresh tracker produces
+    // identical cost figures.
+    const trackerDataDir = path.join(tempDir, 'cost');
+    await fs.mkdir(trackerDataDir, { recursive: true });
+    tracker = new CostTracker({ dataDir: trackerDataDir });
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+  // ...
+});
+```
+
+The suite then writes concrete session files via `writeSession(session)` helpers and asserts on the resulting `AgentUsageReport[]`. The thirteen regression cases cover:
+
+| Case | Contract pinned |
+|------|-----------------|
+| `returns empty array when sessions directory is missing` | `readdirSync` ENOENT falls through to `[]` instead of throwing. Mirrors `SessionManager.listSessions`. |
+| `returns empty array when sessions directory is empty` | Zero session files → zero reports (not `[{ agentId: '(unknown)', runs: [] }]`). |
+| `aggregates a single session into one run under its agent slug` | End-to-end projection: tokens summed, cost computed via injected tracker, `activeTimeMs` sums all sub-threshold gaps, outcome is `completed` for a trailing assistant turn. |
+| `groups runs by agent and sorts runs newest-first by startedAt then id` | Per-agent grouping is correct AND the tiebreak between two runs with identical `startedAt` is deterministic (lexicographic `id`, descending). |
+| `attributes subagent spend to the subagent, not the parent (no double counting)` | **Load-bearing invariant.** A `parent` session (`agent: 'code'`) and a `child` session (`agent: 'explore'`, `parentSessionId: 'parent'`) each surface their own direct spend. Dropping this test allows a refactor that re-propagates subagent cost into the parent to pass silently. |
+| `filters by agentId` | Case-sensitive exact-match filter, no partial matches, no glob expansion. |
+| `filters by date range (inclusive on both ends)` | Both bounds inclusive. Pins the semantics so a future refactor to half-open ranges is caught. |
+| `surfaces sessions with no agent slug under the "(unknown)" bucket` | Legacy pre-`agent` sessions do not silently disappear from the aggregate. |
+| `excludes idle gaps larger than the threshold from activeTimeMs` | A one-hour idle gap at the default 5-minute threshold is excluded; sub-threshold gaps still contribute. |
+| `classifies outcome as running when the last message is from the user` | A session where the assistant has not yet responded is `running`, not `completed`. |
+| `classifies outcome as errored when the trailing system message starts with "Error:"` | The `"Error:"` heuristic triggers, and `errorCount` is incremented on the report rollup. |
+| `counts reasoning tokens separately but includes them in cost` | `reasoningTokens` is a dedicated field, AND `cost` is computed on `output + reasoning` (billing rate parity with `CostTracker.recordUsage`). |
+| `ignores non-JSON files and silently skips corrupt session files` | A `README.txt`, a `{not json` file, and a wrong-shape JSON file next to a valid session must not abort the sweep. |
+| `aggregates totals correctly across many runs for one agent` | The report-level sums over multiple runs are consistent — regression guard for a future map/reduce bug. |
+| `works without an explicit cost tracker (uses internal default)` | The default temp-dir fallback produces a defensible cost (`> 0` for a priced model), covering the production code path operators actually hit. |
+
+#### Patterns worth internalising
+
+1. **Always inject the `CostTracker`.** Pricing is on a static table today, so an injected tracker rooted in a per-test temp directory produces the same numbers as the production tracker — but testing against the real `~/.alexi/cost-history.json` would race across parallel tests and leak between runs. The `costTracker: tracker` option in `GetAgentUsageOptions` exists for exactly this reason.
+2. **Pin the no-double-count contract explicitly.** The parent/child subagent test is the single most important case in the suite — it enforces that the aggregator never re-propagates subagent spend into the parent agent's rollup. Deleting it would let a well-meaning refactor re-introduce the exact bug kilocode PR #15185 was designed to prevent.
+3. **Use real session shapes.** The `makeMessage` / `makeSession` helpers construct `Message` and `SessionMetadata` with the actual production types — not a bespoke fixture type. A regression where `SessionMetadata` grows a required field is caught at `tsc` time instead of at runtime.
+4. **One session file per logical run.** Session granularity is the whole contract; writing more than one session per run would obscure the aggregator's behaviour. If the schema ever grows a per-message `agentId`, this suite should be extended with new cases rather than mutated.
+5. **Idle gap threshold cases need realistic durations.** The one-hour idle gap in the `excludes idle gaps larger than the threshold` test is intentional — it is far enough from the default threshold that off-by-one unit mistakes (seconds vs milliseconds) are visible in the assertion.

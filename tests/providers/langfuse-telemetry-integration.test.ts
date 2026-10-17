@@ -26,6 +26,7 @@ import {
   startLangfuseGeneration,
   startLangfuseTrace,
   finishLangfuseGeneration,
+  failLangfuseGeneration,
 } from '../../src/providers/langfuse-telemetry.js';
 
 interface RecordedRequest {
@@ -187,5 +188,73 @@ describe('langfuse direct exporter (integration)', () => {
     // The LANGFUSE_TRACING_ENVIRONMENT value propagates onto the trace
     // body (observable on both trace-create and generation-create events).
     expect(traceCreate?.body.environment).toBe('benchmark');
+  }, 20_000);
+
+  it('ships error-span correlation metadata on stream failures (issue #2057)', async () => {
+    process.env.ALEXI_LANGFUSE_ALL_PROVIDERS = '1';
+    process.env.LANGFUSE_BASE_URL = baseUrl;
+    process.env.LANGFUSE_PUBLIC_KEY = 'pk-test';
+    process.env.LANGFUSE_SECRET_KEY = 'sk-test';
+
+    const decision = await resolveAiSdkTelemetry('byok-model');
+    expect(decision.isEnabled).toBe(true);
+    if (!decision.isEnabled) {
+      return;
+    }
+
+    const trace = startLangfuseTrace(decision, {
+      name: 'sap-ai-core.stream',
+      sessionId: 'session-err-1',
+    });
+    const generation = startLangfuseGeneration(trace, {
+      name: 'sap-ai-core.stream',
+      model: 'byok-model',
+    });
+
+    // Terminal 401 — classifier should mark isTerminal: true.
+    const err = Object.assign(new Error('unauthorized'), {
+      name: 'AuthError',
+      statusCode: 401,
+    });
+    failLangfuseGeneration(generation, err);
+
+    await decision.client.flushAsync();
+    const deadline = Date.now() + 2_000;
+    while (recorded.length < 1 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(recorded.length).toBeGreaterThanOrEqual(1);
+
+    const allBodies = recorded.flatMap((r) => {
+      const b = r.body as { batch?: unknown[] } | undefined;
+      return Array.isArray(b?.batch) ? b!.batch! : [b as unknown];
+    });
+
+    // Locate the generation-update that carries the ERROR level — this is
+    // what `failLangfuseGeneration` emits via `generation.end({level,...})`.
+    const errorUpdate = allBodies.find((entry) => {
+      const e = entry as { type?: string; body?: { level?: string } };
+      return (
+        (e?.type === 'generation-update' || e?.type === 'observation-update') &&
+        e?.body?.level === 'ERROR'
+      );
+    }) as
+      | undefined
+      | {
+          type: string;
+          body: {
+            level?: string;
+            statusMessage?: string;
+            metadata?: Record<string, unknown>;
+          };
+        };
+    expect(errorUpdate).toBeDefined();
+    expect(errorUpdate?.body.level).toBe('ERROR');
+    expect(errorUpdate?.body.statusMessage).toBe('unauthorized');
+    expect(errorUpdate?.body.metadata).toMatchObject({
+      errorType: 'AuthError',
+      errorMessage: 'unauthorized',
+      isTerminal: true,
+    });
   }, 20_000);
 });

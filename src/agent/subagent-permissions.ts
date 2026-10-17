@@ -87,6 +87,30 @@ const BASELINE_SUBAGENT_TOOLS: readonly string[] = [
 /**
  * Build the permission ruleset for a subagent's session when it's spawned
  * via the `task` tool. See module docs above for the security contract.
+ *
+ * ## Native vs. custom delegator edit scoping (kilocode `0c8849c18`)
+ *
+ * Ports upstream kilocode `0c8849c18 fix(agent): preserve custom delegator
+ * subagent edit permissions`. A CUSTOM delegator (one whose `native` flag
+ * is `false`) might have a tightly-scoped edit policy that only makes
+ * sense for itself — e.g. `edit: { "secrets/**": "deny" }` configured
+ * so that the delegator cannot touch secrets, which should NOT be
+ * projected onto its spawned subagents as a hard ceiling. The subagent
+ * might legitimately need to edit paths the delegator was forbidden
+ * from touching.
+ *
+ * The fix: when the parent (caller) agent is non-native, we DROP its
+ * edit-related deny rules and let only SESSION-level edit denials
+ * become hard ceilings on spawned subagents. Native (built-in) agents
+ * keep the previous behaviour because their edit restrictions are
+ * part of the hardening contract (e.g. plan-mode read-only ceiling).
+ *
+ * In Alexi, "edit-related" denies are the ones that would come from the
+ * parent agent's `tools` allowlist excluding `write` / `edit` / `apply_patch`,
+ * or from `disabledTools` containing those names. Those are scoped to the
+ * delegator itself when `parentAgent.native === false`. All non-edit
+ * parent denies (bash, shell, etc.) still propagate as ceilings — only
+ * EDIT scoping changes.
  */
 export function deriveSubagentSessionPermission(
   input: DeriveSubagentSessionPermissionInput
@@ -99,12 +123,22 @@ export function deriveSubagentSessionPermission(
   // We need to convert these to permission rules
   const parentAgentDenies: PermissionRule[] = [];
 
+  // Custom (non-native) delegators scope their edit policy to themselves —
+  // only session-level edit denials become hard ceilings on spawned
+  // subagents. Native (built-in) delegators keep the previous behaviour
+  // because their edit restrictions are part of the hardening contract
+  // (e.g. plan-mode read-only ceiling). Ports kilocode `0c8849c18`.
+  const parentIsCustom = input.parentAgent?.native === false;
+  const EDIT_TOOL_NAMES = new Set(['write', 'edit', 'multiedit', 'apply_patch', 'patch']);
+
   if (input.parentAgent) {
     // If parent agent has limited tools, create deny rules for other actions
     if (input.parentAgent.tools && input.parentAgent.tools.length > 0) {
       const allowedTools = new Set(input.parentAgent.tools);
-      // If write is not in allowed tools, deny it
-      if (!allowedTools.has('write') && !allowedTools.has('*')) {
+      // If write is not in allowed tools, deny it — but skip this for
+      // custom (non-native) delegators so a user's custom edit scope on
+      // the delegator does not accidentally confine its spawned subagents.
+      if (!allowedTools.has('write') && !allowedTools.has('*') && !parentIsCustom) {
         parentAgentDenies.push({
           id: 'parent-deny-write',
           tools: ['write'],
@@ -112,7 +146,9 @@ export function deriveSubagentSessionPermission(
           priority: 1000,
         });
       }
-      // If shell/bash is not in allowed tools, deny it
+      // If shell/bash is not in allowed tools, deny it. Non-edit rules
+      // (bash, shell) ALWAYS propagate as ceilings regardless of native vs
+      // custom — only edit scoping changes.
       if (!allowedTools.has('shell') && !allowedTools.has('bash') && !allowedTools.has('*')) {
         parentAgentDenies.push({
           id: 'parent-deny-shell',
@@ -123,9 +159,17 @@ export function deriveSubagentSessionPermission(
       }
     }
 
-    // Add explicit disabled tools as deny rules
+    // Add explicit disabled tools as deny rules. Edit-family tools in a
+    // custom delegator's `disabledTools` list are scoped to the delegator
+    // itself and do not propagate to subagents. Everything else still
+    // becomes a ceiling. To confine a delegated workflow's writes, add
+    // the restriction to the SESSION's permission ruleset instead — those
+    // denies always propagate.
     if (input.parentAgent.disabledTools) {
       for (const tool of input.parentAgent.disabledTools) {
+        if (parentIsCustom && EDIT_TOOL_NAMES.has(tool)) {
+          continue;
+        }
         parentAgentDenies.push({
           id: `parent-deny-${tool}`,
           tools: [tool],

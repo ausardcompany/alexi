@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { defineTool, type ToolResult } from '../index.js';
 import { getBlocker, answerQuestion } from '../../permission/agent-manager.js';
 import { selectModel, isSelectModelError } from '../model-selection.js';
+import { getAgentRegistry } from '../../agent/index.js';
 
 /**
  * Preprocessor that accepts either a structured object OR a JSON-encoded
@@ -111,6 +112,22 @@ const AgentManagerParamsSchema = z
             .describe(
               "Optional provider ID to constrain model resolution (e.g. 'anthropic', 'sap-ai-core'). Use with model to select a model from a specific provider; omit to use the current-turn provider preference. Ignored when model is not set."
             ),
+          // Ports upstream kilocode `f01b273c1`, `e703b5637`, `4fcf08b5e`:
+          // optional agent name to run the new session as (e.g. a custom
+          // agent configured with mode 'all' and its own permission
+          // ruleset). Must be a selectable primary agent: not a
+          // mode: 'subagent' agent, not internal/hidden, and not
+          // deprecated. Omit to use the workspace default agent;
+          // prefer the name the user asked for. A rejected name lists
+          // the selectable agents so the model can self-correct instead
+          // of blind-retrying.
+          agent: z
+            .string()
+            .nullable()
+            .optional()
+            .describe(
+              "Optional agent name to run the new session as (e.g. a custom agent configured with mode 'all'). Must be a selectable primary agent: not a mode: 'subagent' agent and not an internal/hidden one. Omit to use the workspace default agent; prefer the name the user asked for. A rejected name lists the selectable agents."
+            ),
           excludeLocalState: z
             .boolean()
             .nullable()
@@ -167,6 +184,12 @@ interface AgentManagerResult {
     model?: string;
     /** Resolved provider id when `config.model` was supplied on create. */
     provider?: string;
+    /**
+     * Resolved agent id when `config.agent` was supplied on create.
+     * Ports kilocode `f01b273c1` so callers can confirm the named
+     * agent was accepted (and not silently dropped by a lookup miss).
+     */
+    agent?: string;
   };
   answered?: string;
   message?: string;
@@ -181,7 +204,9 @@ Start sessions only when the user explicitly asks for new Agent Manager sessions
 Actions:
 - create: Create a new agent session with optional configuration.
   The optional config accepts \`mode\`, \`model\`, an optional \`provider\` to
-  constrain model resolution to one provider ID (requires \`model\`), and
+  constrain model resolution to one provider ID (requires \`model\`), an
+  optional \`agent\` name to run the new session as (must be a selectable
+  primary agent — not a subagent and not internal/hidden), and
   \`excludeLocalState\` for a fresh-state startup.
   Optional \`worktreeId\`: existing managed worktree ID returned by
   \`action: "list"\`. Omit to use the caller's directory.
@@ -231,6 +256,38 @@ Actions:
             };
           }
 
+          // Validate the optional `agent` name. Ports kilocode `f01b273c1`
+          // (named-agent delegation), `e703b5637` (reject internal/
+          // subagent names), and `4fcf08b5e` (trim the name). Must be a
+          // selectable primary agent: `mode: 'primary' | 'all'`, not
+          // deprecated, and not referenced by an internal/hidden
+          // option flag. A rejected name lists the selectable agents so
+          // the model can self-correct instead of blind-retrying.
+          const requestedAgentName = config?.agent?.trim();
+          let resolvedAgentId: string | undefined;
+          if (requestedAgentName) {
+            const registry = getAgentRegistry();
+            const selectable = registry.list().filter((a) => {
+              if (a.mode === 'subagent') return false;
+              if (a.deprecated) return false;
+              const opts = a.options as Record<string, unknown> | undefined;
+              if (opts?.internal === true || opts?.hidden === true) return false;
+              return true;
+            });
+            const match =
+              selectable.find((a) => a.name === requestedAgentName) ??
+              selectable.find((a) => a.id === requestedAgentName) ??
+              selectable.find((a) => a.aliases?.includes(requestedAgentName));
+            if (!match) {
+              const names = selectable.map((a) => a.name).join(', ');
+              return {
+                success: false,
+                error: `Unknown or non-selectable agent: ${requestedAgentName}. Selectable agents: ${names}`,
+              };
+            }
+            resolvedAgentId = match.id;
+          }
+
           // Resolve the requested (model, provider) pair through the shared
           // `selectModel()` helper — ports upstream ab143253a which
           // extracted the resolution logic out of this file into
@@ -278,6 +335,7 @@ Actions:
                 status: excludeLocalState ? 'created-fresh' : 'created',
                 ...(resolvedModel ? { model: resolvedModel } : {}),
                 ...(resolvedProvider ? { provider: resolvedProvider } : {}),
+                ...(resolvedAgentId ? { agent: resolvedAgentId } : {}),
               },
               message: excludeLocalState
                 ? `Created new agent session with fresh state: ${newSessionId}`

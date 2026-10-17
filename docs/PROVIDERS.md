@@ -3568,9 +3568,16 @@ export function finishLangfuseGeneration(
   generation: LangfuseGenerationClient | undefined,
   data: { output?: unknown; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }; finishReason?: string }
 ): void;
+export interface LangfuseErrorContext {
+  errorType?: string;
+  errorMessage?: string;
+  isTerminal?: boolean;
+}
+export function classifyLangfuseError(err: unknown): LangfuseErrorContext;
 export function failLangfuseGeneration(
   generation: LangfuseGenerationClient | undefined,
-  error: unknown
+  error: unknown,
+  context?: LangfuseErrorContext
 ): void;
 ```
 
@@ -3618,12 +3625,87 @@ The dynamic `import('langfuse')` keeps the SDK out of the hot boot path when BYO
 
 Both the non-streaming and streaming chat paths call `resolveAiSdkTelemetry()` once per request and emit a parallel Langfuse trace alongside the OTLP span. The two integrations are independent — enabling one does not require the other:
 
-- `src/providers/sapOrchestration.ts:1734-1774` (non-streaming `chatCompletion`): starts a `sap-ai-core.chat` trace, nests one `generation`, calls `failLangfuseGeneration` on `classifyRateLimitError`, calls `finishLangfuseGeneration` on success with `{ output, usage, finishReason }`.
-- `src/providers/sapOrchestration.ts:1850-1946` (streaming `chatCompletionStream`): same lifecycle; `failLangfuseGeneration` is called on both the initial dispatch error AND on stream-mid errors so a partially-emitted stream still records an error observation.
+- `src/providers/sapOrchestration.ts:1734-1774` (non-streaming `chatCompletion`): starts a `sap-ai-core.chat` trace, nests one `generation`, calls `failLangfuseGeneration` on error (auto-classifying `errorType` / `errorMessage` / `isTerminal` from the thrown value — see [Error-span correlation on stream failures](#error-span-correlation-on-stream-failures-issue-2057-commit-b2cdb689)), calls `finishLangfuseGeneration` on success with `{ output, usage, finishReason }`.
+- `src/providers/sapOrchestration.ts:1850-1946` (streaming `chatCompletionStream`): same lifecycle; `failLangfuseGeneration` is called on both the initial dispatch error AND on stream-mid errors so a partially-emitted stream still records an error observation. Both error paths route through `classifyLangfuseError` so terminal 4xx / content-filter / auth failures surface as `isTerminal: true` dashboard-filterable spans and transient 5xx / 429 / network blips surface as `isTerminal: false`.
+
+### Error-span correlation on stream failures (issue #2057, commit `b2cdb689`)
+
+A stream failure that reaches `failLangfuseGeneration` now attaches structured error-span metadata to the Langfuse generation it ends, instead of just emitting a bare `level: 'ERROR'` observation. The metadata lets a dashboard filter on named error families (`ContentFilterError`, `FreeTierRateLimitError`, `AuthError`, `NetworkError`), separate permanent operator-side failures from transient blips the retry budget will absorb, and keep a readable `statusMessage` for the human looking at the span.
+
+The classifier is a pure function — safe to call outside an active Langfuse client — and aligns with the error contract in [`AGENTS.md#error-classification`](../AGENTS.md) and [`docs/ARCHITECTURE.md#error-handling`](ARCHITECTURE.md#error-handling):
+
+| Error family                                                                        | `isTerminal` | Rationale                                                                                              |
+| ----------------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------ |
+| `ContentFilterError` (policy block)                                                 | `true`       | The upstream rejected the content; retrying with the same payload cannot succeed.                       |
+| `NoRefreshTokenError`, `ReauthenticationRequiredError`                              | `true`       | Permanent auth failures — operator must re-authenticate before retry can succeed.                       |
+| `FreeTierRateLimitError` (name OR `code: 'free_tier_rate_limit'`)                   | `true`       | Free-tier quota is permanently blocked until the window resets; `ErrorBackoff.isFatal` already stops retry. |
+| HTTP `400`, `401`, `403`, `404`, `422`                                              | `true`       | Validation / auth / shape errors — permanent config failures per the error contract.                   |
+| Generic HTTP `429` (rate limit)                                                     | `false`      | Transient paid-tier limit — `ErrorBackoff` is expected to absorb this with exponential backoff.         |
+| HTTP `5xx` (`500`, `502`, `503`, ...)                                               | `false`      | Transient upstream blips; the retry budget covers them.                                                 |
+| Network: `ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND`, `EPIPE`, `EAGAIN`, `EBUSY` | `false` | Match the agent-workflow transient regex in `AGENTS.md`.                                                |
+| Unknown / unclassified                                                              | `false`      | Default to transient so an unseen blip is not mis-flagged as a permanent config failure.                |
+
+The classifier is defensive about error shape. `extractStatusCode` consults `err.statusCode`, `err.status`, and `err.response.status` so SAP SDK, fetch, and axios wrappers all route into the same classification. The `errorType` prefers `err.name`, then the constructor name, falling back to `'Error'` so dashboards can filter by named error families without parsing messages.
+
+Call-site contract:
+
+```typescript
+// Backward-compatible call: auto-classify from the thrown error.
+failLangfuseGeneration(generation, err);
+
+// Override path: supply explicit context for redacted or custom-classified errors.
+failLangfuseGeneration(generation, err, {
+  errorType: 'CustomClassifiedError',
+  errorMessage: 'redacted',
+  isTerminal: true,
+});
+```
+
+The emitted `generation.end({ level: 'ERROR', statusMessage, metadata })` sets `metadata.errorType`, `metadata.errorMessage`, and `metadata.isTerminal`. Successful ends via `finishLangfuseGeneration` continue to emit no `level` and no error-correlation metadata — a success span never looks like an error span. Both the auto-classified `errorMessage` and any caller-supplied `context.errorMessage` are routed through `redactCredentialsFromString` before they reach the SDK — see [Credential redaction safety net](#credential-redaction-safety-net-issue-2057-commit-2afacd26) below for the full contract. Callers that already redact upstream (issue #2051) can still pass a pre-scrubbed override; the double-pass is idempotent.
+
+Both `src/providers/sapOrchestration.ts:1850-1946` call sites (streaming dispatch error AND stream-mid error) now route through the auto-classifying path, so a partially-emitted stream still records an error observation with the correct `isTerminal` flag.
+
+### Credential redaction safety net (issue #2057, commit `2afacd26`)
+
+Issue #2057 explicitly forbids raw credentials or API keys inside Langfuse error-span metadata. Provider errors occasionally echo request headers, service-key JSON, or signed URLs inside `Error.message` on failure paths (the SAP SDK does this on some 4xx responses), so `failLangfuseGeneration` scrubs the final string defensively before forwarding it to the Langfuse SDK. The scrubber is the Langfuse-specific safety net, not a replacement for upstream redaction — callers that already run their own redaction pass are welcome to pass a pre-scrubbed override.
+
+Public surface added to `src/providers/langfuse-telemetry.ts`:
+
+```typescript
+/**
+ * Scrub credential material out of a free-form string before it is
+ * attached to a Langfuse error span. Additive to scrubUrlsFromString.
+ */
+export function redactCredentialsFromString(text: string): string;
+```
+
+Redaction patterns (applied after `scrubUrlsFromString` from `src/utils/logger.ts` has handled URL query strings and hash fragments):
+
+| Input pattern                                                                                | Replacement        | Notes                                                                                               |
+| -------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------- |
+| `Bearer <token>` (token 8+ chars of `[A-Za-z0-9._\-+/=]`)                                    | `Bearer [REDACTED]` | HTTP `Authorization` headers echoed into error messages.                                            |
+| `Basic <value>` (value 8+ chars of `[A-Za-z0-9+/=]`)                                         | `Basic [REDACTED]`  | HTTP Basic auth header values.                                                                      |
+| `"<key>":"<value>"` where `<key>` is `clientsecret` / `client_secret` / `secret_key` / `api_key` / `access_token` / `refresh_token` / `password` (and `-` variants), value 4+ chars  | `"<key>":"[REDACTED]"` | SAP service-key JSON fields. Quoted-string regex cannot cross a `"` boundary, so adjacent non-secret text is preserved. |
+| Same keys in loose `key=value` or `key: value` form, value 8+ chars                          | `<key>=[REDACTED]`  | Env-dump style secrets. The regex preserves other `key=value` pairs on the same line.               |
+| `-----BEGIN <ANY> PRIVATE KEY-----…-----END <ANY> PRIVATE KEY-----` (multi-line)             | `[REDACTED_PEM]`    | PEM-encoded private keys embedded raw in a message.                                                 |
+| `<40+ chars>.<10+ chars>.<10+ chars>` three-segment base64url (JWT shape)                    | `[REDACTED_JWT]`    | Long opaque base64url blobs: JWTs and service-key tokens embedded raw. Threshold is high enough that normal error text does not match. |
+
+Call-site integration:
+
+- `classifyLangfuseError(err)` runs the raw message through `redactCredentialsFromString` before returning the `errorMessage` field, so the auto-classified path is always scrubbed.
+- `failLangfuseGeneration(generation, error, context?)` re-scrubs any caller-supplied `context.errorMessage` with the same helper. A caller cannot accidentally bypass the safety net by passing a raw provider message.
+- The fallback `statusMessage` path (only reached when `errorMessage` is `undefined`, which should not happen in practice but is defended against) also routes through `redactCredentialsFromString(fallbackMessage)`.
+
+Design constraints:
+
+- **Idempotent.** Scrubbing an already-redacted string is a no-op — the replacement tokens (`[REDACTED]`, `[REDACTED_PEM]`, `[REDACTED_JWT]`) do not themselves match any of the input patterns.
+- **Conservative by design.** The scrubber targets only the high-signal patterns called out in the PR review and in the issue contract. The intent is to prevent accidental credential exfiltration via telemetry, not to replace a dedicated DLP tool. If a new high-signal pattern surfaces in production, add a row to `CREDENTIAL_PATTERNS` with a test case; do NOT widen an existing pattern.
+- **False-positive safe for clean errors.** `provider returned 401 unauthorized`, `deployment_not_found`, and similar operator-facing messages pass through unchanged — the JWT threshold is deliberately 40 characters to clear typical hex-ish identifiers (deployment ids, request ids) that would otherwise mis-match.
+- **Threat-model gap acknowledged.** Credentials in free-form unlabelled strings (a token echoed in a message without a key name or `Bearer` prefix) will NOT be redacted. Operators who need stronger guarantees should also enable the upstream redaction pipeline from issue #2051.
 
 ### Testing
 
-See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract (350 lines of unit coverage in `src/providers/__tests__/langfuse-telemetry.test.ts`, 191-line HTTP-server integration test in `tests/providers/langfuse-telemetry-integration.test.ts`).
+See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract. The unit suite in `src/providers/__tests__/langfuse-telemetry.test.ts` (now 575 lines) covers the opt-in gate, env parsing, merge rules, span-lifecycle no-ops, AND the full `classifyLangfuseError` matrix (content filter, permanent auth, free-tier rate limit, 429 transient, 4xx terminal, 5xx transient, network transient, axios `response.status`, unknown-shape fallback, non-`Error` coercion). The integration suite in `tests/providers/langfuse-telemetry-integration.test.ts` (260 lines) adds a dedicated case that drives a terminal 401 through `failLangfuseGeneration` and asserts the real SDK ships `metadata: { errorType, errorMessage, isTerminal: true }` on the `generation-update` batch.
 
 ## Auxiliary-Task Model Selection
 
@@ -4077,6 +4159,59 @@ export function resolveCopilotProviderPackage(
 
 Looks up the correct provider-compat package for a Copilot fallback routing decision from an injected models.dev snapshot, falling back to `openai-compatible` when the snapshot has no entry. Dependency injection keeps the helper free of a hard dependency on the on-disk file layout (see `src/providers/catalog.ts` for how Alexi loads provider manifests today).
 
+## OpenAI-Compatible Tool-Content Normalizer
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync, ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's main chat path routes through SAP AI Core Orchestration exclusively. A handful of proxy adapters still forward requests to strict OpenAI-compatible endpoints — early SAP AI Core deployments and a few corporate proxy wrappers reject tool-role messages that carry explicit `null` content, requiring an empty string instead. Historically Alexi (and upstream) would unconditionally rewrite `null` → `''` on tool messages, which caused regressions for providers that legitimately emit `null` content to signal "no body, see `tool_calls`". The normalizer gates that rewrite behind an explicit flag so strict-OpenAI deployments can opt in without regressing the common path.
+
+### Public surface
+
+```typescript
+// src/providers/openai-compatible.ts
+
+export interface OpenAICompatibleMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+
+export interface NormalizeToolContentOptions {
+  /** When true, rewrites tool-role messages with null/undefined content to ''. Default: false. */
+  normalizeNullToolContent?: boolean;
+}
+
+export function normalizeToolContent<T extends OpenAICompatibleMessage>(
+  message: T,
+  options?: NormalizeToolContentOptions
+): T;
+
+export function normalizeToolContentAll<T extends OpenAICompatibleMessage>(
+  messages: readonly T[],
+  options?: NormalizeToolContentOptions
+): T[];
+```
+
+### Contract
+
+- **Default is a no-op.** When `options` is omitted or `normalizeNullToolContent` is falsy, the single-message helper returns its input unchanged (same reference) and the array helper returns a shallow copy of the input (`messages.slice()`). This matches upstream — the common path is "do not rewrite".
+- **Opt-in rewrite is scoped.** When `normalizeNullToolContent: true`, the single-message helper rewrites a message ONLY when `message.role === 'tool'` AND `message.content === null || message.content === undefined`. Every other role, and every tool-role message with any non-null content (including `''`, `0`, `false`, or structured JSON), passes through untouched.
+- **Never mutates input.** On a rewrite the helper returns a shallow copy `{ ...message, content: '' }` so caller-owned references are preserved. The array helper calls the single-message helper per entry under opt-in; non-opt-in callers get a defensive shallow copy of the array.
+- **SAP AI Core Orchestration is unaffected.** The main provider (`src/providers/sapOrchestration.ts`) does not invoke the normalizer — it is called only by proxy adapters that explicitly set the flag on their deployment configuration.
+
+### Minimal usage
+
+```typescript
+import { normalizeToolContentAll } from '../src/providers/openai-compatible.js';
+
+// Opt in only on strict endpoints that reject null tool content:
+const safeMessages = normalizeToolContentAll(messages, {
+  normalizeNullToolContent: provider.compatibility?.normalizeNullToolContent === true,
+});
+```
+
+The flag is intentionally per-call, not global: a single process may front multiple endpoints with divergent strictness. See [docs/CONFIGURATION.md — `normalizeNullToolContent` provider flag](CONFIGURATION.md#normalizenulltoolcontent-provider-flag) for how to wire the flag into `~/.alexi/config.json`.
+
 ## xAI Image-Mime Filter
 
 Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode 2026-10 fix). Lives in `src/providers/xai-image-filter.ts`.
@@ -4100,6 +4235,153 @@ export function filterXaiImages<T extends MultimodalAttachment>(
 - `filterXaiImages` partitions a list into `{ kept, dropped }`. The dropped set is returned so callers can log a warning or surface a UX message instead of swallowing content silently.
 
 Alexi routes multimodal requests through SAP AI Core and does not yet have a native xAI adapter — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
+
+## OpenAI-Compatible Tool-Content Normalizer
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's chat path routes through SAP AI Core Orchestration exclusively, but adapter code that forwards requests to a strict OpenAI-compatible endpoint (local proxy, Azure OpenAI, SAP-AI-Core-fronted OpenAI deployment) sometimes needs to rewrite tool-role messages whose `content` field is explicitly `null`. Historically Alexi (and upstream) unconditionally rewrote `null` → `""` on every tool message. That caused regressions where providers that legitimately return `null` content — the OpenAI convention for "no body, see `tool_calls`" — had their payloads mangled on the way out.
+
+The normalization is now opt-in: the module default is "pass through unchanged" and callers that proxy to a strict endpoint must set `normalizeNullToolContent: true` explicitly.
+
+### Public surface
+
+```typescript
+export interface OpenAICompatibleMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+
+export interface NormalizeToolContentOptions {
+  /**
+   * When `true`, replaces a tool-role message's `null` content with an
+   * empty string. When `false` or omitted, the message passes through
+   * untouched. Default: `false` (preserve upstream shape).
+   */
+  normalizeNullToolContent?: boolean;
+}
+
+export function normalizeToolContent<T extends OpenAICompatibleMessage>(
+  message: T,
+  options?: NormalizeToolContentOptions
+): T;
+
+export function normalizeToolContentAll<T extends OpenAICompatibleMessage>(
+  messages: readonly T[],
+  options?: NormalizeToolContentOptions
+): T[];
+```
+
+### Semantics
+
+- `normalizeToolContent(msg)` and `normalizeToolContent(msg, { normalizeNullToolContent: false })` return the input unchanged.
+- `normalizeToolContent(msg, { normalizeNullToolContent: true })` returns the input unchanged UNLESS `msg.role === 'tool'` AND `msg.content == null`, in which case a shallow copy with `content: ''` is returned.
+- The function NEVER mutates its input — a non-matching message is passed through by reference; a matching message is returned as a new object with the rewritten `content` and every other field spread verbatim.
+- `normalizeToolContentAll(messages)` returns a shallow copy (`.slice()`) when the flag is off; when the flag is on it maps each entry through `normalizeToolContent`, so a tool-role `null`-content entry is replaced in-array and every other entry is kept.
+
+### When to opt in
+
+Opt in only when the downstream endpoint has been observed to reject tool-role messages with `null` content (HTTP `400` with a body like `"content: expected string, got null"`). Representative cases:
+
+- Early SAP AI Core OpenAI deployments before the orchestration API absorbed the OpenAI tool-call wire shape.
+- Local proxy wrappers that use a legacy `openai` Python SDK version with a strict JSON validator.
+- Some corporate gateway adapters that normalize the inbound request body against an older schema.
+
+Do NOT opt in when forwarding to the SAP AI Core Orchestration API through `src/providers/sapOrchestration.ts` — the orchestration API accepts `null` tool content and the normalizer would corrupt payloads that use `null` to mean "see `tool_calls`".
+
+### Decision flow
+
+```mermaid
+flowchart LR
+    Msg[Outgoing message] --> Flag{normalizeNullToolContent?}
+    Flag -->|false / omitted| Pass[Return unchanged]
+    Flag -->|true| RoleCheck{role === 'tool'<br/>and content == null?}
+    RoleCheck -->|no| Pass
+    RoleCheck -->|yes| Rewrite[Shallow copy<br/>content: '']
+    Rewrite --> Out[Return rewritten]
+    Pass --> Out
+```
+
+### Call-site integration
+
+A proxy adapter that forwards to a strict endpoint can apply the normalizer at request-build time:
+
+```typescript
+import { normalizeToolContentAll } from '../src/providers/openai-compatible.js';
+
+function buildStrictOpenAIRequest(messages, config) {
+  const normalized = normalizeToolContentAll(messages, {
+    normalizeNullToolContent: config.strictOpenAI === true,
+  });
+  return { model: config.model, messages: normalized };
+}
+```
+
+Because the module is a pure function with no side effects at import time, it is safe to add to any provider adapter without altering the SAP AI Core happy path.
+
+See [docs/CONFIGURATION.md — OpenAI-Compatible Tool-Content Normalization](CONFIGURATION.md#openai-compatible-tool-content-normalization-normalizenulltoolcontent) for the operator-facing opt-in flag and the "when to enable" matrix.
+
+## Gemini Malformed-Finish Retry (`src/providers/gemini-retry.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56232). Gemini — invoked directly, through Vertex AI, or through SAP AI Core Vertex-via-orchestration deployments — occasionally completes a generation with `finishReason: MALFORMED_RESPONSE` or `MALFORMED_FUNCTION_CALL`. These are server-side formatting failures (the model produced tokens the Gemini service could not finalise). They are strongly transient — re-issuing the same request almost always succeeds — but surfacing them to the agent loop produces a confusing "empty response" that is counted against the user's mistake budget.
+
+### Provider-call flow with retry
+
+```mermaid
+flowchart LR
+    Call[invokeGeminiWithRetry fn] --> Attempt{attempt loop}
+    Attempt --> Fn[await fn]
+    Fn -->|resolves| Check{isMalformedGeminiResponse?}
+    Check -->|no| Return[return res]
+    Check -->|yes, attempts remain| LogWarn[logger.warn gemini.malformed_finish.retrying]
+    LogWarn --> Attempt
+    Check -->|yes, exhausted| Return
+    Fn -->|throws| Trans{isRetryableTransportError?}
+    Trans -->|yes, attempts remain| LogT[logger.warn gemini.transient_transport.retrying]
+    LogT --> Attempt
+    Trans -->|no OR exhausted| Throw[throw err]
+```
+
+### Scope
+
+Composable with the SAP AI Core orchestration path without disturbing `SapOrchestrationProvider.streamComplete`'s contract: callers wrap non-streaming Gemini probes (image generation, tool-arg validation, catalog probes) in this helper and leave streaming calls to the orchestration retry loop in `src/core/session/retry.ts`.
+
+- Retries exactly once on malformed finish per opencode #56232.
+- Transport errors flow through `isRetryableTransportError` from `src/utils/retry.ts`.
+- Permanent errors propagate immediately — must NOT burn the retry budget per AGENTS.md.
+
+See [docs/API.md — Gemini Retry API](API.md#gemini-retry-api) for the typed surface.
+
+## Stream Event Guards (`src/providers/protocols/stream-events.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
+
+### Usage pattern at every stream decoder
+
+Replaces the old `throw new Error('Unknown stream event: …')` at every provider decoder:
+
+```ts
+if (!isTypedStreamEvent(event)) {
+  logger.debug('stream.untyped_event', { event });
+  return;
+}
+switch (event.type) {
+  case 'content_block_delta': // ...
+  case 'message_stop':        // ...
+  default:
+    logger.debug('stream.unknown_event', { type: event.type });
+    break;
+}
+```
+
+### Guarantees
+
+- Non-throwing by contract.
+- Structural `{ type: string }` shape — portable across providers.
+- Classifiers do not infer the known set; the caller supplies `knownTypes: ReadonlySet<string>` per decoder.
+
+See [docs/API.md — Stream Event Guards API](API.md#stream-event-guards-api) for the typed surface.
 
 ## Related Documentation
 
