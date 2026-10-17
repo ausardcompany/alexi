@@ -139,7 +139,8 @@ export function aggregateByProject(records: readonly AgentUsageRecord[]): AgentU
       project.byAgent[agentKey] = agent;
     }
 
-    const duration = record.endedAt !== undefined ? Math.max(0, record.endedAt - record.startedAt) : 0;
+    const duration =
+      record.endedAt !== undefined ? Math.max(0, record.endedAt - record.startedAt) : 0;
     const succeeded = record.outcome === 'success';
     const failed = record.outcome === 'error' || record.outcome === 'aborted';
 

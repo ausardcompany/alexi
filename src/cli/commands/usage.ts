@@ -18,11 +18,7 @@ import os from 'node:os';
 import type { Command } from 'commander';
 
 import { logger } from '../../utils/logger.js';
-import {
-  aggregateByProject,
-  formatUsageTable,
-  type AgentUsageRecord,
-} from '../agent-usage.js';
+import { aggregateByProject, formatUsageTable, type AgentUsageRecord } from '../agent-usage.js';
 
 interface UsageOptions {
   project?: string;

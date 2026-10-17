@@ -52,7 +52,9 @@ export interface GeminiLikeResponse {
  * `response.finishReason` (orchestration-adapter shape) so the helper
  * works for both direct Gemini and SAP AI Core Vertex deployments.
  */
-export function extractFinishReason(res: GeminiLikeResponse | undefined | null): string | undefined {
+export function extractFinishReason(
+  res: GeminiLikeResponse | undefined | null
+): string | undefined {
   if (!res) {
     return undefined;
   }

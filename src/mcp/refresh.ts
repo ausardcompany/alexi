@@ -102,11 +102,7 @@ export async function ensureFreshToken(
 
   const p = (async (): Promise<string> => {
     try {
-      const refreshed = await withTimeout(
-        refresh(),
-        opts.connectTimeoutMs,
-        'mcp.refresh.timeout'
-      );
+      const refreshed = await withTimeout(refresh(), opts.connectTimeoutMs, 'mcp.refresh.timeout');
       return refreshed.accessToken;
     } finally {
       // CRITICAL: clear the single-flight entry so a transient
