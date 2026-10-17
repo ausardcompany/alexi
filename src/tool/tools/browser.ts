@@ -7,6 +7,8 @@
 
 import { z } from 'zod';
 import { defineTool, truncateOutput, type ToolResult } from '../index.js';
+import { redactUrl } from '../../utils/url-redact.js';
+import { redactUrlsFromString } from '../../utils/logger.js';
 
 // Puppeteer types - we define minimal interfaces to avoid requiring the package
 interface PuppeteerBrowser {
@@ -232,7 +234,7 @@ Note: Requires puppeteer to be installed (npm install puppeteer)`,
             if (err instanceof Error && err.name === 'TimeoutError') {
               return {
                 success: false,
-                error: `Navigation timeout for URL: ${params.url}`,
+                error: `Navigation timeout for URL: ${redactUrl(params.url)}`,
               };
             }
             throw err;
@@ -276,7 +278,7 @@ Note: Requires puppeteer to be installed (npm install puppeteer)`,
             if (err instanceof Error && err.name === 'TimeoutError') {
               return {
                 success: false,
-                error: `Navigation timeout for URL: ${params.url}`,
+                error: `Navigation timeout for URL: ${redactUrl(params.url)}`,
               };
             }
             throw err;
@@ -480,9 +482,13 @@ Note: Requires puppeteer to be installed (npm install puppeteer)`,
           };
       }
     } catch (err) {
+      // Puppeteer frequently embeds the target URL in thrown errors
+      // (navigation failures, protocol errors). Redact credential-like
+      // query params before surfacing the message to the caller.
+      const raw = err instanceof Error ? err.message : String(err);
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: redactUrlsFromString(raw),
       };
     }
   },

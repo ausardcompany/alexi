@@ -3,6 +3,8 @@
  * This allows for consistent logging and easier ESLint compliance
  */
 
+import { redactUrl } from './url-redact.js';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface _LoggerOptions {
@@ -81,10 +83,36 @@ export function scrubUrlsFromString(text: string): string {
 }
 
 /**
+ * Surgical variant of {@link scrubUrlsFromString}: redact only query
+ * parameters whose KEYS look credential-like (`token`, `code`, `api_key`,
+ * `secret`, `password`, `authorization`, ...), preserve all other query
+ * parameters so the log line stays debuggable.
+ *
+ * Hash fragments are still redacted wholesale (OAuth implicit-flow access
+ * tokens live there). Prefer this over {@link scrubUrlsFromString} when
+ * the surrounding context benefits from seeing non-sensitive params
+ * (pagination, sort order, request id, correlation id, ...).
+ *
+ * Non-URL content is left untouched.
+ */
+export function redactUrlsFromString(text: string): string {
+  if (!text || text.indexOf('http') === -1) {
+    return text;
+  }
+  return text.replace(URL_PATTERN, (match) => {
+    const trimmed = match.replace(/[.,;:!?)\]}'"`]+$/, '');
+    const suffix = match.slice(trimmed.length);
+    return redactUrl(trimmed) + suffix;
+  });
+}
+
+/**
  * Format an unknown thrown value for a log line. Always includes the
  * message when available; non-Error throws fall back to `String(err)`.
  * URLs embedded in the message are redacted so OAuth tokens / API keys
- * cannot leak into log files.
+ * cannot leak into log files, while non-sensitive query parameters
+ * (pagination, request id, correlation id, ...) are preserved so the
+ * line stays debuggable. See {@link redactUrlsFromString}.
  *
  * When the logger is configured at `debug` level and `includeStack` is
  * true, the stack trace is appended on a new line. Stack traces are
@@ -93,18 +121,18 @@ export function scrubUrlsFromString(text: string): string {
  */
 export function formatError(err: unknown, includeStack = true): string {
   if (err instanceof Error) {
-    const message = scrubUrlsFromString(err.message || err.name || 'Error');
+    const message = redactUrlsFromString(err.message || err.name || 'Error');
     if (includeStack && err.stack && LOG_LEVELS[currentLevel] <= LOG_LEVELS.debug) {
       // Replace the first line of the stack (which repeats message) with
       // the scrubbed message so tokens inside the message don't leak back
       // through the stack header.
       const stackLines = err.stack.split('\n');
       const rest = stackLines.slice(1).join('\n');
-      return `${message}\n${scrubUrlsFromString(rest)}`;
+      return `${message}\n${redactUrlsFromString(rest)}`;
     }
     return message;
   }
-  return scrubUrlsFromString(String(err));
+  return redactUrlsFromString(String(err));
 }
 
 export const logger = {
