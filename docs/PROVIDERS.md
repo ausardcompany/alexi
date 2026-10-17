@@ -3661,9 +3661,47 @@ failLangfuseGeneration(generation, err, {
 });
 ```
 
-The emitted `generation.end({ level: 'ERROR', statusMessage, metadata })` sets `metadata.errorType`, `metadata.errorMessage`, and `metadata.isTerminal`. Successful ends via `finishLangfuseGeneration` continue to emit no `level` and no error-correlation metadata — a success span never looks like an error span. Callers are responsible for redacting credentials from `errorMessage` before passing an override; `classifyLangfuseError` never touches message content beyond coercing a non-`Error` value to a string.
+The emitted `generation.end({ level: 'ERROR', statusMessage, metadata })` sets `metadata.errorType`, `metadata.errorMessage`, and `metadata.isTerminal`. Successful ends via `finishLangfuseGeneration` continue to emit no `level` and no error-correlation metadata — a success span never looks like an error span. Both the auto-classified `errorMessage` and any caller-supplied `context.errorMessage` are routed through `redactCredentialsFromString` before they reach the SDK — see [Credential redaction safety net](#credential-redaction-safety-net-issue-2057-commit-2afacd26) below for the full contract. Callers that already redact upstream (issue #2051) can still pass a pre-scrubbed override; the double-pass is idempotent.
 
 Both `src/providers/sapOrchestration.ts:1850-1946` call sites (streaming dispatch error AND stream-mid error) now route through the auto-classifying path, so a partially-emitted stream still records an error observation with the correct `isTerminal` flag.
+
+### Credential redaction safety net (issue #2057, commit `2afacd26`)
+
+Issue #2057 explicitly forbids raw credentials or API keys inside Langfuse error-span metadata. Provider errors occasionally echo request headers, service-key JSON, or signed URLs inside `Error.message` on failure paths (the SAP SDK does this on some 4xx responses), so `failLangfuseGeneration` scrubs the final string defensively before forwarding it to the Langfuse SDK. The scrubber is the Langfuse-specific safety net, not a replacement for upstream redaction — callers that already run their own redaction pass are welcome to pass a pre-scrubbed override.
+
+Public surface added to `src/providers/langfuse-telemetry.ts`:
+
+```typescript
+/**
+ * Scrub credential material out of a free-form string before it is
+ * attached to a Langfuse error span. Additive to scrubUrlsFromString.
+ */
+export function redactCredentialsFromString(text: string): string;
+```
+
+Redaction patterns (applied after `scrubUrlsFromString` from `src/utils/logger.ts` has handled URL query strings and hash fragments):
+
+| Input pattern                                                                                | Replacement        | Notes                                                                                               |
+| -------------------------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------- |
+| `Bearer <token>` (token 8+ chars of `[A-Za-z0-9._\-+/=]`)                                    | `Bearer [REDACTED]` | HTTP `Authorization` headers echoed into error messages.                                            |
+| `Basic <value>` (value 8+ chars of `[A-Za-z0-9+/=]`)                                         | `Basic [REDACTED]`  | HTTP Basic auth header values.                                                                      |
+| `"<key>":"<value>"` where `<key>` is `clientsecret` / `client_secret` / `secret_key` / `api_key` / `access_token` / `refresh_token` / `password` (and `-` variants), value 4+ chars  | `"<key>":"[REDACTED]"` | SAP service-key JSON fields. Quoted-string regex cannot cross a `"` boundary, so adjacent non-secret text is preserved. |
+| Same keys in loose `key=value` or `key: value` form, value 8+ chars                          | `<key>=[REDACTED]`  | Env-dump style secrets. The regex preserves other `key=value` pairs on the same line.               |
+| `-----BEGIN <ANY> PRIVATE KEY-----…-----END <ANY> PRIVATE KEY-----` (multi-line)             | `[REDACTED_PEM]`    | PEM-encoded private keys embedded raw in a message.                                                 |
+| `<40+ chars>.<10+ chars>.<10+ chars>` three-segment base64url (JWT shape)                    | `[REDACTED_JWT]`    | Long opaque base64url blobs: JWTs and service-key tokens embedded raw. Threshold is high enough that normal error text does not match. |
+
+Call-site integration:
+
+- `classifyLangfuseError(err)` runs the raw message through `redactCredentialsFromString` before returning the `errorMessage` field, so the auto-classified path is always scrubbed.
+- `failLangfuseGeneration(generation, error, context?)` re-scrubs any caller-supplied `context.errorMessage` with the same helper. A caller cannot accidentally bypass the safety net by passing a raw provider message.
+- The fallback `statusMessage` path (only reached when `errorMessage` is `undefined`, which should not happen in practice but is defended against) also routes through `redactCredentialsFromString(fallbackMessage)`.
+
+Design constraints:
+
+- **Idempotent.** Scrubbing an already-redacted string is a no-op — the replacement tokens (`[REDACTED]`, `[REDACTED_PEM]`, `[REDACTED_JWT]`) do not themselves match any of the input patterns.
+- **Conservative by design.** The scrubber targets only the high-signal patterns called out in the PR review and in the issue contract. The intent is to prevent accidental credential exfiltration via telemetry, not to replace a dedicated DLP tool. If a new high-signal pattern surfaces in production, add a row to `CREDENTIAL_PATTERNS` with a test case; do NOT widen an existing pattern.
+- **False-positive safe for clean errors.** `provider returned 401 unauthorized`, `deployment_not_found`, and similar operator-facing messages pass through unchanged — the JWT threshold is deliberately 40 characters to clear typical hex-ish identifiers (deployment ids, request ids) that would otherwise mis-match.
+- **Threat-model gap acknowledged.** Credentials in free-form unlabelled strings (a token echoed in a message without a key name or `Bearer` prefix) will NOT be redacted. Operators who need stronger guarantees should also enable the upstream redaction pipeline from issue #2051.
 
 ### Testing
 

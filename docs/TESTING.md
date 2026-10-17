@@ -5728,6 +5728,68 @@ expect(errorUpdate?.body.metadata).toMatchObject({
 
 This is the cross-cutting invariant: the metadata the unit test asserts on the end-call payload actually survives the SDK's batching, serialisation, and HTTP POST and lands on the ingestion endpoint in a shape a Langfuse dashboard can filter.
 
+### Credential redaction (issue #2057 safety net)
+
+The follow-up safety net introduced in commit `2afacd26` is covered by an eleven-case `describe('credential redaction (issue #2057 safety net)', ...)` block inside `src/providers/__tests__/langfuse-telemetry.test.ts`. See [`docs/PROVIDERS.md#credential-redaction-safety-net-issue-2057-commit-2afacd26`](PROVIDERS.md#credential-redaction-safety-net-issue-2057-commit-2afacd26) for the user-facing contract.
+
+The suite tests the exported `redactCredentialsFromString` helper directly AND verifies that `classifyLangfuseError` / `failLangfuseGeneration` apply it on both the auto-classified path and the caller-override path. Each case constructs a free-form string that mimics a real provider-error leakage, asserts that the leaked token is NOT present in the output, and asserts that the surrounding non-secret text is preserved:
+
+```typescript
+import {
+  classifyLangfuseError,
+  failLangfuseGeneration,
+  redactCredentialsFromString,
+  startLangfuseGeneration,
+  startLangfuseTrace,
+} from '../langfuse-telemetry.js';
+
+it('redactCredentialsFromString strips bearer tokens', () => {
+  const text = 'request failed: Authorization: Bearer sk-abc123XYZ_longenoughtoken';
+  expect(redactCredentialsFromString(text)).toBe(
+    'request failed: Authorization: Bearer [REDACTED]'
+  );
+});
+
+it('redactCredentialsFromString strips JSON clientsecret fields', () => {
+  const text = 'bad config: {"clientid":"foo","clientsecret":"abcdefg12345"}';
+  const result = redactCredentialsFromString(text);
+  expect(result).toContain('"clientsecret":"[REDACTED]"');
+  expect(result).not.toContain('abcdefg12345');
+});
+
+it('redactCredentialsFromString strips PEM private keys', () => {
+  const pem =
+    '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAK...\n-----END RSA PRIVATE KEY-----';
+  expect(redactCredentialsFromString(`err: ${pem} tail`)).toBe('err: [REDACTED_PEM] tail');
+});
+```
+
+Full matrix (eleven cases):
+
+| Case                                                              | Pattern                                          | Assertion                                                                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| Bearer token inline                                               | `Authorization: Bearer sk-abc123XYZ_longenoughtoken` | Exact replacement to `Bearer [REDACTED]`; surrounding `request failed:` prefix is preserved.          |
+| Basic auth value                                                  | `Basic YWRtaW46cGFzc3dvcmQ=`                     | Exact replacement to `Basic [REDACTED]`.                                                              |
+| JSON `clientsecret` field                                         | `{"clientid":"foo","clientsecret":"abcdefg12345"}` | Output contains `"clientsecret":"[REDACTED]"` AND does NOT contain the raw secret.                     |
+| Loose `key=value` secret                                          | `api_key=sk-live-abcdef12345, other=visible`     | Output contains `[REDACTED]`; the raw secret is gone; adjacent `other=visible` pair is preserved.      |
+| PEM private key (multi-line)                                      | `-----BEGIN RSA PRIVATE KEY-----…-----END RSA PRIVATE KEY-----` | Entire block replaced by `[REDACTED_PEM]`; surrounding `err:` prefix and ` tail` suffix are preserved. |
+| JWT-shaped token                                                  | `<header>.<payload>.<signature>` (three base64url segments, 40+/10+/10+ chars) | Output contains `[REDACTED_JWT]`; the raw token prefix is gone.                                        |
+| URL query-string token (delegated to `scrubUrlsFromString`)       | `https://api.example.com/cb?access_token=mysecret&foo=bar` | The raw `mysecret` is gone; `[REDACTED]` is present.                                                   |
+| Clean error message (negative case)                               | `provider returned 401 unauthorized`             | Identity — the scrubber does NOT touch legitimate operator-facing error text.                          |
+| Empty-string input                                                | `''`                                             | Returns `''` without throwing.                                                                        |
+| `failLangfuseGeneration` auto-classification scrubbing            | Error whose `.message` contains a bearer token   | Both `statusMessage` AND `metadata.errorMessage` on the captured `generation.end` call are scrubbed. |
+| `failLangfuseGeneration` explicit context override scrubbing      | `context.errorMessage` passed with a raw secret  | Caller-supplied override is re-scrubbed; the raw secret does not reach the SDK.                       |
+
+A twelfth case (`classifyLangfuseError returns a redacted errorMessage`) walks the pure-function path end-to-end: a 403 error whose `.message` contains a bearer token is classified as `{ errorType, errorMessage: '...Bearer [REDACTED]', isTerminal: true }`, pinning that redaction and classification compose correctly.
+
+Design rules the test file encodes implicitly:
+
+- **Prefer negative assertions.** `expect(result).not.toContain('<raw secret>')` catches a regression even when the replacement pattern changes shape. Pair with a positive `expect(result).toContain('[REDACTED]')` so a test that nukes the whole output passes but is still visibly over-redacting.
+- **Keep input strings realistic.** The fixtures mimic real SAP SDK and fetch error-message shapes (`request failed: Authorization: Bearer <token>`, `bad config: {"clientid":"foo","clientsecret":"<secret>"}`) rather than isolated bare tokens. A regression in boundary matching surfaces here.
+- **The dual assertion on `statusMessage` + `metadata.errorMessage`** is load-bearing: both legs must stay scrubbed because a Langfuse dashboard surfaces each field independently. A regression that only scrubs one leaves credentials visible in the other.
+
+The eleven cases run inside the mocked-SDK unit suite — no new integration-level case is needed because the pre-existing 401 integration test in `tests/providers/langfuse-telemetry-integration.test.ts` already pins that `statusMessage` / `metadata.errorMessage` survive SDK batching and reach the ingestion endpoint verbatim.
+
 ## Testing Hooks
 
 ### Hook Test Files

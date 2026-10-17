@@ -605,6 +605,30 @@ Classification order matters. Terminal classes (`isContentFilterError`, `isPerma
 
 Regression coverage. The classifier MUST have unit cases for: content-filter → terminal; permanent auth → terminal; free-tier rate limit → terminal; generic 429 → transient; HTTP 401/403 → terminal; HTTP 400/404/422 → terminal; HTTP 500/502/503/429 → transient; network transients (ECONNRESET, ETIMEDOUT) → transient; axios-style `response.status` → classified via the nested field; unknown-shape fallback → transient; non-`Error` coercion. The integration suite MUST include at least one case that drives a terminal error through the real SDK and asserts the metadata survives serialisation to the ingestion endpoint. See [`docs/TESTING.md#error-span-correlation-issue-2057`](./TESTING.md#error-span-correlation-issue-2057) for the reference suite.
 
+### Telemetry safety-net pattern
+
+Follow-up contract introduced in commit `2afacd26` ("redact credentials from Langfuse error span messages", issue #2057 safety net). Any opt-in telemetry integration that forwards free-form error strings to a third-party observability backend MUST route those strings through a scrubber BEFORE the SDK boundary, even when upstream redaction is already in place. The reference implementation is `redactCredentialsFromString` in `src/providers/langfuse-telemetry.ts`; see [`docs/PROVIDERS.md#credential-redaction-safety-net-issue-2057-commit-2afacd26`](./PROVIDERS.md#credential-redaction-safety-net-issue-2057-commit-2afacd26) for the user-facing contract and the full pattern table.
+
+1. **Scrub at the SDK boundary, not only at the call site.** Both the auto-classified `errorMessage` from the classifier AND the caller-supplied `context.errorMessage` override MUST pass through the same scrubber. A caller that passes a raw provider message by mistake cannot be allowed to bypass the safety net. In `failLangfuseGeneration` this looks like:
+
+   ```typescript
+   const errorMessage =
+     context?.errorMessage !== undefined
+       ? redactCredentialsFromString(context.errorMessage)
+       : classified.errorMessage; // already scrubbed by classifyLangfuseError
+   ```
+
+2. **Layer on top of existing URL scrubbing.** The pattern is additive — call the project's existing `scrubUrlsFromString` from `src/utils/logger.ts` FIRST (OAuth tokens frequently ride in URL query strings), then apply credential patterns to the already URL-scrubbed text. Do not duplicate URL-scrubbing logic.
+3. **Conservative, high-signal patterns only.** The scrubber targets Bearer / Basic headers, named JSON secret fields (`clientsecret`, `api_key`, `access_token`, `refresh_token`, `password`, with their `_` / `-` variants), loose `key=value` forms of the same keys, PEM private-key blocks, and JWT-shaped three-segment base64url blobs. Do NOT widen a pattern to catch "any secret-looking string" — a false positive that eats legitimate operator-facing error text is worse than a theoretical leak the pattern was never designed to catch. If a new high-signal pattern surfaces in production, ADD a row with tests; do NOT widen an existing row.
+4. **Idempotent.** Scrubbing an already-redacted string MUST be a no-op. The replacement tokens (`[REDACTED]`, `[REDACTED_PEM]`, `[REDACTED_JWT]`) are chosen so they cannot themselves match any input pattern. A regression test that double-applies the scrubber and asserts byte-equality is a cheap canary for this invariant.
+5. **No false positives on clean operator text.** The scrubber MUST pass through strings like `provider returned 401 unauthorized`, `deployment_not_found`, `missing environment variable AICORE_SERVICE_KEY` unchanged. The JWT threshold is deliberately 40 characters to clear typical hex-ish identifiers (deployment ids, request ids) — do not lower it. Include a test case that asserts identity on a clean message.
+
+Attack-surface guard. The JSON-field pattern uses a quoted-string regex (`"<key>"\s*:\s*"[^"]{4,}"`) that cannot cross a `"` boundary, so a user prompt that happens to contain the literal string `clientsecret` does not falsely redact adjacent non-secret text. The suffix match on `-localhost` from the MCP OAuth loopback detector (`src/mcp/oauth-loopback.ts`) uses the same principle on a different domain — any new pattern-based safety net SHOULD apply the same boundary-match discipline.
+
+Regression coverage. The unit suite MUST include at minimum: (1) a positive case for each pattern in the table, (2) a negative identity case for clean operator-facing text, (3) an empty-string input case, (4) a URL-query-string case to pin the delegation to `scrubUrlsFromString`, (5) a dual-leg assertion on the SDK-boundary helper that `statusMessage` AND `metadata.errorMessage` are BOTH scrubbed (a regression that only scrubs one leaves credentials visible in the other), and (6) a caller-override case asserting that a raw-secret override is re-scrubbed. See [`docs/TESTING.md#credential-redaction-issue-2057-safety-net`](./TESTING.md#credential-redaction-issue-2057-safety-net) for the reference eleven-case suite.
+
+Threat-model gap acknowledged. Credentials in free-form unlabelled strings (a token echoed in a message without a key name or `Bearer` prefix) will NOT be redacted by this layer. Operators who need stronger guarantees should also enable the upstream redaction pipeline from issue #2051 — this scrubber is a safety net, not a dedicated DLP tool.
+
 ### Test import-path depth
 
 Test files under `tests/` walk up to the repository root before descending into `src/`. The number of `../` segments needed depends on where the test file lives, and it must always land in `src/` — never in a sibling under `tests/` itself. Concrete rules:
