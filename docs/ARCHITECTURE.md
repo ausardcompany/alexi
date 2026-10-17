@@ -1132,6 +1132,38 @@ Runs inside a report are sorted newest-first by `(startedAt, id)` with a lexicog
 
 Sessions without an `agent` slug (files written before `SessionMetadata.agent` existed) are bucketed under the sentinel `(unknown)` so operators can see legacy spend instead of it silently disappearing. Non-JSON files, malformed JSON, and files missing the `metadata` / `messages` shape are skipped silently — one corrupt file never aborts the aggregation.
 
+### Aggregation flow
+
+```mermaid
+flowchart TD
+  A["getAgentUsage(sessionsDir, options?)"] --> B{"readdirSync(sessionsDir)"}
+  B -- "ENOENT / EACCES" --> R0["return []"]
+  B -- "entries" --> C["for each *.json file"]
+  C --> D["readSessionFile()<br/>JSON.parse + shape guard"]
+  D -- "null (corrupt / wrong shape)" --> C
+  D -- "Session" --> E{"agentId filter?"}
+  E -- "mismatch" --> C
+  E -- "match / none" --> F["sessionToRun()"]
+  F --> G["sum Message.tokens.{input,output,reasoning}"]
+  F --> H["computeActiveTimeMs()<br/>sum sub-threshold gaps"]
+  F --> I["classifyOutcome()<br/>completed / errored / running"]
+  F --> J["CostTracker.calculateCost(modelId,<br/>input, output + reasoning)"]
+  G --> K["AgentUsageRun"]
+  H --> K
+  I --> K
+  J --> K
+  K --> L{"startDate / endDate filter?"}
+  L -- "outside window" --> C
+  L -- "inside / none" --> M["byAgent.get(agentId).push(run)"]
+  M --> C
+  C -- "done" --> N["sort runs newest-first<br/>by (startedAt, id)"]
+  N --> O["sum totals per agent<br/>(cost, tokens, activeTime,<br/>errorCount, lastRunAt)"]
+  O --> P["sort reports newest-first<br/>by (lastRunAt, agentId)"]
+  P --> Q["return AgentUsageReport[]"]
+```
+
+The flow is pure read: no cost-history writes, no SAP AI Core traffic, no transcript decoding beyond `JSON.parse` and the per-message token / timestamp fields. Non-JSON names (`README.txt`), broken JSON (`{not json`), and documents missing `metadata` / `messages` are dropped before the per-session projection even runs, so a hand-edited file never aborts the sweep.
+
 ## Session Workdir and Project-Scoped Config Cache (issue #1848)
 
 Every session records the working directory it was created in (`SessionMetadata.workdir`) and announces that value to the project-scoped config cache at both session-context boundaries. The project cache in `src/config/projectCache.ts` keys every entry by `` `${configPath}:${normalizedWorkdir}` ``, but a cache that is worktree-aware without a transition detector still leaks: nothing purges project A's cached rules / routing / MCP / agents / skills / hooks when a caller opens a session under project B. `SessionManager` is the load-bearing collaborator that closes this loop — session creation and session resume are the two moments where the runtime learns that the active project may have changed.
