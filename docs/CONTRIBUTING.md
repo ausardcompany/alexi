@@ -3866,6 +3866,71 @@ Introduced in the 2026-10-16 upstream sync (`1.22.48`, ports upstream kilocode `
 - **Echo `resolvedAgentId` back in the success envelope.** The `session.agent` field in the create response confirms the named agent was accepted. Silently dropping the field on success is a regression — callers cannot otherwise distinguish "we honoured the name" from "we silently fell back to the workspace default".
 - **Mirror the schema change in `src/tool/tools/agent-manager.txt`.** The companion tool-description file is loaded verbatim by the orchestrator prompt. When the schema changes, the `.txt` MUST describe the new field with the same selectable-agent guard sentence and the explicit "the `task` tool's 'Available agent types' list is not valid here" guard. Divergence between the Zod schema and the `.txt` is a UX regression — the orchestrator LLM reads only the `.txt`.
 
+## Windows Git Loose-Object Contention
+
+Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream opencode PR #56190). Reference: [docs/ARCHITECTURE.md — Git Concurrent Write Retry](ARCHITECTURE.md#git-concurrent-write-retry-srcgitconcurrentwriteretryts).
+
+- **Only wrap Git calls that can race with another `git` process.** The retry (`retryConcurrentObjectWrite` in `src/git/concurrentWriteRetry.ts`) is scoped to Git writes that can collide with a concurrent `git` process writing to the same `.git/objects/` loose-object path on Windows. Do NOT wrap plain shell commands or network calls — those have their own retry policies (`ErrorBackoff`, `NetworkManager`, MCP connect retry) and double-wrapping dilutes the retry budget.
+- **Never remove the Windows guard.** The pass-through is `if (process.platform !== 'win32') return fn();`. POSIX has atomic rename semantics for loose-object writes; the retry would mask genuine Git errors with a 150 ms delay for no benefit. If you need a cross-platform retry, create a separate helper — do NOT widen this one.
+- **Only retry non-zero Git exits.** The `isGitExitError` guard checks `typeof err.exitCode === 'number'`. Spawn failures (`ENOENT` from `git` not being on PATH) are permanent configuration errors per AGENTS.md "Error classification" and MUST NOT be retried. Retrying a missing binary just delays the operator's "install git" fix.
+- **Keep the sleep at 50 ms linear.** The contention window is sub-millisecond on healthy Windows filesystems. Longer sleeps (exponential, 500 ms, etc.) delay a real failure's surfacing without improving success rate.
+
+## MCP OAuth Refresh (`src/mcp/refresh.ts`)
+
+Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream kilocode `f9b632fd6`, `fb9277937`, `9204aac51`). References: [docs/ARCHITECTURE.md — MCP OAuth Refresh](ARCHITECTURE.md#mcp-oauth-refresh-srcmcprefreshts), [docs/API.md — MCP OAuth Refresh API](API.md#mcp-oauth-refresh-api).
+
+- **The `inflight.delete(serverId)` MUST stay in `finally`.** This is the kilocode `9204aac51` regression guard. If the delete is moved into the `try` branch (or into the `.catch`), a failed refresh leaves the rejected promise cached forever — every subsequent call then sees the SAME failure and the MCP connector is permanently stuck. A reviewer catching this issue should block the PR.
+- **Never remove the `connectTimeoutMs` guard.** A hung IdP (common in SAP corporate networks when the identity zone is behind a slow Cloud Connector) must not stall the MCP client indefinitely. The timeout wrapper is required, not optional — removing it is a reliability regression.
+- **Preserve the `expiresAt - skew > now` comparison.** The default skew is `30_000` ms. Zero skew is wrong — wall-clock drift between the operator and the IdP is routinely a few seconds, and a token that is valid at 09:00:01.000 on the IdP but 09:00:03.000 locally would be fast-pathed and then rejected on use. The skew must stay in milliseconds.
+- **Do NOT reuse this module for SAP AI Core auth.** SAP AI Core uses a separate client-credentials grant via `src/providers/auth.ts`. The two auth paths have different lifetimes, different single-flight semantics (AI Core cache is keyed by deployment id, not server id), and different error-classification rules. Collapsing them into one module is a correctness regression.
+- **`_clearInflightForTests` is deliberately underscored.** Do NOT re-export it from `src/mcp/index.ts`. Production code using it as a side-channel would bypass the single-flight contract.
+
+## Error Classification
+
+Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream opencode PR #56307). Reference: [AGENTS.md — Error classification](../AGENTS.md), [docs/ARCHITECTURE.md — Transport Retry Classifier](ARCHITECTURE.md#transport-retry-classifier-srcutilsretryts), [docs/API.md — Transport Retry Classifier API](API.md#transport-retry-classifier-api).
+
+- **Keep `TRANSIENT_ERROR_CODES` in sync.** When adding a new transient code to `src/utils/retry.ts`, also update:
+  - `src/providers/modelFetchErrors.ts` `TRANSIENT_FETCH_ERROR_REGEX` (the catalog refresh retry).
+  - `src/session/network.ts` `isRetryableConnectionReset` (the stream reconnect retry).
+  - `src/mcp/client.ts` `TRANSIENT_ERROR_CODES` (the MCP connect retry).
+  - The AGENTS.md "Error classification" section (authoritative — reviewers read it).
+  - Divergence between the five sites is a correctness regression — a code classified as transient at one site but permanent at another produces an unexpected retry pattern that is hard to debug.
+- **`cause` is a required lookup level.** Node's global `fetch` wraps libuv errors in `cause`. A classifier that only reads `err.code` misses every `fetch` failure. If you add a NEW classifier, replicate the three-step detection: `err.code` → `err.cause.code` → case-insensitive message regex.
+- **The message regex is a last-resort fallback.** Prefer `err.code` or `err.cause.code`. Message strings are not stable across Node versions and should only match generic phrases (`broken pipe`, `EPIPE`) that users / loggers hand-write.
+- **Non-object inputs always return `false`.** The classifier is called on arbitrary `catch` values (`throw 'oops'` is still JavaScript). A classifier that crashes on a non-object input is a correctness regression — the agent loop's error handler must stay safe.
+- **The classifier does NOT retry.** It is pure classification. If you find yourself tempted to add retry logic inside `isRetryableTransportError`, resist — callers (`gemini-retry.ts`, the catalog refresh loop, the stream retry loop) feed its result into their own `shouldRetry` predicate so the budget stays caller-owned.
+
+## Reasoning Replay Buffer (`src/core/session/reasoning-replay.ts`)
+
+Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream kilocode `0f4936df1`). References: [docs/ARCHITECTURE.md — Reasoning Replay Buffer](ARCHITECTURE.md#reasoning-replay-buffer-srccoresessionreasoning-replayts), [docs/API.md — Reasoning Event Types](API.md#reasoning-event-types).
+
+- **`append` MUST NOT sort.** OpenRouter emits reasoning events in order on the hot path. Sorting on every insert is O(n²) over the turn and shows up as a tail-latency regression on long reasoning blocks. The hot path is append-only.
+- **`finalize` is a one-way barrier.** Once called, late events MUST route through `acceptLate` — do NOT call `append` after `finalize`. A caller that appends post-finalize bypasses the re-sort and the persisted record will NOT match the live user-observed order. If you add a `finalize`-aware helper, make it refuse the operation rather than silently falling back to `append`.
+- **The `acceptLate` re-sort MUST be stable.** `Array.prototype.sort` in Node 20+ is stable; relying on that stability is correct. If you re-implement the sort (e.g. for performance on a large buffer), preserve stability — simultaneous indices (unusual but defended against) must keep their original relative order.
+- **`snapshot` is a shallow clone, not a deep clone.** Later buffer mutations do not alias the persisted array, but the individual event objects are shared. Callers that mutate an event in-place AFTER persistence will corrupt the live buffer; the convention is that `ReasoningEvent` is treated as immutable after creation.
+- **`receivedAt` is stamped by the buffer.** Clients cannot forge it — this is a privacy / diagnostic invariant. The "how late is late?" metric would be meaningless if callers could backdate `receivedAt`.
+
+## Session List Pagination (`src/core/session/pagination.ts`)
+
+Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream kilocode's session-list pagination refactor). References: [docs/ARCHITECTURE.md — Session List Pagination](ARCHITECTURE.md#session-list-pagination-srccoresessionpaginationts), [docs/API.md — Session Pagination Types](API.md#session-pagination-types).
+
+- **Treat the cursor as opaque.** Downstream code (CLI, TUI, future `/sessions?cursor=…` HTTP endpoint) MUST NOT depend on the cursor's structure — reach it only via `encodeSessionsCursor` / `decodeSessionsCursor`. Parsing the base64 yourself is a correctness regression: the `v` byte lets the module reject stale cursors cleanly, and ad-hoc parsers will not know to check it.
+- **Bump `SESSIONS_CURSOR_VERSION` on ANY shape change.** Adding or removing a field inside `SessionsCursor` requires a version bump so a cursor emitted by the old build decodes to `null` (safe "start from the beginning" fallback) under the new build.
+- **Preserve the `(updatedAt DESC, id DESC)` total ordering.** The `id` tiebreak makes the ordering total; without it, two sessions with the same `updatedAt` would introduce non-deterministic page boundaries and the cursor-arithmetic could emit the same session twice. If you add a new sort order (e.g. by `createdAt`), add a new paginator — do NOT retrofit this one.
+- **Keep the deleted-cursor fallback.** `rows.findIndex(matches cursor) === -1` falls back to the first row strictly less than `(cursor.updatedAt, cursor.id)` under the ordering. Removing the fallback would return an empty page for a session that was deleted between page requests, instead of the correct next page.
+- **The paginator does NOT re-sort on every call.** `listSessionsPage` expects pre-sorted `rows`. Callers sort once (`rows.sort(compareSessionsDesc)`) and page many times. Re-sorting on every page is a performance regression — the whole point of the refactor was to make the session list sublinear-per-page.
+
+## Agent Usage Aggregation (`src/cli/agent-usage.ts`)
+
+Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream kilocode `88312a65b` + `db5fb2ae1`). References: [docs/ARCHITECTURE.md — Agent Usage Aggregation](ARCHITECTURE.md#agent-usage-aggregation-srccliagent-usagets), [docs/API.md — Agent Usage API](API.md#agent-usage-api), [docs/CONFIGURATION.md — Agent Usage Ledger](CONFIGURATION.md#agent-usage-ledger-usagejsonl).
+
+- **Keep the module pure and schema-agnostic.** No `fs.*`, no `env.*`, no logger. The record store (JSONL append, retention, redaction) is the caller's concern; this module is pure functions over in-memory data so it stays testable without filesystem fixtures. A refactor that imports `fs` here is a correctness regression — the module is used from unit tests that MUST run without a session store.
+- **Treat `project` as free-form.** SAP engagements embed customer code (`s4hana-migration`), worktree id, or any other cost-centre tag. Validating `project` against a hardcoded set (`internal/external/demo`) breaks that invariant.
+- **Track `successes` + `failures` separately from `runs`.** `runs - (successes + failures)` surfaces the `unknown`-outcome count without a third column. Collapsing the counters is a UX regression — operators lose visibility into agents that failed to report an outcome.
+- **Do NOT add filesystem reads to `aggregateByProject` or `formatUsageTable`.** The caller (`src/cli/commands/usage.ts`) owns I/O so operators can wire the aggregator to alternative sources (SQLite, an HTTP API, a CSV) without reimplementing the rollup.
+- **The CLI silently skips sessions without `usage.jsonl`.** This is forward-compatible with older sessions that pre-date the ledger. Do NOT change the command to error when the ledger is absent — the vast majority of pre-1.22.49 sessions have no ledger and would otherwise crash the command.
+- **Table columns stay narrow.** `formatUsageTable` targets 100-col terminals and does NOT wrap. Widening the columns is a UX regression for operators on standard terminals; add a `--wide` or `--json` mode instead.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

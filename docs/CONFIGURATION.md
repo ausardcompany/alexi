@@ -2928,6 +2928,54 @@ The `task` tool's "Available agent types" list enumerates subagents and is NOT v
 
 See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) is unrelated; the authoritative tool docs live at [docs/TOOLS.md](TOOLS.md) and the registry format at [docs/CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Agent Usage Ledger (`usage.jsonl`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream kilocode `88312a65b` + `db5fb2ae1`). The new `alexi usage` CLI command (see [docs/API.md — `usage`](API.md#usage)) reads per-session usage ledgers to produce per-project cost / token rollups.
+
+### Location
+
+```text
+~/.alexi/sessions/<session-id>/usage.jsonl
+```
+
+One `AgentUsageRecord` per line (JSON Lines). Sessions without a `usage.jsonl` are silently skipped so the command stays forward-compatible with older sessions.
+
+### Record shape
+
+```json
+{
+  "sessionId": "ses_01HRABC...",
+  "agent": "code-fix",
+  "project": "s4hana-migration",
+  "startedAt": 1760500000000,
+  "endedAt": 1760500120000,
+  "outcome": "success",
+  "tokensIn": 3012,
+  "tokensOut": 10488,
+  "costUSD": 0.123
+}
+```
+
+| Field | Required | Semantics |
+|-------|----------|-----------|
+| `sessionId` | yes | Session id the agent ran within. Used for cross-referencing session JSONL. |
+| `agent` | yes | Agent identifier (`code-review`, `research`, custom agent name). |
+| `project` | yes | Free-form project / workspace key. SAP engagements typically embed customer code (`s4hana-migration`), worktree id, or cost-centre id. |
+| `startedAt` | yes | Agent start time (epoch ms). |
+| `endedAt` | no | Agent end time (epoch ms). Omit while in flight. In-flight records contribute 0 to `durationMs` in the rollup. |
+| `outcome` | yes | Terminal outcome: `'success' | 'aborted' | 'error' | 'unknown'`. `success` increments `successes`; `aborted`/`error` increment `failures`; `unknown` is counted toward `runs` only. |
+| `tokensIn` / `tokensOut` | yes | Prompt / completion token totals for the whole run. |
+| `costUSD` | no | Billed cost when the pricing catalog resolved the model. Omit otherwise — records without pricing count toward tokens but not USD. |
+
+### Operator notes
+
+- The ledger is append-only JSONL. Rotation / retention is the operator's responsibility; the aggregator does not read a size cap.
+- Corrupt lines are skipped with `logger.debug('usage.ledger.parse_failed', ...)` — a single malformed line does not crash the whole command.
+- The `project` key is deliberately opaque; downstream cost dashboards can treat it as a cost-centre tag without Alexi having to know its structure.
+- Pair with `alexi usage --json` for programmatic ingestion into SAP cost tooling or SAP Alert Notification Service dashboards.
+
+See [docs/API.md — `usage`](API.md#usage) for the CLI surface and [docs/ARCHITECTURE.md — Agent Usage Aggregation](ARCHITECTURE.md#agent-usage-aggregation-srccliagent-usagets) for the aggregation design.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs
