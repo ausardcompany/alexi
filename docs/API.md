@@ -517,6 +517,67 @@ Delete a session.
 alexi session-delete -s <session-id>
 ```
 
+### usage
+
+Print agent usage aggregated by project. Introduced in the 2026-10-17 upstream sync (ports kilocode `88312a65b` + `db5fb2ae1`). Reads per-session `~/.alexi/sessions/<id>/usage.jsonl` ledgers; sessions without a ledger are silently skipped so the command stays forward-compatible with older sessions. Registered by `src/cli/commands/usage.ts`.
+
+```bash
+alexi usage [options]
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-p, --project <id>` | string | Filter to a single project id (matched exact-string against `AgentUsageRecord.project`). |
+| `--since <date>` | string | Only include records with `startedAt >= Date.parse(<date>)`. Invalid dates are ignored. |
+| `--json` | boolean | Emit the typed `AgentUsageSummary` as pretty-printed JSON on stdout instead of the plain-text table. |
+
+#### Examples
+
+```bash
+# Human-readable per-project table.
+alexi usage
+
+# One customer only, since the start of the week (ISO date).
+alexi usage --project s4hana-migration --since 2026-10-13
+
+# JSON for cost-dashboard ingestion.
+alexi usage --json > usage.json
+```
+
+#### Table output
+
+```text
+Project / Agent          Runs  OK  Err   TokIn   TokOut   USD      Duration
+------------------------ ----- --- --- ------- -------- -------- --------
+s4hana-migration             7   6   1   24510    88134    0.820      42m
+  code-fix                   4   4   0   12022    42117    0.390      18m
+  research                   3   2   1   12488    46017    0.430      24m
+------------------------ ----- --- --- ------- -------- -------- --------
+TOTAL                        7   6   1   24510    88134    0.820      42m
+```
+
+#### Record shape
+
+The ledger is one `AgentUsageRecord` per line (`src/cli/agent-usage.ts`):
+
+```ts
+export interface AgentUsageRecord {
+  sessionId: string;
+  agent: string;
+  project: string;
+  startedAt: number;              // epoch ms
+  endedAt?: number;               // epoch ms, omitted while in flight
+  outcome: 'success' | 'aborted' | 'error' | 'unknown';
+  tokensIn: number;
+  tokensOut: number;
+  costUSD?: number;               // omitted when the pricing catalog could not resolve the model
+}
+```
+
+Corrupt lines are logged at `debug` (`usage.ledger.read_failed` / `usage.ledger.parse_failed`) and skipped rather than crashing the whole command.
+
+See [docs/CONFIGURATION.md — Agent Usage Ledger](CONFIGURATION.md#agent-usage-ledger-usagejsonl) for the ledger location and retention contract.
+
 ### context
 
 Show current project context information.
@@ -8292,4 +8353,272 @@ Notes:
 - **Default cost tracker.** When `costTracker` is omitted the module builds one on a per-call temp directory (`fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-agent-usage-'))`), so the pricing table is loaded but the user's real `~/.alexi/cost-history.json` is never touched.
 - **Granularity caveat.** Each session file contributes exactly one run. A finer per-message-run grouping (grouping assistant messages by a shared `parentID` + `agentId`, matching the kilocode PR #15185 structure) requires a schema extension tracked under issue #2060; the public types already mirror the upstream shape so callers can share rendering code when that extension lands.
 - **No double-count.** Subagent runs are stored as independent session files with their own `agent` slug. The parent session's `totalTokens` is not propagated down, so summing all agents gives the on-disk ground truth — see the `tests/core/agentUsage.test.ts` regression ("attributes subagent spend to the subagent, not the parent").
+
+## Agent Usage API (CLI)
+
+Introduced in the 2026-10-17 upstream sync (ports kilocode `88312a65b` + `db5fb2ae1`). The `usage` CLI command is a thin wrapper over pure aggregation functions in `src/cli/agent-usage.ts`. Programmatic consumers can import the aggregator directly instead of parsing CLI output.
+
+```typescript
+export interface AgentUsageRecord {
+  sessionId: string;
+  agent: string;
+  project: string;
+  startedAt: number;
+  endedAt?: number;
+  outcome: 'success' | 'aborted' | 'error' | 'unknown';
+  tokensIn: number;
+  tokensOut: number;
+  costUSD?: number;
+}
+
+export interface AgentTotals {
+  agent: string;
+  runs: number;
+  successes: number;
+  failures: number;
+  tokensIn: number;
+  tokensOut: number;
+  costUSD: number;
+  durationMs: number;
+}
+
+export interface ProjectTotals {
+  runs: number;
+  successes: number;
+  failures: number;
+  tokensIn: number;
+  tokensOut: number;
+  costUSD: number;
+  durationMs: number;
+}
+
+export interface ProjectSummary {
+  project: string;
+  byAgent: Record<string, AgentTotals>;
+  totals: ProjectTotals;
+}
+
+export interface AgentUsageSummary {
+  byProject: Record<string, ProjectSummary>;
+  totals: ProjectTotals;
+}
+
+export function aggregateByProject(
+  records: readonly AgentUsageRecord[]
+): AgentUsageSummary;
+
+export function formatUsageTable(summary: AgentUsageSummary): string;
+
+// From src/cli/commands/usage.ts
+export function filterRecords(
+  records: readonly AgentUsageRecord[],
+  opts: { project?: string; since?: string; json?: boolean }
+): AgentUsageRecord[];
+```
+
+Semantics:
+
+- `aggregateByProject` is pure and runs in `O(n)` over `records`. Pass a filtered subset directly (e.g. the last 7 days) — the function does not know about time windows.
+- `successes` and `failures` are tracked separately from `runs`, so `runs - (successes + failures)` surfaces `unknown`-outcome runs.
+- `durationMs` is `Math.max(0, endedAt - startedAt)` for runs with a defined `endedAt`; in-flight runs contribute `0`.
+- `costUSD` is accumulated only when the record carries a defined `costUSD`; records without pricing are counted toward tokens but not USD.
+- `formatUsageTable` renders fixed-width columns intended for 100-col terminals and does NOT wrap. For wider or JSON output, serialize the typed `AgentUsageSummary` directly.
+
+## Session Pagination Types
+
+Introduced in the 2026-10-17 upstream sync (ports kilocode's session-list pagination refactor). The `src/core/session/pagination.ts` module exposes a cursor contract and a pure page slicer; `SessionManager` and the TUI session list share it via these types.
+
+```typescript
+export const SESSIONS_CURSOR_VERSION = 1;
+
+export interface SessionsCursor {
+  v: typeof SESSIONS_CURSOR_VERSION;
+  updatedAt: number;
+  id: string;
+}
+
+export interface SessionsPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+export interface PaginableSessionRow {
+  id: string;
+  updatedAt: number;
+  [k: string]: unknown;
+}
+
+export function encodeSessionsCursor(cursor: SessionsCursor): string;
+export function decodeSessionsCursor(raw: string | null | undefined): SessionsCursor | null;
+export function compareSessionsDesc(a: PaginableSessionRow, b: PaginableSessionRow): number;
+
+export function listSessionsPage<T extends PaginableSessionRow>(
+  rows: readonly T[],
+  cursor: SessionsCursor | null,
+  pageSize: number
+): SessionsPage<T>;
+```
+
+Semantics:
+
+- Cursor is opaque by contract. Callers that persist the cursor across releases MUST NOT depend on its structure.
+- `v` is a schema version byte; a decoder that does not recognise the version returns `null` so callers always have a well-defined "start from the beginning" fallback.
+- The ordering is total — `(updatedAt DESC, id DESC)`. `id` tiebreak makes cursor arithmetic deterministic.
+- `listSessionsPage` does NOT re-sort. Callers sort once and page many times.
+- A deleted cursor row (`findIndex === -1`) falls back to the first row strictly less than `(cursor.updatedAt, cursor.id)` under the total ordering.
+
+## Reasoning Event Types
+
+Introduced in the 2026-10-17 upstream sync (ports kilocode `0f4936df1`). The `src/core/session/reasoning-replay.ts` module exposes a `ReasoningBuffer` class with a well-defined finalize/accept-late protocol. See [docs/ARCHITECTURE.md — Reasoning Replay Buffer](ARCHITECTURE.md#reasoning-replay-buffer-srccoresessionreasoning-replayts) for the sequence diagram.
+
+```typescript
+export interface ReasoningEvent {
+  index: number;
+  text: string;
+  receivedAt: number;
+}
+
+export type ReasoningEventInput = Omit<ReasoningEvent, 'receivedAt'>;
+
+export class ReasoningBuffer {
+  append(event: ReasoningEventInput): void;
+  finalize(): void;
+  acceptLate(event: ReasoningEventInput): void;
+  snapshot(): ReasoningEvent[];
+  isFinalized(): boolean;
+  reset(): void;
+}
+```
+
+Semantics:
+
+- `append` is the hot-path primitive during the stream. It does NOT sort — OpenRouter emits in order and per-insert sorting would be O(n²) over the turn.
+- `finalize` is a one-way barrier. Subsequent events must flow through `acceptLate`.
+- `acceptLate` before `finalize` behaves like `append` (fast path). After `finalize` it pushes and re-sorts the ENTIRE buffer by `index` with a stable sort.
+- `snapshot` returns a shallow clone so later buffer mutations do not alias the persisted record.
+- `receivedAt` is stamped by the buffer, not the caller, so the "how late is late?" diagnostic cannot be forged.
+
+## MCP OAuth Refresh API
+
+Introduced in the 2026-10-17 upstream sync (ports kilocode `f9b632fd6`, `fb9277937`, `9204aac51`). The `src/mcp/refresh.ts` module exposes bounded single-flight OAuth refresh for third-party MCP connectors. SAP AI Core itself uses a separate client-credentials grant via `src/providers/auth.ts` — this surface is NOT relevant to AI Core deployment auth.
+
+```typescript
+export interface McpOauthToken {
+  accessToken: string;
+  expiresAt: number;
+}
+
+export type RefreshFn = () => Promise<McpOauthToken>;
+
+export interface EnsureFreshTokenOptions {
+  connectTimeoutMs: number;
+  skewMs?: number;
+}
+
+export const DEFAULT_REFRESH_SKEW_MS = 30_000;
+
+export function ensureFreshToken(
+  serverId: string,
+  current: McpOauthToken | undefined,
+  refresh: RefreshFn,
+  opts: EnsureFreshTokenOptions
+): Promise<string>;
+```
+
+Semantics:
+
+- Fast-paths when `current && current.expiresAt - skew > now`.
+- Single-flight is keyed by `serverId`. Concurrent callers on the same server share one outbound refresh; concurrent callers on different servers do not block each other.
+- The single-flight entry is cleared in a `finally` so a transient failure does NOT poison every subsequent attempt (regression guard from kilocode `9204aac51`).
+- `connectTimeoutMs` caps the outbound refresh. On timeout the caller sees `Error('mcp.refresh.timeout')`.
+
+## Gemini Retry API
+
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56232). The `src/providers/gemini-retry.ts` module wraps non-streaming Gemini / Vertex / SAP AI Core Vertex-via-orchestration calls with a single retry on `MALFORMED_RESPONSE` / `MALFORMED_FUNCTION_CALL` finishes.
+
+```typescript
+export const MALFORMED_FINISH_REASONS: ReadonlySet<string>;
+
+export interface GeminiLikeResponse {
+  candidates?: Array<{ finishReason?: string | null }>;
+  finishReason?: string;
+}
+
+export function extractFinishReason(res: GeminiLikeResponse | undefined | null): string | undefined;
+export function isMalformedGeminiResponse(res: GeminiLikeResponse | undefined | null): boolean;
+
+export function invokeGeminiWithRetry<T extends GeminiLikeResponse>(
+  fn: () => Promise<T>,
+  opts?: { maxAttempts?: number }
+): Promise<T>;
+```
+
+Semantics:
+
+- `maxAttempts` defaults to `2` (one retry) per opencode #56232.
+- Transport errors are routed through `isRetryableTransportError` from `src/utils/retry.ts` so EPIPE / ECONNRESET during the retry are also handled.
+- Any error that is NOT a retryable transport error propagates immediately — permanent failures (`401`, `403`, validation errors) must NOT burn the retry budget per AGENTS.md.
+- Intentionally scoped to non-streaming probes (image generation, tool-arg validation, catalog probes). Streaming calls route through the orchestration retry loop in `src/core/session/retry.ts`.
+
+## Stream Event Guards API
+
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). The `src/providers/protocols/stream-events.ts` module exposes forward-compatible SSE-event guards so a benign forward-rolled upstream provider does not turn into a hard failure.
+
+```typescript
+export interface TypedStreamEvent {
+  type: string;
+  [k: string]: unknown;
+}
+
+export type StreamEventClassification = 'known' | 'unknown' | 'untyped';
+
+export function isTypedStreamEvent(event: unknown): event is TypedStreamEvent;
+
+export function classifyStreamEvent(
+  event: unknown,
+  knownTypes: ReadonlySet<string>
+): StreamEventClassification;
+```
+
+Semantics:
+
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
+- Structural `{ type: string }` shape — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+
+## Transport Retry Classifier API
+
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56307). The `src/utils/retry.ts` module exposes a non-throwing classifier for retryable transport errors. Callers feed the result into their own `shouldRetry` predicate — this helper does NOT retry on its own.
+
+```typescript
+export const TRANSIENT_ERROR_CODES: ReadonlySet<string>;
+export function isRetryableTransportError(err: unknown): boolean;
+```
+
+`TRANSIENT_ERROR_CODES` is `{ 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE' }`. `EPIPE` was added for broken-pipe writes on long-running SAP AI Core streams through load balancers.
+
+Detection order (first match wins):
+
+1. `err.code` is a well-known transient Node ErrnoException code.
+2. `err.cause.code` is a well-known code — Node's global `fetch` wraps the libuv error in `cause`, so a single-level lookup misses it.
+3. Case-insensitive message regex `broken pipe|EPIPE` for callers that encode the code only in the error string (`new Error('EPIPE: broken pipe')` or `new Error('write EPIPE')`).
+
+Non-object inputs always return `false` so the helper is safe to call on arbitrary `catch` values.
+
+Keep in sync with: `src/providers/modelFetchErrors.ts` `TRANSIENT_FETCH_ERROR_REGEX`, `src/session/network.ts` `isRetryableConnectionReset`, `src/mcp/client.ts` `TRANSIENT_ERROR_CODES`, and the AGENTS.md "Error classification" section (authoritative).
+
+## Git Concurrent-Write Retry API
+
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56190). The `src/git/concurrentWriteRetry.ts` module exposes a Windows-only bounded retry for Git loose-object write collisions. Pass-through no-op on POSIX.
+
+```typescript
+export const CONCURRENT_WRITE_MAX_ATTEMPTS: number; // 3
+export const CONCURRENT_WRITE_RETRY_SLEEP_MS: number; // 50
+export function retryConcurrentObjectWrite<T>(fn: () => Promise<T>): Promise<T>;
+```
+
+Semantics:
+
+- Pass-through on `process.platform !== 'win32'`.
+- Retries only non-zero Git exits (`typeof err.exitCode === 'number'`). Spawn failures (`ENOENT` because `git` is not on PATH) are permanent configuration errors per AGENTS.md and are NOT retried.
+- Linear 50 ms sleep between attempts. No exponential multiplier — Windows file-lock contention clears sub-millisecond on a healthy filesystem.
 

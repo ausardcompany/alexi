@@ -4240,6 +4240,67 @@ Because the module is a pure function with no side effects at import time, it is
 
 See [docs/CONFIGURATION.md — OpenAI-Compatible Tool-Content Normalization](CONFIGURATION.md#openai-compatible-tool-content-normalization-normalizenulltoolcontent) for the operator-facing opt-in flag and the "when to enable" matrix.
 
+## Gemini Malformed-Finish Retry (`src/providers/gemini-retry.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56232). Gemini — invoked directly, through Vertex AI, or through SAP AI Core Vertex-via-orchestration deployments — occasionally completes a generation with `finishReason: MALFORMED_RESPONSE` or `MALFORMED_FUNCTION_CALL`. These are server-side formatting failures (the model produced tokens the Gemini service could not finalise). They are strongly transient — re-issuing the same request almost always succeeds — but surfacing them to the agent loop produces a confusing "empty response" that is counted against the user's mistake budget.
+
+### Provider-call flow with retry
+
+```mermaid
+flowchart LR
+    Call[invokeGeminiWithRetry fn] --> Attempt{attempt loop}
+    Attempt --> Fn[await fn]
+    Fn -->|resolves| Check{isMalformedGeminiResponse?}
+    Check -->|no| Return[return res]
+    Check -->|yes, attempts remain| LogWarn[logger.warn gemini.malformed_finish.retrying]
+    LogWarn --> Attempt
+    Check -->|yes, exhausted| Return
+    Fn -->|throws| Trans{isRetryableTransportError?}
+    Trans -->|yes, attempts remain| LogT[logger.warn gemini.transient_transport.retrying]
+    LogT --> Attempt
+    Trans -->|no OR exhausted| Throw[throw err]
+```
+
+### Scope
+
+Composable with the SAP AI Core orchestration path without disturbing `SapOrchestrationProvider.streamComplete`'s contract: callers wrap non-streaming Gemini probes (image generation, tool-arg validation, catalog probes) in this helper and leave streaming calls to the orchestration retry loop in `src/core/session/retry.ts`.
+
+- Retries exactly once on malformed finish per opencode #56232.
+- Transport errors flow through `isRetryableTransportError` from `src/utils/retry.ts`.
+- Permanent errors propagate immediately — must NOT burn the retry budget per AGENTS.md.
+
+See [docs/API.md — Gemini Retry API](API.md#gemini-retry-api) for the typed surface.
+
+## Stream Event Guards (`src/providers/protocols/stream-events.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
+
+### Usage pattern at every stream decoder
+
+Replaces the old `throw new Error('Unknown stream event: …')` at every provider decoder:
+
+```ts
+if (!isTypedStreamEvent(event)) {
+  logger.debug('stream.untyped_event', { event });
+  return;
+}
+switch (event.type) {
+  case 'content_block_delta': // ...
+  case 'message_stop':        // ...
+  default:
+    logger.debug('stream.unknown_event', { type: event.type });
+    break;
+}
+```
+
+### Guarantees
+
+- Non-throwing by contract.
+- Structural `{ type: string }` shape — portable across providers.
+- Classifiers do not infer the known set; the caller supplies `knownTypes: ReadonlySet<string>` per decoder.
+
+See [docs/API.md — Stream Event Guards API](API.md#stream-event-guards-api) for the typed surface.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design
