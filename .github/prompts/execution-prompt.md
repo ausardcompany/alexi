@@ -6,297 +6,293 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-15
+Generated: 2026-10-17
 Based on upstream commits analyzed:
-- **kilocode**: 2a7edfedb..e3ef95471 (90 commits) - highlights: ripgrep encoding/glob fixes, MCP OAuth hardening, Kilo AI gateway URL, conda telemetry, terminal routing restart ownership
-- **opencode**: 1015cb6..4397ee4 (78 commits) - highlights: MCP capability-gated calls, loopback OAuth tokens, policy consolidation, config normalization, compaction output limit, plugin permission assertions, MCP tool input metadata, codemode skip, DB query param redaction, continue after output limit
+- **kilocode**: 3a3271de2..1552877e8 (62 commits)
+- **opencode**: 00e7472..22e771f (29 commits)
 
 ## Summary
-- Total changes planned: 18
-- **Critical**: 3 | **High**: 7 | **Medium**: 6 | **Low**: 2
+- Total changes planned: 11
+- Critical: 1 | High: 4 | Medium: 4 | Low: 2
+
+Focus areas identified from upstream:
+1. **AI stream resilience** (Gemini MALFORMED_RESPONSE retry, unknown event tolerance, broken-pipe retry)
+2. **Snapshot/Git concurrency safety** on Windows
+3. **MCP OAuth token refresh**
+4. **Session list pagination refactor** + cursor schema
+5. **Model config enhancements** (reasoning in config, releaseDate, temperature capability)
+6. **Agent usage aggregation (CLI)**
+7. **TUI worker console isolation**
+8. **Reasoning replay persistence (OpenRouter)**
 
 ---
 
 ## Changes
 
-### 1. Treat `*.localhost` as loopback for MCP OAuth token endpoints
-**File**: `src/mcp/oauth-provider.ts` (and/or `src/mcp/auth.ts`)
-**Priority**: critical
-**Type**: security
-**Reason**: Upstream opencode commit `b55f220` fixes an OAuth security corner case where MCP token endpoints resolved to `*.localhost` were not treated as loopback, breaking local OAuth flows and risking header/credential leakage patterns. Alexi's MCP OAuth implementation needs the same loopback detection.
-
-**Current code**:
-```typescript
-function isLoopback(url: URL): boolean {
-  return (
-    url.hostname === "localhost" ||
-    url.hostname === "127.0.0.1" ||
-    url.hostname === "::1"
-  )
-}
-```
-
-**New code**:
-```typescript
-function isLoopback(url: URL): boolean {
-  const host = url.hostname.toLowerCase()
-  // RFC 6761: *.localhost names are reserved as loopback.
-  return (
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host.startsWith("127.")
-  )
-}
-```
-
----
-
-### 2. Redact SQL parameters in database query error messages
-**File**: `src/database/errors.ts` (or wherever DB errors are formatted)
-**Priority**: critical
-**Type**: security
-**Reason**: Upstream opencode commit `a8fc567` scrubs params from database query errors to avoid leaking user data (API keys, session content) through stack traces/logs. Important for SAP AI Core deployments where logs may be shipped to central observability.
-
-**New code**:
-```typescript
-export function formatQueryError(err: unknown, sql: string, params: unknown[]): Error {
-  const message = err instanceof Error ? err.message : String(err)
-  const redactedParams = params.map(() => "[redacted]")
-  return new Error(
-    `Database query failed: ${message}\n` +
-    `  sql: ${sql}\n` +
-    `  params: ${JSON.stringify(redactedParams)}`,
-  )
-}
-```
-
-Wire into any `Drizzle` / `better-sqlite3` error wrapping.
-
----
-
-### 3. Managed configuration gets highest precedence; split policies from settings
-**File**: `src/core/config.ts`
-**Priority**: critical
-**Type**: feature / security
-**Reason**: Upstream opencode commit `6dc4d4e` gives MDM/managed configuration (system directory + preferences) highest priority so enterprise admins (SAP context) can enforce policy. Policies are split off and loaded first so file-based policy authority is preserved while settings load last.
-
-**Current code**:
-```typescript
-const systemSupplementary = [
-  ...(sources.preferences ? yield* loadPreferences(sources.preferences) : []),
-  ...(sources.system?.present ? yield* loadDirectory(sources.system.path) : []),
-]
-```
-
-**New code**:
-```typescript
-// Managed settings load last (highest priority); MDM preferences outrank system dir.
-// Policies evaluate in reverse load order, so split and load managed policies first.
-const managed = [
-  ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
-  ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
-]
-const managedPolicies = managed
-  .flatMap((entry) =>
-    entry.type === "document" && entry.info.policies
-      ? [new Document({
-          type: "document",
-          path: entry.path,
-          info: new Info({ policies: entry.info.policies }),
-        })]
-      : [],
-  )
-  .toReversed()
-const managedSettings = managed.map((entry) =>
-  entry.type === "document" && entry.info.policies
-    ? new Document({ ...entry, info: new Info({ ...entry.info, policies: undefined }) })
-    : entry,
-)
-// ... assemble: [managedPolicies, ...direct, globalSupplementary, ...projectSupplementary, managedSettings]
-```
-
----
-
-### 4. Ripgrep: handle non-UTF-8 output via base64 `bytes` decoding
-**File**: `src/core/ripgrep.ts` + new `src/core/ripgrep-grep.ts`
+### 1. Retry broken-pipe transport failures in HTTP utility
+**File**: `src/util/retry.ts` (or `src/util/http.ts`)
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream kilocode commits `0e6da3104` / `31906a56b` fix crashes/incorrect text when grepping files with mixed/legacy encodings (Latin-1, etc.). Ripgrep emits `{bytes}` (base64) instead of `{text}` for non-UTF-8. Decode lossy-UTF-8 to show U+FFFD rather than failing schema validation.
+**Reason**: Upstream `opencode` #56307 adds EPIPE/broken-pipe to retry-eligible transport errors. Without this, long-running SAP AI Core calls through load balancers can fail intermittently with unhandled broken pipes.
 
-**New file** `src/core/ripgrep-grep.ts`:
+**New code** (add to retry predicate):
 ```typescript
-import { Schema, SchemaGetter } from "effect"
+// src/util/retry.ts
+const TRANSIENT_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",          // NEW: broken-pipe (opencode #56307)
+]);
 
-/** ripgrep `arbitrary data` ({text} or {bytes}) normalized to {text}. */
-export const Data = Schema.Union([
-  Schema.Struct({ text: Schema.String }),
-  Schema.Struct({ bytes: Schema.String }),
-]).pipe(
-  Schema.decodeTo(Schema.Struct({ text: Schema.String }), {
-    decode: SchemaGetter.transform((data) =>
-      "text" in data
-        ? { text: data.text }
-        : { text: Buffer.from(data.bytes, "base64").toString("utf8") },
-    ),
-    encode: SchemaGetter.passthrough({ strict: false }),
-  }),
-)
-```
-
-**Modify** `src/core/ripgrep.ts`:
-```typescript
-import * as KiloGrep from "./ripgrep-grep"
-
-const RawMatch = Schema.Struct({
-  type: Schema.Literals(["match", "context"]),
-  data: Schema.Struct({
-    path: KiloGrep.Data,
-    lines: KiloGrep.Data,
-    line_number: PositiveInt,
-    absolute_offset: NonNegativeInt,
-    submatches: Schema.Array(
-      Schema.Struct({
-        match: KiloGrep.Data,
-        start: NonNegativeInt,
-        end: NonNegativeInt,
-      }),
-    ),
-  }),
-})
+export function isRetryableTransportError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: string }).code;
+  if (code && TRANSIENT_ERROR_CODES.has(code)) return true;
+  const message = (err as { message?: string }).message ?? "";
+  if (/broken pipe|EPIPE/i.test(message)) return true;
+  return false;
+}
 ```
 
 ---
 
-### 5. Apply glob/include patterns AFTER ripgrep ignore rules (respect .gitignore)
-**File**: `src/core/ripgrep.ts` + new `src/core/ripgrep-glob.ts`
+### 2. Tolerate unknown / untyped stream events in AI protocol parsers
+**File**: `src/providers/sap-ai-core/stream.ts` (or wherever stream events are decoded)
+**Priority**: critical
+**Type**: bugfix
+**Reason**: `opencode` #56286 (`fix(ai): tolerate unknown and untyped stream events`) prevents crashes when upstream providers emit new event kinds. Critical for SAP AI Core since it proxies multiple providers (Anthropic, Gemini, OpenAI) and may forward unexpected shapes.
+
+**Current code** (example pattern to replace):
+```typescript
+switch (event.type) {
+  case "content_block_delta": /* ... */ break;
+  case "message_stop":        /* ... */ break;
+  default:
+    throw new Error(`Unknown stream event: ${event.type}`);
+}
+```
+
+**New code**:
+```typescript
+switch (event.type) {
+  case "content_block_delta": /* ... */ break;
+  case "message_stop":        /* ... */ break;
+  default:
+    // Gracefully ignore unknown/untyped events to stay forward-compatible
+    // with new provider SSE formats (opencode #56286).
+    logger.debug?.("stream.unknown_event", { type: event?.type ?? "<untyped>" });
+    break;
+}
+```
+
+Also guard untyped events:
+```typescript
+if (!event || typeof event !== "object" || typeof event.type !== "string") {
+  logger.debug?.("stream.untyped_event", { event });
+  return;
+}
+```
+
+---
+
+### 3. Retry Gemini `MALFORMED_RESPONSE` finishes
+**File**: `src/providers/sap-ai-core/gemini.ts`
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream kilocode PR #15017 (`e48c9785c`, `17448f5c5`) fixes glob patterns bypassing `.gitignore`. Passing `--glob=<pattern>` makes ripgrep treat it as an override that wins over ignore rules, causing `node_modules` to be walked. Instead, let ripgrep list files per ignore rules and apply the pattern locally.
+**Reason**: `opencode` #56232 — Gemini (and Vertex via SAP AI Core) occasionally completes with `finishReason: MALFORMED_RESPONSE`. Treat as transient and retry once instead of surfacing to the agent loop.
 
-**New file** `src/core/ripgrep-glob.ts`:
+**New code**:
 ```typescript
-export interface Input {
-  readonly pattern: string
-  readonly hidden?: boolean
-  readonly include?: readonly string[]
-}
+// src/providers/sap-ai-core/gemini.ts
 
-export interface Walk {
-  readonly args: readonly string[]
-  readonly match: (file: string) => boolean
-}
+const MALFORMED_FINISH_REASONS = new Set(["MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL"]);
 
-export function compile(pattern: string) {
-  const dir = pattern.endsWith("/")
-  const body = pattern.replace(/\/+$/, "")
-  const text = body.includes("/") ? body.replace(/^\//, "") : `**/${body}`
-  const glob = new Bun.Glob(text)
-  const folders = text.endsWith("/**") ? new Bun.Glob(`${text}/*`) : glob
-  return (path: string, folder: boolean) => {
-    if (folder) return folders.match(path)
-    return !dir && glob.match(path)
+export async function invokeGeminiWithRetry(req: GeminiRequest): Promise<GeminiResponse> {
+  const MAX_ATTEMPTS = 2;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await invokeGemini(req);
+      const finish = res?.candidates?.[0]?.finishReason;
+      if (finish && MALFORMED_FINISH_REASONS.has(finish) && attempt < MAX_ATTEMPTS) {
+        logger.warn("gemini.malformed_finish.retrying", { finish, attempt });
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableTransportError(err)) throw err;
+    }
   }
-}
-
-export function glob(input: Input): Walk {
-  // Prefilter via ripgrep type if last path segment is a simple name
-  const match = compile(input.pattern)
-  return {
-    args: [], // no --glob override; apply post-filter
-    match: (file) => match(file, false),
-  }
-}
-```
-
-**Modify** `src/core/ripgrep.ts` `glob` call site:
-```typescript
-// before:
-//   `--glob=${input.pattern}`,
-// after:
-...KiloGlob.glob(input).args,
-```
-Add a post-filter step before applying the result `limit`:
-```typescript
-.pipe(
-  Stream.filter((entry) => KiloGlob.glob(input).match(entry.path) && (input.filter?.(entry.path) ?? true)),
-  Stream.take(input.limit ?? Infinity),
-)
-```
-
----
-
-### 6. MCP: skip list/call for unadvertised capabilities
-**File**: `src/mcp/client.ts`
-**Priority**: high
-**Type**: bugfix / performance
-**Reason**: Upstream opencode commit `fbf5f16` avoids `method not found` errors from MCP servers that don't advertise prompts/resources. Reduces noisy telemetry and failed probes.
-
-**Current code**:
-```typescript
-const prompts = await client.listPrompts()
-const resources = await client.listResources()
-```
-
-**New code**:
-```typescript
-const caps = client.getServerCapabilities?.() ?? {}
-const prompts = caps.prompts ? await client.listPrompts().catch(() => ({ prompts: [] })) : { prompts: [] }
-const resources = caps.resources ? await client.listResources().catch(() => ({ resources: [] })) : { resources: [] }
-```
-
----
-
-### 7. MCP: skip codemode query for servers that reject it
-**File**: `src/mcp/client.ts` (or wherever Alexi probes codemode)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream opencode commit `7b5f1bd` prevents repeated failures and keeps server registration successful even when codemode is unsupported.
-
-**New code**:
-```typescript
-const codemode = await Effect.tryPromise(() => client.callTool({ name: "codemode" })).pipe(
-  Effect.catchAll(() => Effect.succeed({ supported: false } as const)),
-)
-if (!("supported" in codemode) || codemode.supported !== false) {
-  // register codemode handler
+  throw lastErr ?? new Error("Gemini call failed after retries");
 }
 ```
 
 ---
 
-### 8. MCP: advertise spec-shaped elicitation capability
-**File**: `src/mcp/client.ts`
+### 4. Retry concurrent snapshot/Git object writes (Windows safety)
+**File**: `src/core/snapshot.ts` or `src/core/git.ts`
 **Priority**: medium
 **Type**: bugfix
-**Reason**: Upstream opencode commit `3aa26f1` aligns Alexi's client capability advertisement with the MCP spec so servers can send elicit requests.
-
-**Current code**:
-```typescript
-capabilities: {
-  roots: { listChanged: true },
-  sampling: {},
-}
-```
+**Reason**: `opencode` #56190 — on Windows, concurrent Git writes to loose objects collide. If Alexi uses Git snapshots on Windows-hosted BAS/Dev Spaces, apply retry. Otherwise, keep code path no-op on non-Windows.
 
 **New code**:
 ```typescript
-capabilities: {
-  roots: { listChanged: true },
-  sampling: {},
-  elicitation: {}, // spec-shaped capability
+// src/core/git.ts
+import { setTimeout as sleep } from "node:timers/promises";
+
+async function retryConcurrentObjectWrite<T>(fn: () => Promise<T>): Promise<T> {
+  if (process.platform !== "win32") return fn();
+  const MAX = 3;
+  for (let i = 1; i <= MAX; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      // Only retry Git exit (non-zero) errors — not spawn failures.
+      const isGitExit = (err as { exitCode?: number }).exitCode !== undefined;
+      if (!isGitExit || i === MAX) throw err;
+      await sleep(50);
+    }
+  }
+  throw new Error("unreachable");
 }
+
+// Wrap update-index call:
+await retryConcurrentObjectWrite(() =>
+  runGit(["update-index", "--add", "--remove", "--replace", "-z", "--stdin"], { stdin, cwd })
+);
 ```
 
 ---
 
-### 9. MCP: pass tool input as permission metadata
-**File**: `src/
-{"prompt_tokens":36471,"completion_tokens":4096,"total_tokens":40567,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+### 5. MCP OAuth token auto-refresh with bounded timeout
+**File**: `src/tool/mcp/refresh.ts` (new) + wire into `src/tool/mcp/client.ts`
+**Priority**: high
+**Type**: feature + security
+**Reason**: `kilocode` adds `fix(cli): refresh expired MCP OAuth tokens automatically` (f9b632fd6) and bounded single-flight refresh (fb9277937, 9204aac51). SAP integrations commonly ship short-lived tokens; without this Alexi forces users to re-auth MCP servers manually.
 
-[Session: 0829b9e3-e4d3-467a-9968-8ec7132b9115]
-[Messages: 2, Tokens: 40567]
+**New code**:
+```typescript
+// src/tool/mcp/refresh.ts
+type RefreshFn = () => Promise<{ accessToken: string; expiresAt: number }>;
+
+const inflight = new Map<string, Promise<string>>();
+
+export async function ensureFreshToken(
+  serverId: string,
+  current: { accessToken: string; expiresAt: number } | undefined,
+  refresh: RefreshFn,
+  opts: { connectTimeoutMs: number; skewMs?: number } = { connectTimeoutMs: 10_000 },
+): Promise<string> {
+  const now = Date.now();
+  const skew = opts.skewMs ?? 30_000;
+  if (current && current.expiresAt - skew > now) return current.accessToken;
+
+  const existing = inflight.get(serverId);
+  if (existing) return existing;
+
+  const p = (async () => {
+    try {
+      const refreshed = await withTimeout(refresh(), opts.connectTimeoutMs, "mcp.refresh.timeout");
+      return refreshed.accessToken;
+    } finally {
+      // CRITICAL: clear the single-flight entry so later retries aren't poisoned
+      inflight.delete(serverId);
+    }
+  })();
+  inflight.set(serverId, p);
+  return p;
+}
+
+async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return await Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
+  ]);
+}
+```
+
+Call site:
+```typescript
+// src/tool/mcp/client.ts
+const token = await ensureFreshToken(server.id, server.oauth, () => oauthRefresh(server), {
+  connectTimeoutMs: server.connectTimeoutMs ?? 10_000,
+});
+request.headers.set("Authorization", `Bearer ${token}`);
+```
+
+---
+
+### 6. Persist late OpenRouter reasoning details for replay
+**File**: `src/core/session/reasoning-replay.ts` (new)
+**Priority**: medium
+**Type**: bugfix
+**Reason**: `kilocode` 0f4936df1 — OpenRouter sometimes emits reasoning tokens after the final content; they must be persisted so session replay matches live display. If Alexi offers transcript/replay, add equivalent.
+
+**New code**:
+```typescript
+// src/core/session/reasoning-replay.ts
+export interface ReasoningEvent {
+  index: number;
+  text: string;
+  receivedAt: number;
+}
+
+export class ReasoningBuffer {
+  private events: ReasoningEvent[] = [];
+  private finalized = false;
+
+  append(ev: Omit<ReasoningEvent, "receivedAt">) {
+    this.events.push({ ...ev, receivedAt: Date.now() });
+  }
+
+  /** Called when the stream completes; accepts late events arriving after finalize. */
+  finalize() { this.finalized = true; }
+
+  acceptLate(ev: Omit<ReasoningEvent, "receivedAt">) {
+    if (!this.finalized) return this.append(ev);
+    // Still persist — ordering by `index` protects replay fidelity.
+    this.events.push({ ...ev, receivedAt: Date.now() });
+    this.events.sort((a, b) => a.index - b.index);
+  }
+
+  snapshot() { return [...this.events]; }
+}
+```
+
+Hook into session persister so late events trigger a resave of the assistant message.
+
+---
+
+### 7. Project-scoped agent usage aggregation (CLI)
+**File**: `src/cli/agent-usage.ts` (new) + `src/cli/commands/usage.ts`
+**Priority**: medium
+**Type**: feature
+**Reason**: `kilocode` 88312a65b + db5fb2ae1 add project-scoped agent usage aggregation. Useful for SAP cost-tracking across customer engagements.
+
+**New code** (shape outline):
+```typescript
+// src/cli/agent-usage.ts
+export interface AgentUsageRecord {
+  sessionId: string;
+  agent: string;
+  project: string;
+  startedAt: number;
+  endedAt?: number;
+  outcome: "success" | "aborted" | "error" | "unknown";
+  tokensIn: number;
+  tokensOut: number;
+  costUSD?: number;
+}
+
+export interface A
+{"prompt_tokens":17116,"completion_tokens":4096,"total_tokens":21212,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: 293619d2-ced2-43e0-b564-2098cd9870bc]
+[Messages: 2, Tokens: 21212]
 
 ## Execution Instructions
 

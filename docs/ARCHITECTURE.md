@@ -1055,6 +1055,115 @@ if (tokens) {
 
 The dedicated `totalReasoningTokens` field exists purely for observability (surfacing extended-thinking usage in `sessions list`, telemetry spans, and cost reports). Because reasoning tokens are already inside `totalTokens`, a caller answering `"how many tokens has this session used?"` reads `totalTokens` alone and never needs to add the two fields together.
 
+## Agent Usage Aggregation
+
+`src/core/agentUsage.ts` derives per-agent usage aggregates (cost, active time, tokens, outcomes) from persisted session files without pulling full transcripts into any long-lived structure. The query answers operator questions like "how much did the `code` agent cost this week?" and "what is the success rate of the `review` agent?" without touching the SAP AI Core API or re-running any session.
+
+The module is a pure, read-only wrapper over the sessions directory. It mirrors the kilocode PR #15185 shape (see `packages/opencode/src/kilocode/agent-usage/` upstream) but operates at session granularity rather than user-message granularity, because Alexi's current schema does not carry a per-message `agentId` or `parentID` linkage — those fields are optional candidates for a future schema extension (see issue #2060).
+
+```typescript
+// src/core/agentUsage.ts
+export interface AgentUsageRun {
+  id: string;            // session id
+  startedAt: number;     // SessionMetadata.created
+  endedAt: number;       // SessionMetadata.updated
+  modelId?: string;
+  inputTokens: number;   // Sum of Message.tokens.input
+  outputTokens: number;  // Sum of Message.tokens.output
+  reasoningTokens: number;
+  cost: number;          // CostTracker.calculateCost(modelId, input, output + reasoning)
+  activeTimeMs: number;  // Sum of sub-threshold inter-message gaps
+  outcome: 'completed' | 'errored' | 'running';
+  messageCount: number;
+  parentSessionId?: string;
+}
+
+export interface AgentUsageReport {
+  agentId: string;
+  runCount: number;
+  sessionCount: number;
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalReasoningTokens: number;
+  totalActiveTimeMs: number;
+  errorCount: number;
+  lastRunAt: number;
+  runs: AgentUsageRun[]; // Newest-first by (startedAt, id)
+}
+
+export function getAgentUsage(
+  sessionsDir: string,
+  options?: {
+    agentId?: string;
+    startDate?: Date;
+    endDate?: Date;
+    idleThresholdMs?: number; // default 5 minutes
+    costTracker?: CostTracker;
+  }
+): AgentUsageReport[];
+```
+
+### No-double-count invariant
+
+The direct-cost rule is the load-bearing invariant. Alexi persists each subagent run as its own session file with its own `agent` slug and its own `Message.tokens` entries. The parent session's `totalTokens` is NOT propagated down from its children — subagent spend is recorded only on the child's file. The aggregator therefore computes direct cost per session (not per transcript), and summing all agents yields exactly the on-disk ground truth with no double-count. The regression test `tests/core/agentUsage.test.ts` ("attributes subagent spend to the subagent, not the parent") pins this contract.
+
+### Active-time semantics
+
+Active time is the sum of consecutive inter-message gaps where the gap is strictly less than `idleThresholdMs` (default 5 minutes). Gaps above the threshold are treated as idle time between turns — a user who stepped away for an hour must not inflate the agent's "active" budget. Negative deltas (session files edited by hand) are clamped to zero. A session with fewer than two messages contributes zero active time.
+
+### Outcome classification
+
+The run's final state is derived from the last persisted message:
+
+| Last message                                              | Outcome     |
+| --------------------------------------------------------- | ----------- |
+| Assistant turn                                            | `completed` |
+| System note starting with `"Error:"`                      | `errored`   |
+| User turn (assistant has not yet responded), or no msgs   | `running`   |
+
+The `"Error:"` prefix is a conservative heuristic — Alexi has no dedicated per-session error field today, and the schema extension that would introduce one is tracked under issue #2060. The outcome contract is forward-compatible: once a structured error marker exists, `classifyOutcome` can prefer it without changing any caller.
+
+### Determinism and ordering
+
+Runs inside a report are sorted newest-first by `(startedAt, id)` with a lexicographic tiebreak on `id`, so two runs that started in the same millisecond always surface in the same order across invocations. Reports are then sorted newest-first by `lastRunAt`, with the agent slug as a stable tiebreak.
+
+### Legacy and corrupt files
+
+Sessions without an `agent` slug (files written before `SessionMetadata.agent` existed) are bucketed under the sentinel `(unknown)` so operators can see legacy spend instead of it silently disappearing. Non-JSON files, malformed JSON, and files missing the `metadata` / `messages` shape are skipped silently — one corrupt file never aborts the aggregation.
+
+### Aggregation flow
+
+```mermaid
+flowchart TD
+  A["getAgentUsage(sessionsDir, options?)"] --> B{"readdirSync(sessionsDir)"}
+  B -- "ENOENT / EACCES" --> R0["return []"]
+  B -- "entries" --> C["for each *.json file"]
+  C --> D["readSessionFile()<br/>JSON.parse + shape guard"]
+  D -- "null (corrupt / wrong shape)" --> C
+  D -- "Session" --> E{"agentId filter?"}
+  E -- "mismatch" --> C
+  E -- "match / none" --> F["sessionToRun()"]
+  F --> G["sum Message.tokens.{input,output,reasoning}"]
+  F --> H["computeActiveTimeMs()<br/>sum sub-threshold gaps"]
+  F --> I["classifyOutcome()<br/>completed / errored / running"]
+  F --> J["CostTracker.calculateCost(modelId,<br/>input, output + reasoning)"]
+  G --> K["AgentUsageRun"]
+  H --> K
+  I --> K
+  J --> K
+  K --> L{"startDate / endDate filter?"}
+  L -- "outside window" --> C
+  L -- "inside / none" --> M["byAgent.get(agentId).push(run)"]
+  M --> C
+  C -- "done" --> N["sort runs newest-first<br/>by (startedAt, id)"]
+  N --> O["sum totals per agent<br/>(cost, tokens, activeTime,<br/>errorCount, lastRunAt)"]
+  O --> P["sort reports newest-first<br/>by (lastRunAt, agentId)"]
+  P --> Q["return AgentUsageReport[]"]
+```
+
+The flow is pure read: no cost-history writes, no SAP AI Core traffic, no transcript decoding beyond `JSON.parse` and the per-message token / timestamp fields. Non-JSON names (`README.txt`), broken JSON (`{not json`), and documents missing `metadata` / `messages` are dropped before the per-session projection even runs, so a hand-edited file never aborts the sweep.
+
 ## Session Workdir and Project-Scoped Config Cache (issue #1848)
 
 Every session records the working directory it was created in (`SessionMetadata.workdir`) and announces that value to the project-scoped config cache at both session-context boundaries. The project cache in `src/config/projectCache.ts` keys every entry by `` `${configPath}:${normalizedWorkdir}` ``, but a cache that is worktree-aware without a transition detector still leaks: nothing purges project A's cached rules / routing / MCP / agents / skills / hooks when a caller opens a session under project B. `SessionManager` is the load-bearing collaborator that closes this loop — session creation and session resume are the two moments where the runtime learns that the active project may have changed.
@@ -8674,4 +8783,213 @@ Callers that just want the resolved policy list (not the reordered documents) us
 - **Managed-settings vs managed-policies split.** The two concerns travel on different precedence trains: non-policy settings use normal later-wins (managed loads LAST), policies use reverse-load evaluation (managed loads FIRST). Collapsing them back into a single list is a correctness regression — a user config could then override an administrator policy by setting a non-policy field that happens to live under the same key.
 - **Pre-existing `managed === true` tagging contract.** The input discriminator is a `managed` flag on each document. Loaders tag their output with it; untagged documents are treated as user documents and keep their original precedence. The flag is not inferred from `path` so a loader can mark a project-local file as managed when the operator has pinned it via a deployment harness.
 - **Consumers.** The policy enforcer (`src/permission/policy.ts`, see [Managed Policy Enforcement](#managed-policy-enforcement)) wires through the resolved policy list; the two modules compose cleanly — this one answers "which policies are in effect?" and the enforcer answers "is this tool / integration / skill allowed?".
+
+## Agent Usage Aggregation (`src/cli/agent-usage.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream kilocode `88312a65b` + `db5fb2ae1`). The module answers "how many tokens did agent `code-fix` burn on project `s4hana-migration` last week?" without parsing raw session JSONL by hand — a frequent operator question for SAP consulting engagements where several customer projects share the same AI Core deployment budget.
+
+Pure functions over in-memory data; the record store itself (JSONL append, retention, redaction) is handled by the caller, which keeps the module testable without filesystem fixtures.
+
+```mermaid
+flowchart LR
+    Sessions[~/.alexi/sessions/*/usage.jsonl] --> Load[loadAllRecords in usage.ts]
+    Load --> Records[AgentUsageRecord list]
+    Records --> Filter[filterRecords by project/since]
+    Filter --> Agg[aggregateByProject]
+    Agg --> Summary[AgentUsageSummary]
+    Summary --> Format{opts.json?}
+    Format -->|yes| JSON[JSON.stringify to stdout]
+    Format -->|no| Table[formatUsageTable to stdout]
+```
+
+### Public surface
+
+- `AgentUsageRecord` interface (`src/cli/agent-usage.ts:34-50`) — one agent run: `sessionId`, `agent`, `project` (free-form so engagements can embed customer code / worktree id / cost-centre key), `startedAt`, optional `endedAt`, `outcome: 'success' | 'aborted' | 'error' | 'unknown'`, `tokensIn`, `tokensOut`, optional `costUSD`.
+- `AgentUsageSummary` / `ProjectSummary` / `AgentTotals` / `ProjectTotals` — nested rollup types. Keeping both project and agent levels nested makes rendering trivial (one row per project with per-agent breakdown) and keeps aggregation at O(n).
+- `aggregateByProject(records: readonly AgentUsageRecord[]): AgentUsageSummary` — pure. Callers can pass a filtered subset (e.g. "last 7 days") without the module having to know about time windows.
+- `formatUsageTable(summary): string` — plain-text 100-col-safe table. Columns stay narrow so output fits in a standard terminal without wrapping. Callers free to drop this and format differently; the primary programmatic artefact is the typed summary.
+
+### Design notes
+
+- No filesystem calls — the record store is the caller's problem so this module remains unit-testable without temp dirs.
+- `project` is deliberately opaque (free-form string); SAP operators embed customer code, worktree id, or any other key their cost tooling understands.
+- Duration counted only for runs with a defined `endedAt` — in-flight runs contribute `0` to `durationMs`.
+- `successes` / `failures` are tracked separately from `runs` so `runs - (successes + failures)` surfaces the "unknown"-outcome count without a third column.
+
+## Session List Pagination (`src/core/session/pagination.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream kilocode's session-list pagination refactor). Previously `alexi sessions` loaded every session metadata record into memory before filtering, which scaled badly for operators who had accumulated hundreds of sessions over long engagements.
+
+```mermaid
+flowchart TB
+    Call[listSessionsPage rows cursor pageSize] --> HasCursor{cursor is null?}
+    HasCursor -->|yes| Start0[start = 0]
+    HasCursor -->|no| Find[rows.findIndex updatedAt+id match]
+    Find -->|found| Advance[start = index + 1]
+    Find -->|not found deleted| Fallback[walk to first row strictly less than cursor]
+    Fallback -->|found| StartF[start = fallback index]
+    Fallback -->|not found| EmptyEnd[return items=empty, nextCursor=null]
+    Start0 --> Slice
+    Advance --> Slice
+    StartF --> Slice
+    Slice[items = rows.slice start..start+pageSize] --> AtEnd{end >= rows.length?}
+    AtEnd -->|yes| Done[nextCursor = null]
+    AtEnd -->|no| Encode[nextCursor = encodeSessionsCursor last-row-updatedAt+id]
+```
+
+### Public surface
+
+- `SESSIONS_CURSOR_VERSION = 1` — current cursor schema version. Bumped when the shape changes so `decodeSessionsCursor` rejects stale cursors instead of silently returning the wrong page.
+- `SessionsCursor` interface — `{ v, updatedAt, id }`. The `(updatedAt, id)` pair identifies the LAST row of the previous page so the next page starts strictly after it in the total ordering.
+- `SessionsPage<T>` interface — `{ items: T[]; nextCursor: string | null }`. A `null` cursor on a non-empty response signals "this is the last page".
+- `encodeSessionsCursor(cursor): string` / `decodeSessionsCursor(raw): SessionsCursor | null` — opaque URL-safe base64 round-trip. Malformed, version-mismatched, or missing cursors decode to `null`, which the paginator treats as "start from the beginning".
+- `PaginableSessionRow` structural interface — `{ id, updatedAt, ... }`. Any row carrying these two fields is accepted so the paginator can walk both the `SessionManager` JSONL records and the search-FTS result rows without a wrapper type.
+- `compareSessionsDesc(a, b): number` — total ordering under `updatedAt DESC, id DESC`. The `id` tiebreak makes the ordering total so cursor arithmetic is deterministic.
+- `listSessionsPage<T>(rows, cursor, pageSize): SessionsPage<T>` — does NOT re-sort; callers sort once and page many times.
+
+### Design notes
+
+- Cursor is opaque by contract. Callers that persist the cursor across releases should NOT depend on its structure; the schema version byte in `v` lets the module reject stale cursors cleanly after a shape change.
+- `(updatedAt DESC, id DESC)` is total because `id` is unique per session. Without the `id` tiebreak, two sessions with identical `updatedAt` would introduce non-deterministic page boundaries.
+- Deleted-cursor fallback walks forward to the first row strictly less than `(cursor.updatedAt, cursor.id)` so a cursor whose session was deleted since issuance still yields the correct next page rather than returning empty.
+
+## Reasoning Replay Buffer (`src/core/session/reasoning-replay.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream kilocode `0f4936df1`). OpenRouter — and some SAP AI Core reasoning-capable deployments routed through it — can emit reasoning tokens AFTER the final content delta on a streaming turn. Without a dedicated buffer those late events are discarded, and the replayed session transcript looks different from what the user saw live (missing reasoning blocks on turns that showed them during streaming).
+
+```mermaid
+sequenceDiagram
+    participant Stream as Provider stream
+    participant Buf as ReasoningBuffer
+    participant Store as Session store
+
+    Stream->>Buf: append event index=1
+    Stream->>Buf: append event index=2
+    Stream->>Buf: content delta
+    Stream->>Buf: finalize()
+    Note over Buf: finalized = true
+    Stream->>Buf: acceptLate event index=3
+    Buf->>Buf: push + sort by index (stable)
+    Store->>Buf: snapshot()
+    Buf-->>Store: shallow-cloned ordered events
+```
+
+### Public surface
+
+- `ReasoningEvent` interface — `{ index, text, receivedAt }`. `receivedAt` is filled in by the buffer so clients cannot forge it (which would break the "how late is late?" diagnostic).
+- `ReasoningEventInput = Omit<ReasoningEvent, 'receivedAt'>` — the minimal input shape callers supply.
+- `ReasoningBuffer` class with `append`, `finalize`, `acceptLate`, `snapshot`, `isFinalized`, `reset`.
+
+### Design notes
+
+- `append` deliberately does NOT sort — OpenRouter emits in order on the hot path, and per-insert sorting would be O(n²) over the turn.
+- `acceptLate` re-sorts the ENTIRE buffer on insert after `finalize`. Correct per the spec (the "late" event's `index` may fall anywhere in the sequence), stable sort preserves original relative order for simultaneous indices.
+- `snapshot` returns a shallow clone so later buffer mutations do not alias the persisted record.
+- Pairs with `src/core/session/reasoning-finalize.ts` — the opposite problem: reasoning blocks that need to be finalized BEFORE a stream retry so the retried turn does not inherit partial reasoning. The two helpers are complementary.
+- Framework-agnostic: the caller wires the snapshot into whatever persistence layer the session uses (sessionManager JSONL, in-memory React state); this module does NOT touch disk.
+
+## Git Concurrent Write Retry (`src/git/concurrentWriteRetry.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56190). On Windows, two concurrent `git` commands writing to the same loose-object store can collide at the filesystem level (`Could not open ... object file`, `access is denied`). Typical repro: Alexi auto-commit on a background timer at the same moment the agent loop is calling `git update-index` from a tool — both processes attempt to write the same hashed path under `.git/objects/`, Windows denies the second open, and the caller sees an opaque non-zero exit from `git`. On POSIX this is not a problem (atomic rename + shared read locks), so the retry is explicitly skipped on non-Windows to avoid masking genuine Git errors with slower feedback.
+
+### Public surface
+
+- `CONCURRENT_WRITE_MAX_ATTEMPTS = 3` — attempts (including the first).
+- `CONCURRENT_WRITE_RETRY_SLEEP_MS = 50` — linear sleep between attempts.
+- `retryConcurrentObjectWrite<T>(fn: () => Promise<T>): Promise<T>` — bounded retry wrapper.
+
+### Design notes
+
+- Pass-through no-op on `process.platform !== 'win32'`. POSIX callers do not pay for a problem they cannot have.
+- Only retries non-zero Git exits (`typeof err.exitCode === 'number'`). A spawn failure (`ENOENT` because `git` is not on PATH) is a permanent configuration error per AGENTS.md "Error classification" and must NOT be retried.
+- 50 ms linear sleep (no exponential multiplier) — Windows file-lock contention clears sub-millisecond on a healthy filesystem; longer waits just delay a real failure's surfacing.
+
+## MCP OAuth Refresh (`src/mcp/refresh.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream kilocode `f9b632fd6`, `fb9277937`, `9204aac51`). SAP integrations typically ship short-lived (5–15 min) OAuth tokens on their MCP connectors; without proactive refresh the operator sees random 401s on long-running agent sessions and has to re-auth each MCP server manually.
+
+```mermaid
+sequenceDiagram
+    participant A as caller A
+    participant B as caller B
+    participant R as ensureFreshToken
+    participant IdP as external IdP
+
+    A->>R: ensureFreshToken(id, expired, refresh, opts)
+    R->>R: expiresAt - skew <= now? yes
+    R->>R: inflight.set(id, promise)
+    R->>IdP: refresh() wrapped in withTimeout
+    B->>R: ensureFreshToken(id, expired, refresh, opts)
+    R-->>B: await same inflight promise
+    IdP-->>R: fresh token
+    R->>R: finally: inflight.delete(id)
+    R-->>A: fresh access token
+    R-->>B: fresh access token
+```
+
+### Public surface
+
+- `McpOauthToken` interface — `{ accessToken, expiresAt }`. `expiresAt` is absolute epoch-ms; the module is stateless w.r.t. the clock.
+- `RefreshFn = () => Promise<McpOauthToken>` — refresh callback supplied by the MCP client.
+- `EnsureFreshTokenOptions` — `{ connectTimeoutMs, skewMs? }`. `connectTimeoutMs` is required to keep a hung IdP from stalling the client indefinitely.
+- `DEFAULT_REFRESH_SKEW_MS = 30_000` — default clock-skew margin.
+- `ensureFreshToken(serverId, current, refresh, opts): Promise<string>` — public entry point.
+- `_clearInflightForTests(serverId?)` — test-only hook. Deliberately underscored and NOT re-exported from `src/mcp/index.ts` so production code cannot use it as a side-channel.
+
+### Design notes
+
+- Single-flight is keyed by `serverId` (not globally) so a refresh in flight on server A does not block a cold refresh on server B.
+- CRITICAL regression guard from kilocode `9204aac51`: the single-flight entry is cleared in a `finally` block. Without this, a transient refresh failure would permanently poison every subsequent attempt by returning the same rejected promise forever.
+- The refresh promise is wrapped in `withTimeout(..., opts.connectTimeoutMs, 'mcp.refresh.timeout')`. Timer is cleared in both outcomes so the test runner does not see dangling handles.
+- Separate from the SAP AI Core auth path. AI Core uses its own client-credentials grant via `src/providers/auth.ts`; this module ONLY serves third-party MCP connectors with user-interactive OAuth.
+
+## Gemini Retry (`src/providers/gemini-retry.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56232). Gemini (direct, Vertex AI, and SAP AI Core Vertex-via-orchestration deployments) occasionally completes a generation with `finishReason: MALFORMED_RESPONSE` or `MALFORMED_FUNCTION_CALL`. These are server-side formatting failures — the model produced tokens the Gemini service could not finalise. They are strongly transient (re-issuing the same request almost always succeeds), but surfacing them to the agent loop produces a confusing "empty response" counted against the user's mistake budget.
+
+### Public surface
+
+- `MALFORMED_FINISH_REASONS: ReadonlySet<string>` — `{ 'MALFORMED_RESPONSE', 'MALFORMED_FUNCTION_CALL' }`.
+- `GeminiLikeResponse` structural interface — accepts either `candidates[0].finishReason` (Gemini SDK shape) or `response.finishReason` (orchestration-adapter shape).
+- `extractFinishReason(res)` / `isMalformedGeminiResponse(res)` — classifiers.
+- `invokeGeminiWithRetry<T>(fn, { maxAttempts? = 2 }): Promise<T>` — bounded retry wrapper.
+
+### Design notes
+
+- Retries exactly ONCE on a malformed finish per opencode #56232.
+- Thrown errors are routed through `isRetryableTransportError` from `src/utils/retry.ts` so EPIPE / ECONNRESET during the retry are handled. Any other thrown error propagates immediately — permanent failures must NOT burn the retry budget per AGENTS.md.
+- Intentionally kept as a tiny helper (not a provider class) so it can be composed with the SAP AI Core orchestration path without disturbing `SapOrchestrationProvider.streamComplete`'s contract: callers wrap non-streaming Gemini probes (image generation, tool-arg validation, catalog probes) in this helper and leave streaming calls to the orchestration retry loop.
+- Logs `gemini.malformed_finish.retrying` / `gemini.transient_transport.retrying` warnings so operators see the retry pattern in run output.
+
+## Stream Event Classification (`src/providers/protocols/stream-events.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
+
+### Public surface
+
+- `TypedStreamEvent` structural interface — `{ type: string; [k: string]: unknown }`. Decoders that need extra fields further narrow with a provider-specific discriminated union.
+- `isTypedStreamEvent(event): event is TypedStreamEvent` — narrows an arbitrary SSE payload; returns `false` for `null`, non-objects, and objects whose `type` field is missing or not a non-empty string.
+- `StreamEventClassification = 'known' | 'unknown' | 'untyped'`.
+- `classifyStreamEvent(event, knownTypes: ReadonlySet<string>): StreamEventClassification` — non-throwing classifier against a caller-supplied known set.
+
+### Design notes
+
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
+- Replaces the old `throw new Error('Unknown stream event: ...')` at every stream decoder.
+- Structural shape so the guard is portable across providers — no provider-specific `type` enumeration leaks into this module.
+
+## Transport Retry Classifier (`src/utils/retry.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56307). Long-running SAP AI Core streaming calls routed through load balancers (SAP Cloud Connector, corporate HTTP proxies) occasionally see the upstream half-close the socket while the server is still writing, producing an EPIPE on the next write. Those must flow through the retry path, not fail the whole turn.
+
+### Public surface
+
+- `TRANSIENT_ERROR_CODES: ReadonlySet<string>` — `{ 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE' }`.
+- `isRetryableTransportError(err: unknown): boolean` — three-step detection: (1) `err.code` matches `TRANSIENT_ERROR_CODES`; (2) `err.cause.code` matches — Node's global `fetch` wraps the libuv error in `cause`, so a single-level lookup misses it; (3) case-insensitive message regex `broken pipe|EPIPE` for callers that encode the code only in the error string.
+
+### Design notes
+
+- Classifier only — does NOT retry on its own. Callers (`gemini-retry.ts`, the catalog refresh loop, the stream retry loop in `src/core/session/retry.ts`) feed its result into their own `shouldRetry` predicate.
+- Non-object inputs always return `false` so the helper is safe to call on arbitrary `catch` values.
+- Keep in sync with: `src/providers/modelFetchErrors.ts` `TRANSIENT_FETCH_ERROR_REGEX`, `src/session/network.ts` `isRetryableConnectionReset`, `src/mcp/client.ts` `TRANSIENT_ERROR_CODES`, and the AGENTS.md "Error classification" section (authoritative).
 

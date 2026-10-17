@@ -4159,6 +4159,59 @@ export function resolveCopilotProviderPackage(
 
 Looks up the correct provider-compat package for a Copilot fallback routing decision from an injected models.dev snapshot, falling back to `openai-compatible` when the snapshot has no entry. Dependency injection keeps the helper free of a hard dependency on the on-disk file layout (see `src/providers/catalog.ts` for how Alexi loads provider manifests today).
 
+## OpenAI-Compatible Tool-Content Normalizer
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync, ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's main chat path routes through SAP AI Core Orchestration exclusively. A handful of proxy adapters still forward requests to strict OpenAI-compatible endpoints — early SAP AI Core deployments and a few corporate proxy wrappers reject tool-role messages that carry explicit `null` content, requiring an empty string instead. Historically Alexi (and upstream) would unconditionally rewrite `null` → `''` on tool messages, which caused regressions for providers that legitimately emit `null` content to signal "no body, see `tool_calls`". The normalizer gates that rewrite behind an explicit flag so strict-OpenAI deployments can opt in without regressing the common path.
+
+### Public surface
+
+```typescript
+// src/providers/openai-compatible.ts
+
+export interface OpenAICompatibleMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+
+export interface NormalizeToolContentOptions {
+  /** When true, rewrites tool-role messages with null/undefined content to ''. Default: false. */
+  normalizeNullToolContent?: boolean;
+}
+
+export function normalizeToolContent<T extends OpenAICompatibleMessage>(
+  message: T,
+  options?: NormalizeToolContentOptions
+): T;
+
+export function normalizeToolContentAll<T extends OpenAICompatibleMessage>(
+  messages: readonly T[],
+  options?: NormalizeToolContentOptions
+): T[];
+```
+
+### Contract
+
+- **Default is a no-op.** When `options` is omitted or `normalizeNullToolContent` is falsy, the single-message helper returns its input unchanged (same reference) and the array helper returns a shallow copy of the input (`messages.slice()`). This matches upstream — the common path is "do not rewrite".
+- **Opt-in rewrite is scoped.** When `normalizeNullToolContent: true`, the single-message helper rewrites a message ONLY when `message.role === 'tool'` AND `message.content === null || message.content === undefined`. Every other role, and every tool-role message with any non-null content (including `''`, `0`, `false`, or structured JSON), passes through untouched.
+- **Never mutates input.** On a rewrite the helper returns a shallow copy `{ ...message, content: '' }` so caller-owned references are preserved. The array helper calls the single-message helper per entry under opt-in; non-opt-in callers get a defensive shallow copy of the array.
+- **SAP AI Core Orchestration is unaffected.** The main provider (`src/providers/sapOrchestration.ts`) does not invoke the normalizer — it is called only by proxy adapters that explicitly set the flag on their deployment configuration.
+
+### Minimal usage
+
+```typescript
+import { normalizeToolContentAll } from '../src/providers/openai-compatible.js';
+
+// Opt in only on strict endpoints that reject null tool content:
+const safeMessages = normalizeToolContentAll(messages, {
+  normalizeNullToolContent: provider.compatibility?.normalizeNullToolContent === true,
+});
+```
+
+The flag is intentionally per-call, not global: a single process may front multiple endpoints with divergent strictness. See [docs/CONFIGURATION.md — `normalizeNullToolContent` provider flag](CONFIGURATION.md#normalizenulltoolcontent-provider-flag) for how to wire the flag into `~/.alexi/config.json`.
+
 ## xAI Image-Mime Filter
 
 Introduced in commit `ca4ae92f` (2026-10-11 upstream sync; ports opencode 2026-10 fix). Lives in `src/providers/xai-image-filter.ts`.
@@ -4182,6 +4235,153 @@ export function filterXaiImages<T extends MultimodalAttachment>(
 - `filterXaiImages` partitions a list into `{ kept, dropped }`. The dropped set is returned so callers can log a warning or surface a UX message instead of swallowing content silently.
 
 Alexi routes multimodal requests through SAP AI Core and does not yet have a native xAI adapter — the helper is wired on-demand by proxy adapters that forward to xAI (OpenRouter, SAP proxy fronting Grok). Importing the module has no side effects on the SAP AI Core happy path.
+
+## OpenAI-Compatible Tool-Content Normalizer
+
+Introduced in commit `f53f3acb` (2026-10-16 upstream sync; ports upstream kilocode `8d5c126dc`). Lives at `src/providers/openai-compatible.ts`.
+
+Alexi's chat path routes through SAP AI Core Orchestration exclusively, but adapter code that forwards requests to a strict OpenAI-compatible endpoint (local proxy, Azure OpenAI, SAP-AI-Core-fronted OpenAI deployment) sometimes needs to rewrite tool-role messages whose `content` field is explicitly `null`. Historically Alexi (and upstream) unconditionally rewrote `null` → `""` on every tool message. That caused regressions where providers that legitimately return `null` content — the OpenAI convention for "no body, see `tool_calls`" — had their payloads mangled on the way out.
+
+The normalization is now opt-in: the module default is "pass through unchanged" and callers that proxy to a strict endpoint must set `normalizeNullToolContent: true` explicitly.
+
+### Public surface
+
+```typescript
+export interface OpenAICompatibleMessage {
+  role: string;
+  content: unknown;
+  [key: string]: unknown;
+}
+
+export interface NormalizeToolContentOptions {
+  /**
+   * When `true`, replaces a tool-role message's `null` content with an
+   * empty string. When `false` or omitted, the message passes through
+   * untouched. Default: `false` (preserve upstream shape).
+   */
+  normalizeNullToolContent?: boolean;
+}
+
+export function normalizeToolContent<T extends OpenAICompatibleMessage>(
+  message: T,
+  options?: NormalizeToolContentOptions
+): T;
+
+export function normalizeToolContentAll<T extends OpenAICompatibleMessage>(
+  messages: readonly T[],
+  options?: NormalizeToolContentOptions
+): T[];
+```
+
+### Semantics
+
+- `normalizeToolContent(msg)` and `normalizeToolContent(msg, { normalizeNullToolContent: false })` return the input unchanged.
+- `normalizeToolContent(msg, { normalizeNullToolContent: true })` returns the input unchanged UNLESS `msg.role === 'tool'` AND `msg.content == null`, in which case a shallow copy with `content: ''` is returned.
+- The function NEVER mutates its input — a non-matching message is passed through by reference; a matching message is returned as a new object with the rewritten `content` and every other field spread verbatim.
+- `normalizeToolContentAll(messages)` returns a shallow copy (`.slice()`) when the flag is off; when the flag is on it maps each entry through `normalizeToolContent`, so a tool-role `null`-content entry is replaced in-array and every other entry is kept.
+
+### When to opt in
+
+Opt in only when the downstream endpoint has been observed to reject tool-role messages with `null` content (HTTP `400` with a body like `"content: expected string, got null"`). Representative cases:
+
+- Early SAP AI Core OpenAI deployments before the orchestration API absorbed the OpenAI tool-call wire shape.
+- Local proxy wrappers that use a legacy `openai` Python SDK version with a strict JSON validator.
+- Some corporate gateway adapters that normalize the inbound request body against an older schema.
+
+Do NOT opt in when forwarding to the SAP AI Core Orchestration API through `src/providers/sapOrchestration.ts` — the orchestration API accepts `null` tool content and the normalizer would corrupt payloads that use `null` to mean "see `tool_calls`".
+
+### Decision flow
+
+```mermaid
+flowchart LR
+    Msg[Outgoing message] --> Flag{normalizeNullToolContent?}
+    Flag -->|false / omitted| Pass[Return unchanged]
+    Flag -->|true| RoleCheck{role === 'tool'<br/>and content == null?}
+    RoleCheck -->|no| Pass
+    RoleCheck -->|yes| Rewrite[Shallow copy<br/>content: '']
+    Rewrite --> Out[Return rewritten]
+    Pass --> Out
+```
+
+### Call-site integration
+
+A proxy adapter that forwards to a strict endpoint can apply the normalizer at request-build time:
+
+```typescript
+import { normalizeToolContentAll } from '../src/providers/openai-compatible.js';
+
+function buildStrictOpenAIRequest(messages, config) {
+  const normalized = normalizeToolContentAll(messages, {
+    normalizeNullToolContent: config.strictOpenAI === true,
+  });
+  return { model: config.model, messages: normalized };
+}
+```
+
+Because the module is a pure function with no side effects at import time, it is safe to add to any provider adapter without altering the SAP AI Core happy path.
+
+See [docs/CONFIGURATION.md — OpenAI-Compatible Tool-Content Normalization](CONFIGURATION.md#openai-compatible-tool-content-normalization-normalizenulltoolcontent) for the operator-facing opt-in flag and the "when to enable" matrix.
+
+## Gemini Malformed-Finish Retry (`src/providers/gemini-retry.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56232). Gemini — invoked directly, through Vertex AI, or through SAP AI Core Vertex-via-orchestration deployments — occasionally completes a generation with `finishReason: MALFORMED_RESPONSE` or `MALFORMED_FUNCTION_CALL`. These are server-side formatting failures (the model produced tokens the Gemini service could not finalise). They are strongly transient — re-issuing the same request almost always succeeds — but surfacing them to the agent loop produces a confusing "empty response" that is counted against the user's mistake budget.
+
+### Provider-call flow with retry
+
+```mermaid
+flowchart LR
+    Call[invokeGeminiWithRetry fn] --> Attempt{attempt loop}
+    Attempt --> Fn[await fn]
+    Fn -->|resolves| Check{isMalformedGeminiResponse?}
+    Check -->|no| Return[return res]
+    Check -->|yes, attempts remain| LogWarn[logger.warn gemini.malformed_finish.retrying]
+    LogWarn --> Attempt
+    Check -->|yes, exhausted| Return
+    Fn -->|throws| Trans{isRetryableTransportError?}
+    Trans -->|yes, attempts remain| LogT[logger.warn gemini.transient_transport.retrying]
+    LogT --> Attempt
+    Trans -->|no OR exhausted| Throw[throw err]
+```
+
+### Scope
+
+Composable with the SAP AI Core orchestration path without disturbing `SapOrchestrationProvider.streamComplete`'s contract: callers wrap non-streaming Gemini probes (image generation, tool-arg validation, catalog probes) in this helper and leave streaming calls to the orchestration retry loop in `src/core/session/retry.ts`.
+
+- Retries exactly once on malformed finish per opencode #56232.
+- Transport errors flow through `isRetryableTransportError` from `src/utils/retry.ts`.
+- Permanent errors propagate immediately — must NOT burn the retry budget per AGENTS.md.
+
+See [docs/API.md — Gemini Retry API](API.md#gemini-retry-api) for the typed surface.
+
+## Stream Event Guards (`src/providers/protocols/stream-events.ts`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
+
+### Usage pattern at every stream decoder
+
+Replaces the old `throw new Error('Unknown stream event: …')` at every provider decoder:
+
+```ts
+if (!isTypedStreamEvent(event)) {
+  logger.debug('stream.untyped_event', { event });
+  return;
+}
+switch (event.type) {
+  case 'content_block_delta': // ...
+  case 'message_stop':        // ...
+  default:
+    logger.debug('stream.unknown_event', { type: event.type });
+    break;
+}
+```
+
+### Guarantees
+
+- Non-throwing by contract.
+- Structural `{ type: string }` shape — portable across providers.
+- Classifiers do not infer the known set; the caller supplies `knownTypes: ReadonlySet<string>` per decoder.
+
+See [docs/API.md — Stream Event Guards API](API.md#stream-event-guards-api) for the typed surface.
 
 ## Related Documentation
 

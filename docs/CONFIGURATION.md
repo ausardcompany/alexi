@@ -2831,6 +2831,151 @@ Resolution order at read time (highest wins):
 
 See [docs/API.md — Managed Policy Namespace](API.md#managed-policy-namespace) and [docs/ARCHITECTURE.md — Managed Policy Namespace loading](ARCHITECTURE.md#managed-policy-namespace-loading-srcconfiguserconfigts) for the TypeScript surface and the end-to-end composition with the enforcement site.
 
+## `normalizeNullToolContent` provider flag
+
+Introduced in the 2026-10-16 upstream sync (`1.22.48`, ports upstream kilocode `8d5c126dc`). Opts a specific provider entry in `~/.alexi/config.json` into the strict OpenAI-compatible tool-content normalization implemented by `src/providers/openai-compatible.ts`. The default is OFF — SAP AI Core Orchestration and most proxy adapters do NOT need this flag.
+
+### When to enable
+
+Set `normalizeNullToolContent: true` on a provider ONLY when its backing endpoint rejects tool-role messages that carry explicit `null` content with a `400`/`422` error. The symptom is a stream that fails on the second turn of a tool-calling conversation, after the assistant has emitted a tool call and the orchestrator posts the tool result back with `role: 'tool'` and `content: null` (to signal "no body, see `tool_calls`"). Strict endpoints that match this profile include:
+
+- Early SAP AI Core proxy deployments that pre-date the current permissive request shape.
+- Corporate proxy wrappers that re-serialize the payload through a stricter JSON Schema than the upstream API expects.
+- A small number of self-hosted OpenAI-compatible gateways (Ollama, LocalAI, vLLM, LM Studio) where the local server throws on `content: null`.
+
+Enabling the flag on an endpoint that does NOT need it is still safe — the normalizer only rewrites `null`/`undefined` content on `role: 'tool'` messages, and empty-string content is a valid payload for every OpenAI-compatible endpoint we know of. The reason the flag defaults to OFF is that providers which legitimately emit `null` content to signal "no body, see `tool_calls`" lose that signal when the normalizer runs, and the empty string is a lossy replacement.
+
+### Shape
+
+The flag lives under the per-provider `compatibility` block documented in [Per-Provider Compatibility Block](#per-provider-compatibility-block-providersidcompatibility):
+
+```json
+{
+  "providers": {
+    "sap-anthropic-strict": {
+      "compatibility": {
+        "normalizeNullToolContent": true
+      }
+    }
+  }
+}
+```
+
+| Field                      | Type      | Default | Purpose                                                                                        |
+| -------------------------- | --------- | ------- | ---------------------------------------------------------------------------------------------- |
+| `normalizeNullToolContent` | `boolean` | `false` | When `true`, rewrites `null`/`undefined` content on tool-role messages to `''` before dispatch. |
+
+Any non-boolean value is silently coerced to `false` by the reader so a hand-edited corrupt config never accidentally enables normalization.
+
+### Interaction with other knobs
+
+- Independent of `cacheFormat` and `cacheKey` — the flag only affects tool-role content on the request path.
+- Independent of the global SAP AI Core gateway override (`SAP_AI_GATEWAY_URL`) — the normalizer runs AFTER request assembly, regardless of which endpoint the provider finally dispatches to.
+- Does NOT affect the response path. If the upstream endpoint emits a tool-role message with `null` content in the response stream, the client parses it faithfully.
+
+See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) for the TypeScript surface.
+
+## `agent_manager` named-agent delegation (`config.agent`)
+
+Introduced in the 2026-10-16 upstream sync (`1.22.48`, ports upstream kilocode `f01b273c1`, `e703b5637`, `4fcf08b5e`). Extends the `agent_manager` tool's `create` action with an optional `agent` field inside the `config` object so a new Agent Manager session can run as a user-authored primary agent instead of the workspace default. This is a tool-schema addition, not a user-config field — it is called out here because operators configure the registry of selectable agents via `.alexi/agent/*.md` (project) and `~/.config/kilo/agent/*.md` (global) files, and the lookup used by this field consults that registry.
+
+### Selectable-agent contract
+
+A name supplied via `config.agent` must resolve to an entry in `getAgentRegistry().list()` that satisfies ALL of:
+
+- `mode === 'primary'` or `mode === 'all'` — `mode: 'subagent'` entries are rejected because they are reserved for the `task` tool.
+- `deprecated !== true`.
+- `options.internal !== true` AND `options.hidden !== true` — hidden entries do not surface in UI pickers.
+
+The resolver tries exact `name` first, then exact `id`, then any `alias`. A rejected name returns `success: false` with an error that enumerates the selectable agent names so the model (or the operator reading the error) can self-correct.
+
+### Minimal registry example
+
+```markdown
+<!-- .alexi/agent/review.md -->
+---
+name: review
+mode: primary
+---
+
+You are a code-review agent. Scope: diffs only, no filesystem writes.
+```
+
+With this file in place, `alexi` can delegate to the agent via the `agent_manager` tool:
+
+```json
+{
+  "action": "create",
+  "config": {
+    "agent": "review",
+    "model": "anthropic--claude-4.7-opus"
+  }
+}
+```
+
+A result payload echoes back the resolved agent id so the caller can confirm:
+
+```json
+{
+  "action": "create",
+  "session": { "id": "session-...", "status": "created", "agent": "review" }
+}
+```
+
+### Not the same as `task`
+
+The `task` tool's "Available agent types" list enumerates subagents and is NOT valid here. Reserve `agent_manager.config.agent` for cases where the user wants a visible, named-agent Agent Manager session; use `task` for internal subagent research.
+
+See [docs/PROVIDERS.md — OpenAI-Compatible Tool-Content Normalizer](PROVIDERS.md#openai-compatible-tool-content-normalizer) is unrelated; the authoritative tool docs live at [docs/TOOLS.md](TOOLS.md) and the registry format at [docs/CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Agent Usage Ledger (`usage.jsonl`)
+
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream kilocode `88312a65b` + `db5fb2ae1`). The new `alexi usage` CLI command (see [docs/API.md — `usage`](API.md#usage)) reads per-session usage ledgers to produce per-project cost / token rollups.
+
+### Location
+
+```text
+~/.alexi/sessions/<session-id>/usage.jsonl
+```
+
+One `AgentUsageRecord` per line (JSON Lines). Sessions without a `usage.jsonl` are silently skipped so the command stays forward-compatible with older sessions.
+
+### Record shape
+
+```json
+{
+  "sessionId": "ses_01HRABC...",
+  "agent": "code-fix",
+  "project": "s4hana-migration",
+  "startedAt": 1760500000000,
+  "endedAt": 1760500120000,
+  "outcome": "success",
+  "tokensIn": 3012,
+  "tokensOut": 10488,
+  "costUSD": 0.123
+}
+```
+
+| Field | Required | Semantics |
+|-------|----------|-----------|
+| `sessionId` | yes | Session id the agent ran within. Used for cross-referencing session JSONL. |
+| `agent` | yes | Agent identifier (`code-review`, `research`, custom agent name). |
+| `project` | yes | Free-form project / workspace key. SAP engagements typically embed customer code (`s4hana-migration`), worktree id, or cost-centre id. |
+| `startedAt` | yes | Agent start time (epoch ms). |
+| `endedAt` | no | Agent end time (epoch ms). Omit while in flight. In-flight records contribute 0 to `durationMs` in the rollup. |
+| `outcome` | yes | Terminal outcome: `'success' | 'aborted' | 'error' | 'unknown'`. `success` increments `successes`; `aborted`/`error` increment `failures`; `unknown` is counted toward `runs` only. |
+| `tokensIn` / `tokensOut` | yes | Prompt / completion token totals for the whole run. |
+| `costUSD` | no | Billed cost when the pricing catalog resolved the model. Omit otherwise — records without pricing count toward tokens but not USD. |
+
+### Operator notes
+
+- The ledger is append-only JSONL. Rotation / retention is the operator's responsibility; the aggregator does not read a size cap.
+- Corrupt lines are skipped with `logger.debug('usage.ledger.parse_failed', ...)` — a single malformed line does not crash the whole command.
+- The `project` key is deliberately opaque; downstream cost dashboards can treat it as a cost-centre tag without Alexi having to know its structure.
+- Pair with `alexi usage --json` for programmatic ingestion into SAP cost tooling or SAP Alert Notification Service dashboards.
+
+See [docs/API.md — `usage`](API.md#usage) for the CLI surface and [docs/ARCHITECTURE.md — Agent Usage Aggregation](ARCHITECTURE.md#agent-usage-aggregation-srccliagent-usagets) for the aggregation design.
+
 ## Related Documentation
 
 - [API Documentation](API.md) -- CLI commands and TypeScript APIs

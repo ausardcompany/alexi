@@ -12087,3 +12087,72 @@ describe('ripgrep glob compile', () => {
 3. **Pin the policy strip on `managedSettings`.** Both `info.policies` AND `info.experimental.policies` are stripped from the LAST-loaded fork; an empty `experimental` must be omitted entirely rather than left as `{}`. Both halves are needed because the orchestration treats non-policy settings separately from policies — leaving the policy fields on the managed-settings fork would double-apply the managed policy under later-wins ordering.
 4. **Keep tests schema-agnostic.** The module is deliberately pure and takes minimal `{ path, info }` records — fixtures should match that shape. Pulling in the full project config schema binds the suite to an unrelated layer and makes refactors noisier.
 5. **No `fs`, no `os`, no `env`.** This module has no I/O surface. A test that reaches for `mkdtemp` is testing the wrong module — put file-loading tests on the config loader (`src/config/userConfig.test.ts`) and keep this suite synchronous and parallel-safe.
+
+### Testing `getAgentUsage` (agent usage aggregation)
+
+Introduced in `tests/core/agentUsage.test.ts` alongside `src/core/agentUsage.ts` (commit `99ca2c5d feat(core): add per-agent usage aggregation query module`). The suite pins the fourteen contract surfaces the module exposes, driven by on-disk session JSON fixtures written through a `beforeEach` scaffold.
+
+The scaffold recipe mirrors every other filesystem-touching tool test in the repository:
+
+```typescript
+// tests/core/agentUsage.test.ts
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
+
+import { CostTracker } from '../../src/core/costTracker.js';
+import type { Message, Session, SessionMetadata } from '../../src/core/sessionManager.js';
+import { getAgentUsage } from '../../src/core/agentUsage.js';
+
+describe('getAgentUsage', () => {
+  let sessionsDir: string;
+  let tempDir: string;
+  let tracker: CostTracker;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-usage-'));
+    sessionsDir = path.join(tempDir, 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    // Isolate the cost tracker so the suite never touches ~/.alexi/cost-history.json.
+    // The pricing table is static on the class, so a fresh tracker produces
+    // identical cost figures.
+    const trackerDataDir = path.join(tempDir, 'cost');
+    await fs.mkdir(trackerDataDir, { recursive: true });
+    tracker = new CostTracker({ dataDir: trackerDataDir });
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+  // ...
+});
+```
+
+The suite then writes concrete session files via `writeSession(session)` helpers and asserts on the resulting `AgentUsageReport[]`. The thirteen regression cases cover:
+
+| Case | Contract pinned |
+|------|-----------------|
+| `returns empty array when sessions directory is missing` | `readdirSync` ENOENT falls through to `[]` instead of throwing. Mirrors `SessionManager.listSessions`. |
+| `returns empty array when sessions directory is empty` | Zero session files → zero reports (not `[{ agentId: '(unknown)', runs: [] }]`). |
+| `aggregates a single session into one run under its agent slug` | End-to-end projection: tokens summed, cost computed via injected tracker, `activeTimeMs` sums all sub-threshold gaps, outcome is `completed` for a trailing assistant turn. |
+| `groups runs by agent and sorts runs newest-first by startedAt then id` | Per-agent grouping is correct AND the tiebreak between two runs with identical `startedAt` is deterministic (lexicographic `id`, descending). |
+| `attributes subagent spend to the subagent, not the parent (no double counting)` | **Load-bearing invariant.** A `parent` session (`agent: 'code'`) and a `child` session (`agent: 'explore'`, `parentSessionId: 'parent'`) each surface their own direct spend. Dropping this test allows a refactor that re-propagates subagent cost into the parent to pass silently. |
+| `filters by agentId` | Case-sensitive exact-match filter, no partial matches, no glob expansion. |
+| `filters by date range (inclusive on both ends)` | Both bounds inclusive. Pins the semantics so a future refactor to half-open ranges is caught. |
+| `surfaces sessions with no agent slug under the "(unknown)" bucket` | Legacy pre-`agent` sessions do not silently disappear from the aggregate. |
+| `excludes idle gaps larger than the threshold from activeTimeMs` | A one-hour idle gap at the default 5-minute threshold is excluded; sub-threshold gaps still contribute. |
+| `classifies outcome as running when the last message is from the user` | A session where the assistant has not yet responded is `running`, not `completed`. |
+| `classifies outcome as errored when the trailing system message starts with "Error:"` | The `"Error:"` heuristic triggers, and `errorCount` is incremented on the report rollup. |
+| `counts reasoning tokens separately but includes them in cost` | `reasoningTokens` is a dedicated field, AND `cost` is computed on `output + reasoning` (billing rate parity with `CostTracker.recordUsage`). |
+| `ignores non-JSON files and silently skips corrupt session files` | A `README.txt`, a `{not json` file, and a wrong-shape JSON file next to a valid session must not abort the sweep. |
+| `aggregates totals correctly across many runs for one agent` | The report-level sums over multiple runs are consistent — regression guard for a future map/reduce bug. |
+| `works without an explicit cost tracker (uses internal default)` | The default temp-dir fallback produces a defensible cost (`> 0` for a priced model), covering the production code path operators actually hit. |
+
+#### Patterns worth internalising
+
+1. **Always inject the `CostTracker`.** Pricing is on a static table today, so an injected tracker rooted in a per-test temp directory produces the same numbers as the production tracker — but testing against the real `~/.alexi/cost-history.json` would race across parallel tests and leak between runs. The `costTracker: tracker` option in `GetAgentUsageOptions` exists for exactly this reason.
+2. **Pin the no-double-count contract explicitly.** The parent/child subagent test is the single most important case in the suite — it enforces that the aggregator never re-propagates subagent spend into the parent agent's rollup. Deleting it would let a well-meaning refactor re-introduce the exact bug kilocode PR #15185 was designed to prevent.
+3. **Use real session shapes.** The `makeMessage` / `makeSession` helpers construct `Message` and `SessionMetadata` with the actual production types — not a bespoke fixture type. A regression where `SessionMetadata` grows a required field is caught at `tsc` time instead of at runtime.
+4. **One session file per logical run.** Session granularity is the whole contract; writing more than one session per run would obscure the aggregator's behaviour. If the schema ever grows a per-message `agentId`, this suite should be extended with new cases rather than mutated.
+5. **Idle gap threshold cases need realistic durations.** The one-hour idle gap in the `excludes idle gaps larger than the threshold` test is intentional — it is far enough from the default threshold that off-by-one unit mistakes (seconds vs milliseconds) are visible in the assertion.
