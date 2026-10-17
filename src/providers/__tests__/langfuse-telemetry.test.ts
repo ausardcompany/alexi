@@ -62,6 +62,7 @@ import {
   LANGFUSE_SDK_INTEGRATION,
   readDirectLangfuseTelemetryConfig,
   readEnvTraceAttributes,
+  redactCredentialsFromString,
   resolveAiSdkTelemetry,
   startLangfuseGeneration,
   startLangfuseTrace,
@@ -557,6 +558,120 @@ describe('langfuse-telemetry', () => {
     it('failLangfuseGeneration is still a no-op when generation is undefined', () => {
       expect(() => failLangfuseGeneration(undefined, new Error('x'))).not.toThrow();
       expect(generationEndSpy).not.toHaveBeenCalled();
+    });
+
+    describe('credential redaction (issue #2057 safety net)', () => {
+      it('redactCredentialsFromString strips bearer tokens', () => {
+        const text = 'request failed: Authorization: Bearer sk-abc123XYZ_longenoughtoken';
+        expect(redactCredentialsFromString(text)).toBe(
+          'request failed: Authorization: Bearer [REDACTED]'
+        );
+      });
+
+      it('redactCredentialsFromString strips basic auth values', () => {
+        expect(redactCredentialsFromString('header: Basic YWRtaW46cGFzc3dvcmQ=')).toBe(
+          'header: Basic [REDACTED]'
+        );
+      });
+
+      it('redactCredentialsFromString strips JSON clientsecret fields', () => {
+        const text = 'bad config: {"clientid":"foo","clientsecret":"abcdefg12345"}';
+        const result = redactCredentialsFromString(text);
+        expect(result).toContain('"clientsecret":"[REDACTED]"');
+        expect(result).not.toContain('abcdefg12345');
+      });
+
+      it('redactCredentialsFromString strips key=value secrets', () => {
+        const text = 'env dump: api_key=sk-live-abcdef12345, other=visible';
+        const result = redactCredentialsFromString(text);
+        expect(result).toContain('[REDACTED]');
+        expect(result).not.toContain('sk-live-abcdef12345');
+        expect(result).toContain('other=visible');
+      });
+
+      it('redactCredentialsFromString strips PEM private keys', () => {
+        const pem =
+          '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAK...\n-----END RSA PRIVATE KEY-----';
+        expect(redactCredentialsFromString(`err: ${pem} tail`)).toBe('err: [REDACTED_PEM] tail');
+      });
+
+      it('redactCredentialsFromString strips JWT-shaped tokens', () => {
+        const jwt =
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9abcdefghijklmnop.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4';
+        const result = redactCredentialsFromString(`token=${jwt}`);
+        expect(result).toContain('[REDACTED_JWT]');
+        expect(result).not.toContain('eyJhbGciOiJIUzI1NiI');
+      });
+
+      it('redactCredentialsFromString scrubs tokens inside URL query strings', () => {
+        const text = 'callback https://api.example.com/cb?access_token=mysecret&foo=bar';
+        const result = redactCredentialsFromString(text);
+        expect(result).not.toContain('mysecret');
+        expect(result).toContain('[REDACTED]');
+      });
+
+      it('redactCredentialsFromString leaves clean messages untouched', () => {
+        expect(redactCredentialsFromString('provider returned 401 unauthorized')).toBe(
+          'provider returned 401 unauthorized'
+        );
+      });
+
+      it('redactCredentialsFromString tolerates empty / undefined-like input', () => {
+        expect(redactCredentialsFromString('')).toBe('');
+      });
+
+      it('failLangfuseGeneration scrubs bearer tokens from auto-classified messages', async () => {
+        const decision = await enabledDecision();
+        const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+        const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+        const err = Object.assign(
+          new Error('401 unauthorized Authorization: Bearer sk-leaked-abc123XYZ'),
+          { statusCode: 401 }
+        );
+        failLangfuseGeneration(gen, err);
+        const call = generationEndSpy.mock.calls.at(-1)![0] as {
+          statusMessage?: string;
+          metadata?: Record<string, unknown>;
+        };
+        expect(call.statusMessage).not.toContain('sk-leaked-abc123XYZ');
+        expect(call.statusMessage).toContain('Bearer [REDACTED]');
+        expect((call.metadata as { errorMessage?: string }).errorMessage).not.toContain(
+          'sk-leaked-abc123XYZ'
+        );
+        expect((call.metadata as { errorMessage?: string }).errorMessage).toContain(
+          'Bearer [REDACTED]'
+        );
+      });
+
+      it('failLangfuseGeneration scrubs explicit context overrides too', async () => {
+        const decision = await enabledDecision();
+        const trace = startLangfuseTrace(decision, { name: 'alexi.stream' });
+        const gen = startLangfuseGeneration(trace, { name: 'alexi.stream', model: BYOK_MODEL });
+        failLangfuseGeneration(gen, new Error('ignored'), {
+          errorType: 'CallerClassified',
+          errorMessage: 'config: clientsecret="rawleaksecret12345"',
+          isTerminal: true,
+        });
+        const call = generationEndSpy.mock.calls.at(-1)![0] as {
+          statusMessage?: string;
+          metadata?: Record<string, unknown>;
+        };
+        expect(call.statusMessage).not.toContain('rawleaksecret12345');
+        expect((call.metadata as { errorMessage?: string }).errorMessage).not.toContain(
+          'rawleaksecret12345'
+        );
+      });
+
+      it('classifyLangfuseError returns a redacted errorMessage', () => {
+        const err = Object.assign(
+          new Error('403 forbidden Authorization: Bearer sk-leak-abcdef1234'),
+          { statusCode: 403 }
+        );
+        const classified = classifyLangfuseError(err);
+        expect(classified.errorMessage).not.toContain('sk-leak-abcdef1234');
+        expect(classified.errorMessage).toContain('Bearer [REDACTED]');
+        expect(classified.isTerminal).toBe(true);
+      });
     });
 
     it('successful finishLangfuseGeneration does NOT attach error-span metadata', async () => {

@@ -42,6 +42,7 @@ import {
   isPermanentAuthFailure,
   isRateLimitError,
 } from '../core/error-backoff.js';
+import { scrubUrlsFromString } from '../utils/logger.js';
 
 // ============================================================================
 // Env var names (operators grep for these)
@@ -472,8 +473,13 @@ export function finishLangfuseGeneration(
  *   `NetworkError`). When omitted, {@link classifyLangfuseError}
  *   derives it from the error's `name`, `code`, or constructor.
  * - `errorMessage` — human-readable description for debugging.
- *   Callers are responsible for redaction (see #2051); we never
- *   touch credentials here.
+ *   {@link failLangfuseGeneration} runs the final string through
+ *   {@link redactCredentialsFromString} (bearer tokens, SAP service-key
+ *   fields, PEM blocks, long JWT-shaped base64 blobs, URL query
+ *   strings) before forwarding it to the Langfuse SDK. Callers that
+ *   do their own redaction upstream (issue #2051) are still welcome
+ *   to pass a pre-scrubbed override; this scrubber is the Langfuse-
+ *   side safety net, not a replacement for upstream redaction.
  * - `isTerminal` — operator hint that distinguishes permanent config
  *   failures (`true`: auth, validation, content filter, 4xx except
  *   429) from transient blips the retry budget is expected to
@@ -491,6 +497,73 @@ export interface LangfuseErrorContext {
  * it's a transient rate-limit the retry budget will absorb.
  */
 const TERMINAL_HTTP_STATUSES = new Set([400, 401, 403, 404, 422]);
+
+/**
+ * Patterns of high-signal credential material that MUST NOT reach
+ * Langfuse error spans. Issue #2057 explicitly forbids raw credentials
+ * or API keys inside error-span metadata. Provider errors occasionally
+ * echo request headers, service-key JSON, or signed URLs inside
+ * `Error.message` on failure paths, so we scrub defensively before
+ * forwarding the string to the Langfuse SDK.
+ *
+ * Scrubbing is layered on top of {@link scrubUrlsFromString} (which
+ * handles query strings carrying OAuth tokens) and runs regardless of
+ * whether issue #2051 (operator-side redaction) is in place — this is
+ * the Langfuse-specific safety net, not a replacement for upstream
+ * redaction.
+ */
+const CREDENTIAL_PATTERNS: Array<readonly [RegExp, string]> = [
+  // HTTP Authorization headers: `Authorization: Bearer <token>` or `Bearer <token>` inline.
+  [/\bBearer\s+[A-Za-z0-9._\-+/=]{8,}/gi, 'Bearer [REDACTED]'],
+  // Basic auth header value.
+  [/\bBasic\s+[A-Za-z0-9+/=]{8,}/gi, 'Basic [REDACTED]'],
+  // SAP service-key fields and other JSON secrets. Match both quoted
+  // and unquoted forms so `clientsecret:"..."` and `"clientsecret": "..."`
+  // are both handled.
+  [
+    /"(client[_-]?secret|clientsecret|secret_key|secretkey|api[_-]?key|apikey|access[_-]?token|accesstoken|refresh[_-]?token|refreshtoken|password)"\s*:\s*"[^"]{4,}"/gi,
+    '"$1":"[REDACTED]"',
+  ],
+  // Loose `key=value` and `key: value` forms for the same fields.
+  [
+    /\b(client[_-]?secret|clientsecret|secret_key|secretkey|api[_-]?key|apikey|access[_-]?token|accesstoken|refresh[_-]?token|refreshtoken|password)\s*[:=]\s*(["'])?[A-Za-z0-9._\-+/=]{8,}\2?/gi,
+    '$1=[REDACTED]',
+  ],
+  // PEM-encoded private keys.
+  [/-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g, '[REDACTED_PEM]'],
+  // Long opaque base64 blobs (JWTs, service-key tokens embedded raw in
+  // error messages). Keep the threshold high enough that normal error
+  // text ("provider returned 401 — unauthorized") does not match.
+  [/\b[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[REDACTED_JWT]'],
+];
+
+/**
+ * Scrub credential material out of a free-form string before it is
+ * attached to a Langfuse error span.
+ *
+ * The redaction is additive to {@link scrubUrlsFromString}: URL query
+ * strings and hash fragments are scrubbed first (OAuth tokens frequently
+ * ride there), then the credential patterns above are applied to the
+ * remaining text.
+ *
+ * This is deliberately conservative — it does not try to detect every
+ * possible secret shape, only the high-signal patterns called out in
+ * the PR review of #2057 and in the issue contract. The goal is to
+ * prevent accidental credential exfiltration via telemetry, not to
+ * replace a dedicated DLP tool.
+ *
+ * @internal — exported for testing.
+ */
+export function redactCredentialsFromString(text: string): string {
+  if (!text) {
+    return text;
+  }
+  let redacted = scrubUrlsFromString(text);
+  for (const [pattern, replacement] of CREDENTIAL_PATTERNS) {
+    redacted = redacted.replace(pattern, replacement);
+  }
+  return redacted;
+}
 
 /**
  * Extract an HTTP status code from an error, when present. Looks at the
@@ -574,7 +647,8 @@ function isNetworkTransient(err: unknown): boolean {
  * error families without parsing messages.
  */
 export function classifyLangfuseError(err: unknown): LangfuseErrorContext {
-  const errorMessage = err instanceof Error ? err.message : String(err);
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  const errorMessage = redactCredentialsFromString(rawMessage);
 
   let errorType = 'Error';
   if (err && typeof err === 'object') {
@@ -668,7 +742,16 @@ export function failLangfuseGeneration(
   }
   const classified = classifyLangfuseError(error);
   const errorType = context?.errorType ?? classified.errorType;
-  const errorMessage = context?.errorMessage ?? classified.errorMessage;
+  // Caller-supplied `errorMessage` wins (callers can inject their own
+  // redacted copy via #2051); when it is omitted we fall back to the
+  // auto-classified value which is already scrubbed by
+  // `redactCredentialsFromString`. Caller input is re-scrubbed too so
+  // the Langfuse-side safety net applies uniformly — a caller cannot
+  // accidentally bypass it by passing a raw provider message.
+  const errorMessage =
+    context?.errorMessage !== undefined
+      ? redactCredentialsFromString(context.errorMessage)
+      : classified.errorMessage;
   const isTerminal = context?.isTerminal ?? classified.isTerminal;
   const metadata: Record<string, unknown> = {};
   if (errorType !== undefined) {
@@ -680,10 +763,11 @@ export function failLangfuseGeneration(
   if (isTerminal !== undefined) {
     metadata.isTerminal = isTerminal;
   }
+  const fallbackMessage = error instanceof Error ? error.message : String(error);
   try {
     generation.end({
       level: 'ERROR',
-      statusMessage: errorMessage ?? (error instanceof Error ? error.message : String(error)),
+      statusMessage: errorMessage ?? redactCredentialsFromString(fallbackMessage),
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
   } catch (err) {
