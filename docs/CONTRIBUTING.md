@@ -1148,6 +1148,18 @@ alias resolution) has exactly one edit site. When adding similar
    skipped, but tests must NOT assert on log output — the warning is
    best-effort visibility, not a public contract.
 
+### Read-only query modules over persisted state (`src/core/agentUsage.ts`)
+
+The per-agent usage aggregator added in commit `99ca2c5d feat(core): add per-agent usage aggregation query module` is the current reference for a "pure read, no writes" query over Alexi's on-disk state. When adding a similar aggregation (session search histograms, model-usage breakdowns, cost-by-workdir rollups), keep the five invariants that `src/core/agentUsage.ts` holds:
+
+1. **The module writes nothing on the user's filesystem.** `getAgentUsage` reads session files, decodes them, and returns a plain data structure. It never touches `~/.alexi/cost-history.json`, never emits a log line that depends on a session's content, and never spawns a child process. A future refactor that caches the aggregate to disk must be a separate module — the pure read surface is the contract.
+2. **I/O-bound collaborators are injectable.** The `CostTracker` option (`GetAgentUsageOptions.costTracker`) exists so tests can pin pricing without racing against the real cost-history file. Any similar helper that composes with a cost / telemetry / network collaborator must take it as an option and build a safe default (per-call `fs.mkdtempSync` directory, in-memory stub) when the caller omits it. This is the same pattern as [Injectable I/O boundaries (preferred over module mocks)](#injectable-io-boundaries-preferred-over-module-mocks), applied to a stateful helper rather than a leaf I/O call.
+3. **One corrupt input never aborts the sweep.** The `readSessionFile` helper returns `null` on `JSON.parse` errors, missing-shape documents, and permission errors — the aggregator continues with the remaining files. A missing input directory returns an empty result instead of throwing, mirroring `SessionManager.listSessions`. Query helpers that abort the whole sweep on one bad file create a boot-time footgun: a single hand-edited session will take down the operator's entire usage dashboard.
+4. **Determinism is pinned at the sort layer.** Both the runs inside a report and the reports themselves are sorted with a documented tiebreak (`id` lexicographic on same-timestamp runs; agent slug lexicographic on same-`lastRunAt` reports). Non-deterministic ordering surfaces as flaky CI assertions downstream; pin the tiebreak explicitly in a comment and in a test case.
+5. **No-double-count is a load-bearing invariant.** Alexi's subagent runs live as independent session files with their own `agent` slug and their own `Message.tokens` entries. Query helpers that join across sessions must NEVER sum a parent's `totalTokens` with its children's — the on-disk ground truth is that each file carries exactly its own direct spend. Guard this with a regression test (`tests/core/agentUsage.test.ts` — `attributes subagent spend to the subagent, not the parent (no double counting)` is the pattern to copy).
+
+Schema-extension guardrail: today the aggregator groups at session granularity because Alexi's session schema does not carry per-message `agentId` or `parentID` linkage. When the schema extension tracked under issue #2060 lands, extend the module in place rather than copying it — the public types already mirror the kilocode PR #15185 shape (`AgentUsageRun`, `AgentUsageReport`) specifically so callers do not need to rewrite their rendering code to pick up the finer grouping.
+
 ### TUI pure-helper + stateless hook option pattern (transcript URL quick-open)
 
 The transcript URL quick-open feature (`Shift+1..9`, commit `90837728`,

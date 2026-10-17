@@ -1055,6 +1055,115 @@ if (tokens) {
 
 The dedicated `totalReasoningTokens` field exists purely for observability (surfacing extended-thinking usage in `sessions list`, telemetry spans, and cost reports). Because reasoning tokens are already inside `totalTokens`, a caller answering `"how many tokens has this session used?"` reads `totalTokens` alone and never needs to add the two fields together.
 
+## Agent Usage Aggregation
+
+`src/core/agentUsage.ts` derives per-agent usage aggregates (cost, active time, tokens, outcomes) from persisted session files without pulling full transcripts into any long-lived structure. The query answers operator questions like "how much did the `code` agent cost this week?" and "what is the success rate of the `review` agent?" without touching the SAP AI Core API or re-running any session.
+
+The module is a pure, read-only wrapper over the sessions directory. It mirrors the kilocode PR #15185 shape (see `packages/opencode/src/kilocode/agent-usage/` upstream) but operates at session granularity rather than user-message granularity, because Alexi's current schema does not carry a per-message `agentId` or `parentID` linkage — those fields are optional candidates for a future schema extension (see issue #2060).
+
+```typescript
+// src/core/agentUsage.ts
+export interface AgentUsageRun {
+  id: string;            // session id
+  startedAt: number;     // SessionMetadata.created
+  endedAt: number;       // SessionMetadata.updated
+  modelId?: string;
+  inputTokens: number;   // Sum of Message.tokens.input
+  outputTokens: number;  // Sum of Message.tokens.output
+  reasoningTokens: number;
+  cost: number;          // CostTracker.calculateCost(modelId, input, output + reasoning)
+  activeTimeMs: number;  // Sum of sub-threshold inter-message gaps
+  outcome: 'completed' | 'errored' | 'running';
+  messageCount: number;
+  parentSessionId?: string;
+}
+
+export interface AgentUsageReport {
+  agentId: string;
+  runCount: number;
+  sessionCount: number;
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalReasoningTokens: number;
+  totalActiveTimeMs: number;
+  errorCount: number;
+  lastRunAt: number;
+  runs: AgentUsageRun[]; // Newest-first by (startedAt, id)
+}
+
+export function getAgentUsage(
+  sessionsDir: string,
+  options?: {
+    agentId?: string;
+    startDate?: Date;
+    endDate?: Date;
+    idleThresholdMs?: number; // default 5 minutes
+    costTracker?: CostTracker;
+  }
+): AgentUsageReport[];
+```
+
+### No-double-count invariant
+
+The direct-cost rule is the load-bearing invariant. Alexi persists each subagent run as its own session file with its own `agent` slug and its own `Message.tokens` entries. The parent session's `totalTokens` is NOT propagated down from its children — subagent spend is recorded only on the child's file. The aggregator therefore computes direct cost per session (not per transcript), and summing all agents yields exactly the on-disk ground truth with no double-count. The regression test `tests/core/agentUsage.test.ts` ("attributes subagent spend to the subagent, not the parent") pins this contract.
+
+### Active-time semantics
+
+Active time is the sum of consecutive inter-message gaps where the gap is strictly less than `idleThresholdMs` (default 5 minutes). Gaps above the threshold are treated as idle time between turns — a user who stepped away for an hour must not inflate the agent's "active" budget. Negative deltas (session files edited by hand) are clamped to zero. A session with fewer than two messages contributes zero active time.
+
+### Outcome classification
+
+The run's final state is derived from the last persisted message:
+
+| Last message                                              | Outcome     |
+| --------------------------------------------------------- | ----------- |
+| Assistant turn                                            | `completed` |
+| System note starting with `"Error:"`                      | `errored`   |
+| User turn (assistant has not yet responded), or no msgs   | `running`   |
+
+The `"Error:"` prefix is a conservative heuristic — Alexi has no dedicated per-session error field today, and the schema extension that would introduce one is tracked under issue #2060. The outcome contract is forward-compatible: once a structured error marker exists, `classifyOutcome` can prefer it without changing any caller.
+
+### Determinism and ordering
+
+Runs inside a report are sorted newest-first by `(startedAt, id)` with a lexicographic tiebreak on `id`, so two runs that started in the same millisecond always surface in the same order across invocations. Reports are then sorted newest-first by `lastRunAt`, with the agent slug as a stable tiebreak.
+
+### Legacy and corrupt files
+
+Sessions without an `agent` slug (files written before `SessionMetadata.agent` existed) are bucketed under the sentinel `(unknown)` so operators can see legacy spend instead of it silently disappearing. Non-JSON files, malformed JSON, and files missing the `metadata` / `messages` shape are skipped silently — one corrupt file never aborts the aggregation.
+
+### Aggregation flow
+
+```mermaid
+flowchart TD
+  A["getAgentUsage(sessionsDir, options?)"] --> B{"readdirSync(sessionsDir)"}
+  B -- "ENOENT / EACCES" --> R0["return []"]
+  B -- "entries" --> C["for each *.json file"]
+  C --> D["readSessionFile()<br/>JSON.parse + shape guard"]
+  D -- "null (corrupt / wrong shape)" --> C
+  D -- "Session" --> E{"agentId filter?"}
+  E -- "mismatch" --> C
+  E -- "match / none" --> F["sessionToRun()"]
+  F --> G["sum Message.tokens.{input,output,reasoning}"]
+  F --> H["computeActiveTimeMs()<br/>sum sub-threshold gaps"]
+  F --> I["classifyOutcome()<br/>completed / errored / running"]
+  F --> J["CostTracker.calculateCost(modelId,<br/>input, output + reasoning)"]
+  G --> K["AgentUsageRun"]
+  H --> K
+  I --> K
+  J --> K
+  K --> L{"startDate / endDate filter?"}
+  L -- "outside window" --> C
+  L -- "inside / none" --> M["byAgent.get(agentId).push(run)"]
+  M --> C
+  C -- "done" --> N["sort runs newest-first<br/>by (startedAt, id)"]
+  N --> O["sum totals per agent<br/>(cost, tokens, activeTime,<br/>errorCount, lastRunAt)"]
+  O --> P["sort reports newest-first<br/>by (lastRunAt, agentId)"]
+  P --> Q["return AgentUsageReport[]"]
+```
+
+The flow is pure read: no cost-history writes, no SAP AI Core traffic, no transcript decoding beyond `JSON.parse` and the per-message token / timestamp fields. Non-JSON names (`README.txt`), broken JSON (`{not json`), and documents missing `metadata` / `messages` are dropped before the per-session projection even runs, so a hand-edited file never aborts the sweep.
+
 ## Session Workdir and Project-Scoped Config Cache (issue #1848)
 
 Every session records the working directory it was created in (`SessionMetadata.workdir`) and announces that value to the project-scoped config cache at both session-context boundaries. The project cache in `src/config/projectCache.ts` keys every entry by `` `${configPath}:${normalizedWorkdir}` ``, but a cache that is worktree-aware without a transition detector still leaks: nothing purges project A's cached rules / routing / MCP / agents / skills / hooks when a caller opens a session under project B. `SessionManager` is the load-bearing collaborator that closes this loop — session creation and session resume are the two moments where the runtime learns that the active project may have changed.

@@ -8241,7 +8241,120 @@ Notes:
 - **`experimental` index signature.** The nested `info.experimental` type carries a `readonly [key: string]: unknown;` index signature so forward-compatible knobs that sit alongside `experimental.policies` type-check through the managed-settings strip in `applyManagedPrecedence` without a cast. The index signature mirrors the one at the top level of `info` and closes the shape-parity gap between the two surfaces.
 - **Composition with the Managed Policy enforcer.** The resolved policy list from `resolvePoliciesWithPrecedence` is intended to feed into the `PolicyEnforcer` constructor exported by `src/permission/policy.ts` (see [Managed Policy API](#managed-policy-api)); the two modules split "which policies are in effect" from "is this tool / integration / skill allowed?".
 
-## Agent Usage API
+## Agent Usage Aggregation API
+
+Introduced in commit `99ca2c5d feat(core): add per-agent usage aggregation query module`, ports upstream kilocode PR #15185 ("project-scoped agent usage aggregation"). Exported from `src/core/agentUsage.ts`. See [docs/ARCHITECTURE.md — Agent Usage Aggregation](ARCHITECTURE.md#agent-usage-aggregation) for the invariants and aggregation flow.
+
+```typescript
+// src/core/agentUsage.ts
+
+export type AgentRunOutcome = 'completed' | 'errored' | 'running';
+
+export interface AgentUsageRun {
+  /** Session (== run) id. */
+  id: string;
+  /** `SessionMetadata.created` — millis since epoch. */
+  startedAt: number;
+  /** `SessionMetadata.updated` — millis since epoch. */
+  endedAt: number;
+  /** Model id recorded on the session, if any. */
+  modelId?: string;
+  /** Direct input tokens attributed to this run. */
+  inputTokens: number;
+  /** Direct output tokens attributed to this run. */
+  outputTokens: number;
+  /** Direct reasoning tokens attributed to this run (0 when absent). */
+  reasoningTokens: number;
+  /** Direct cost in USD, computed via CostTracker.calculateCost. */
+  cost: number;
+  /** Active time in milliseconds (idle gaps between turns excluded). */
+  activeTimeMs: number;
+  /** Final-state classification for this run. */
+  outcome: AgentRunOutcome;
+  /** Number of messages persisted on the session. */
+  messageCount: number;
+  /** Parent session id when this run was spawned as a subagent. */
+  parentSessionId?: string;
+}
+
+export interface AgentUsageReport {
+  /** `SessionMetadata.agent`, or `"(unknown)"` for legacy sessions. */
+  agentId: string;
+  runCount: number;
+  sessionCount: number;
+  totalCost: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalReasoningTokens: number;
+  totalActiveTimeMs: number;
+  errorCount: number;
+  lastRunAt: number;
+  /** Runs sorted newest-first by (startedAt, id). */
+  runs: AgentUsageRun[];
+}
+
+export interface GetAgentUsageOptions {
+  /** Exact-match filter on SessionMetadata.agent. */
+  agentId?: string;
+  /** Inclusive lower bound on run startedAt. */
+  startDate?: Date;
+  /** Inclusive upper bound on run startedAt. */
+  endDate?: Date;
+  /**
+   * Maximum inter-message gap (ms) still counted as active time.
+   * Defaults to 5 minutes. Gaps above this are discarded as idle.
+   */
+  idleThresholdMs?: number;
+  /** Injectable cost tracker (tests pin pricing without touching disk). */
+  costTracker?: CostTracker;
+}
+
+export function getAgentUsage(
+  sessionsDir: string,
+  options?: GetAgentUsageOptions
+): AgentUsageReport[];
+```
+
+Semantics:
+
+| Field | Semantics |
+|-------|-----------|
+| `agentId` | Taken verbatim from `SessionMetadata.agent`. Case-sensitive. Sessions without an `agent` field surface under `"(unknown)"`. |
+| `startedAt` | `SessionMetadata.created`. Not the first message timestamp — a session with zero messages still has a creation timestamp. |
+| `cost` | `CostTracker.calculateCost(modelId, inputTokens, outputTokens + reasoningTokens)`. Reasoning tokens are billed at the output rate (same as the live `CostTracker.recordUsage` path). A session with no `modelId` yields `cost: 0`. |
+| `activeTimeMs` | Sum of consecutive `messages[i].timestamp - messages[i-1].timestamp` where the delta is `(0, idleThresholdMs]`. Negative deltas (hand-edited files) clamp to zero. Sessions with fewer than two messages contribute zero. |
+| `outcome` | `completed` iff `last.role === 'assistant'`. `errored` iff `last.role === 'system'` AND `last.content.trimStart().startsWith('Error:')`. Otherwise `running` (user turn pending, or no messages). |
+
+Example — list the agents that spent the most this week:
+
+```typescript
+import os from 'os';
+import path from 'path';
+import { getAgentUsage } from './core/agentUsage.js';
+
+const sessionsDir = path.join(os.homedir(), '.alexi', 'sessions');
+const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+const reports = getAgentUsage(sessionsDir, { startDate: oneWeekAgo });
+
+for (const report of reports) {
+  const activeMinutes = Math.round(report.totalActiveTimeMs / 60_000);
+  console.log(
+    `${report.agentId}: $${report.totalCost.toFixed(2)}, ` +
+      `${report.runCount} runs, ${report.errorCount} errored, ` +
+      `${activeMinutes} min active`
+  );
+}
+```
+
+Notes:
+
+- **Pure read.** The module never writes to the filesystem or the cost-history file, never contacts SAP AI Core, and never mutates `~/.alexi/`. A missing `sessionsDir` returns `[]`, mirroring `SessionManager.listSessions`.
+- **Default cost tracker.** When `costTracker` is omitted the module builds one on a per-call temp directory (`fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-agent-usage-'))`), so the pricing table is loaded but the user's real `~/.alexi/cost-history.json` is never touched.
+- **Granularity caveat.** Each session file contributes exactly one run. A finer per-message-run grouping (grouping assistant messages by a shared `parentID` + `agentId`, matching the kilocode PR #15185 structure) requires a schema extension tracked under issue #2060; the public types already mirror the upstream shape so callers can share rendering code when that extension lands.
+- **No double-count.** Subagent runs are stored as independent session files with their own `agent` slug. The parent session's `totalTokens` is not propagated down, so summing all agents gives the on-disk ground truth — see the `tests/core/agentUsage.test.ts` regression ("attributes subagent spend to the subagent, not the parent").
+
+## Agent Usage API (CLI)
 
 Introduced in the 2026-10-17 upstream sync (ports kilocode `88312a65b` + `db5fb2ae1`). The `usage` CLI command is a thin wrapper over pure aggregation functions in `src/cli/agent-usage.ts`. Programmatic consumers can import the aggregator directly instead of parsing CLI output.
 
