@@ -6530,6 +6530,84 @@ Guidelines when adding further coverage:
 - The pattern is case-insensitive, so `@Anthropic/Claude-Opus-4` also matches. If you assert on `modelUsed`, make sure the catalog mock accepts the exact-case candidate the parser produced.
 - Do NOT rely on `logger.warn` output as an assertion signal — the warning path (`Model "<id>" not found in catalog, ignoring`) is best-effort operator visibility, not a public contract.
 
+### Testing Model Aliases (`tests/config/modelAliases.test.ts`)
+
+The alias resolver in `src/config/modelAliases.ts` is a pure function and can be tested without filesystem fixtures or provider mocks. The 177-line suite in `tests/config/modelAliases.test.ts` pins both the resolution and validation behaviour.
+
+Setup pattern — mock `sapOrchestration` so `validateModelAliases` sees a deterministic set of "real" orchestration ids, and capture `logger.warn` so diagnostics are assertable instead of printed:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/providers/sapOrchestration.js', () => ({
+  isOrchestrationModel: vi.fn((id: string) => id === 'anthropic--claude-4.7-opus'),
+}));
+
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: {
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+    error: vi.fn(),
+    print: vi.fn(),
+    setLevel: vi.fn(),
+    getLevel: vi.fn(() => 'info'),
+  },
+}));
+
+import {
+  CircularAliasError,
+  MAX_ALIAS_DEPTH,
+  resolveModelAlias,
+  validateModelAliases,
+} from '../../src/config/modelAliases.js';
+import { logger } from '../../src/utils/logger.js';
+```
+
+Cases that MUST stay pinned:
+
+| Behaviour | Assertion |
+| --- | --- |
+| Unknown input | `resolveModelAlias('gpt-4o', aliases)` returns `'gpt-4o'` verbatim |
+| Single hop | `resolveModelAlias('opus', { opus: 'sap-ai-core/anthropic--claude-4.7-opus' })` returns the canonical id |
+| Chain | `a -> b -> c -> real-id` resolves to `real-id` |
+| 2-cycle | `{ a: 'b', b: 'a' }` throws `CircularAliasError` |
+| 3-cycle | `{ a: 'b', b: 'c', c: 'a' }` throws with `chain === ['a', 'b', 'c', 'a']` |
+| Self-reference | `{ a: 'a' }` throws `CircularAliasError` |
+| Depth cap | A chain of `MAX_ALIAS_DEPTH + 2` nodes forming a cycle throws |
+| Empty value | `{ opus: '' }` returns `'opus'` (treated as non-alias) |
+| Whitespace value | `{ opus: '   ' }` returns `'opus'` |
+| Trim input | `resolveModelAlias('  opus  ', ...)` matches the trimmed key |
+| Whitespace-only input | `resolveModelAlias('   ', ...)` returns the input verbatim |
+
+`validateModelAliases` is tested separately for its soft-fail contract:
+
+```typescript
+it('warns when an alias key shadows a real orchestration model id', () => {
+  // isOrchestrationModel is mocked to recognise this exact id.
+  const aliases = {
+    'anthropic--claude-4.7-opus': 'sap-ai-core/anthropic--claude-4.7-opus',
+  };
+  const invalid = validateModelAliases(aliases);
+  expect(invalid).toEqual([]); // non-fatal, alias still works
+  expect(logger.warn).toHaveBeenCalledTimes(1);
+});
+
+it('warns and marks invalid when the chain contains a cycle', () => {
+  const aliases = { a: 'b', b: 'a' };
+  const invalid = validateModelAliases(aliases);
+  // Both keys participate in the cycle; both are reported.
+  expect(invalid.sort()).toEqual(['a', 'b']);
+  expect(logger.warn).toHaveBeenCalled();
+});
+```
+
+Guidelines when adding further coverage:
+
+- Keep the `isOrchestrationModel` mock minimal — the resolver itself does NOT depend on it; only `validateModelAliases` consults it to flag shadowing. Over-mocking makes test intent unclear.
+- Do NOT test `applyModelAlias` from `src/providers/model-selection.ts` in the same file. That wrapper loads `routing-config.json` from disk, which forces filesystem mocking and crosses a module boundary; its contract (log-and-fallback on `CircularAliasError`) is pinned separately in the model-selection suite.
+- Assert on `logger.warn.mock.calls[0][0]` with `.toMatch(/pattern/)` — exact-string assertions make the test brittle against copy edits to the warning message.
+
 ## Testing with SAP AI Core
 
 ### Local Development Testing

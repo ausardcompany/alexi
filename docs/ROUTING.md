@@ -59,23 +59,95 @@ names to canonical model ids:
 }
 ```
 
-Resolution rules (implemented in `src/config/modelAliases.ts`):
+With that block in place, every invocation accepts the short name:
+
+```bash
+alexi chat -m opus "Explain this diff"
+alexi agent -m sonnet "Refactor src/core/router.ts"
+```
+
+The CLI's `-m` flag, `AICORE_MODEL`, and in-process callers that pass a
+`modelID` to `getModel()` all go through the same resolver, so the alias
+is interchangeable with the canonical id.
+
+### Resolution rules (`src/config/modelAliases.ts`)
 
 - `resolveModelAlias(nameOrAlias, aliases)` returns the canonical id when
   `nameOrAlias` is a known alias key, otherwise returns the input
   unchanged (so canonical ids pass straight through).
 - Aliases may chain (`a -> b -> c -> real-id`) up to `MAX_ALIAS_DEPTH`
-  levels (`5`).
-- Direct and indirect cycles (`a -> b -> a`) throw
-  `CircularAliasError`. The chat pipeline logs a warning and falls back
-  to the input id so a misconfigured alias does not break requests.
-- Empty / whitespace-only alias values are ignored (treated as
-  "no alias").
+  levels (`5`). The depth cap exists so a pathological chain can never
+  hang the chat pipeline.
+- Direct and indirect cycles (`a -> b -> a`, `a -> a`) throw
+  `CircularAliasError` with the full chain preserved on the error's
+  `chain: string[]` field (e.g. `['a', 'b', 'c', 'a']`). The chat
+  pipeline logs a warning and falls back to the input id so a
+  misconfigured alias does not break requests.
+- Reaching `MAX_ALIAS_DEPTH` without converging on a non-alias is also
+  reported as `CircularAliasError` (chain ends in `'...'`).
+- Alias keys are trimmed before lookup, so leading / trailing whitespace
+  in CLI input (`"  opus  "`) still resolves. Empty / whitespace-only
+  alias values are ignored (treated as "no alias" — the input is
+  returned verbatim).
+- Resolution is **case-sensitive**: `opus` and `Opus` are distinct keys.
 - Alias keys that collide with real SAP orchestration model ids log a
-  warning (`shadows a real SAP orchestration model id`) but still work;
-  the alias wins when resolved.
+  warning (`shadows a real SAP orchestration model id`) at validation
+  time but still work; the alias wins when resolved.
 
-Alias resolution runs inside
-`src/providers/model-selection.ts::applyModelAlias` and is wired into
-`getModel()` before provider lookup, so both the CLI `-m` flag and any
-in-process consumers automatically pick up the short names.
+### Validation (`validateModelAliases`)
+
+`validateModelAliases(aliases)` is a pure function (only side effect is
+`logger.warn`) that walks the alias map once and returns the list of
+alias keys that failed validation. It flags:
+
+- Empty keys (reported as `Model alias: ignoring empty alias key`).
+- Empty / non-string values (reported as `Model alias '<key>': value is
+  empty, ignoring`).
+- Keys that shadow a real SAP orchestration model id (warning only; the
+  entry stays active).
+- Cycles (both participants of a `a -> b -> a` cycle are returned).
+
+Validation is designed to fail soft: a bad entry is reported and
+skipped, the rest of the alias map continues to work, and the chat
+pipeline keeps running.
+
+### Call-site wiring (`src/providers/model-selection.ts`)
+
+`applyModelAlias(modelId)` is the public wrapper. It loads the alias map
+through `loadRoutingConfig().modelAliases`, swallows any routing-config
+load error (missing or malformed `routing-config.json` simply means
+"no aliases configured"), and delegates to `resolveModelAlias`. On
+`CircularAliasError` it logs a warning and returns the original id
+verbatim so an auxiliary call site never fails because of a
+misconfigured alias chain.
+
+`getModel(modelID?, opts?)` in the same module runs
+`applyModelAlias(trimmed)` **before** provider lookup when the caller
+supplies an explicit `modelID`. The CLI entry points (`chat`, `agent`,
+`interactive`) and `getProviderForModelWithFallback` therefore pick up
+short names without a per-command code change.
+
+### Alias resolution flow
+
+```mermaid
+flowchart TD
+    A[CLI flag / config input] --> B{modelID provided?}
+    B -- no --> C[getDefaultModel]
+    B -- yes --> D[trim whitespace]
+    D --> E[applyModelAlias]
+    E --> F{routing-config loads?}
+    F -- no --> G[return input id unchanged]
+    F -- yes --> H[resolveModelAlias loop]
+    H --> I{alias key found?}
+    I -- no --> J[return current id]
+    I -- yes --> K{depth < MAX_ALIAS_DEPTH?}
+    K -- no --> L[throw CircularAliasError]
+    K -- yes --> M{seen before?}
+    M -- yes --> L
+    M -- no --> N[follow next hop]
+    N --> H
+    L --> O[logger.warn + return original id]
+    J --> P[sap-ai-core/modelID]
+    G --> P
+    O --> P
+```

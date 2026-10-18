@@ -3707,6 +3707,50 @@ Design constraints:
 
 See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract. The unit suite in `src/providers/__tests__/langfuse-telemetry.test.ts` (now 575 lines) covers the opt-in gate, env parsing, merge rules, span-lifecycle no-ops, AND the full `classifyLangfuseError` matrix (content filter, permanent auth, free-tier rate limit, 429 transient, 4xx terminal, 5xx transient, network transient, axios `response.status`, unknown-shape fallback, non-`Error` coercion). The integration suite in `tests/providers/langfuse-telemetry-integration.test.ts` (260 lines) adds a dedicated case that drives a terminal 401 through `failLangfuseGeneration` and asserts the real SDK ships `metadata: { errorType, errorMessage, isTerminal: true }` on the `generation-update` batch.
 
+## Model Alias Resolution
+
+Explicit `modelID` inputs passed to `getModel(modelID?, opts?)` in `src/providers/model-selection.ts` are now run through `applyModelAlias(trimmed)` **before** provider lookup. This threads the alias map configured in `routing-config.json` (`modelAliases`) through every entry point — CLI `-m` flag, `AICORE_MODEL`, in-process `getModel` callers, and the `getProviderForModelWithFallback` path — so short names like `opus` resolve to canonical ids such as `sap-ai-core/anthropic--claude-4.7-opus` without a per-call code change.
+
+```typescript
+// src/providers/model-selection.ts
+export function applyModelAlias(modelId: string): string {
+  const aliases = loadAliases(); // loadRoutingConfig().modelAliases, swallows load errors
+  if (!aliases) {
+    return modelId;
+  }
+  try {
+    return resolveModelAlias(modelId, aliases);
+  } catch (err) {
+    if (err instanceof CircularAliasError) {
+      logger.warn(`Model alias '${modelId}': ${err.message}; using original id`);
+      return modelId;
+    }
+    throw err;
+  }
+}
+
+export async function getModel(modelID?: string, opts: GetModelOptions = {}): Promise<ModelRef> {
+  if (modelID && modelID.trim().length > 0) {
+    const trimmed = modelID.trim();
+    const resolved = applyModelAlias(trimmed); // short name -> canonical id
+    return { providerID: 'sap-ai-core', modelID: resolved };
+  }
+  if (opts.auxiliary) {
+    return selectModelForTask('auxiliary', buildContext());
+  }
+  return { providerID: 'sap-ai-core', modelID: getDefaultModel() };
+}
+```
+
+Safety properties:
+
+- A missing or malformed `routing-config.json` degrades silently to "no aliases configured" (the inner `try/catch` in `loadAliases()` swallows the load error) so a corrupted config file never breaks the chat pipeline.
+- A `CircularAliasError` (direct or indirect cycle, or a chain that exceeds `MAX_ALIAS_DEPTH = 5`) is logged at `warn` level and the **original** id is returned verbatim. The provider lookup then rejects the id via its usual catalog check rather than crashing with an unhandled exception.
+- Explicit overrides win: `getModel('sap-ai-core/gpt-4o')` returns `gpt-4o` even if an alias maps `gpt-4o` elsewhere, because the input is not a key in `modelAliases` (it is the full canonical id).
+- The resolver is invoked **before** `isOrchestrationModel()` catalog validation, so an alias that points at a well-known orchestration id will pass the catalog check correctly.
+
+See [Routing → Model aliases](ROUTING.md#model-aliases) for the resolution semantics, validation rules, and alias-chain diagram, and [Configuration → Model Aliases](CONFIGURATION.md#model-aliases-modelaliases) for the `routing-config.json` schema and example configurations.
+
 ## Auxiliary-Task Model Selection
 
 Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3). Auxiliary background tasks — title generation, session summarisation, context compaction, and commit-message generation — resolve their target model through `selectModelForTask` in `src/providers/model-selection.ts` instead of the primary chat path.
