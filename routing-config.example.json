@@ -49,7 +49,13 @@
       "id": "claude-opus-4",
       "type": "claude",
       "costTier": "expensive",
-      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research", "advanced-coding"],
+      "strengths": [
+        "deep-reasoning",
+        "complex-analysis",
+        "long-context",
+        "research",
+        "advanced-coding"
+      ],
       "maxTokens": 200000,
       "reasoning": true,
       "enabled": true
@@ -58,7 +64,13 @@
       "id": "anthropic--claude-4.7-opus",
       "type": "claude",
       "costTier": "expensive",
-      "strengths": ["deep-reasoning", "complex-analysis", "long-context", "research", "advanced-coding"],
+      "strengths": [
+        "deep-reasoning",
+        "complex-analysis",
+        "long-context",
+        "research",
+        "advanced-coding"
+      ],
       "maxTokens": 200000,
       "reasoning": true,
       "enabled": true
@@ -110,5 +122,10 @@
     "maxCostPerRequest": null,
     "fallbackModel": "gpt-4o",
     "routeFailureThreshold": 3
+  },
+  "modelAliases": {
+    "opus": "sap-ai-core/anthropic--claude-4.7-opus",
+    "sonnet": "sap-ai-core/anthropic--claude-4.5-sonnet",
+    "haiku": "sap-ai-core/anthropic--claude-4.5-haiku"
   }
 }

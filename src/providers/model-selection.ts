@@ -15,9 +15,49 @@
  */
 
 import { env } from '../config/env.js';
+import { CircularAliasError, resolveModelAlias } from '../config/modelAliases.js';
+import { loadRoutingConfig } from '../config/routingConfig.js';
 import { getConfigValue } from '../config/userConfig.js';
+import { logger } from '../utils/logger.js';
 import { isOrchestrationModel } from './sapOrchestration.js';
 import { getDefaultModel } from './index.js';
+
+/**
+ * Load the configured alias map from `routing-config.json`, swallowing
+ * load errors so the chat pipeline keeps working even when the routing
+ * config is missing or malformed. A missing/invalid config simply means
+ * "no aliases configured".
+ */
+function loadAliases(): Record<string, string> | undefined {
+  try {
+    return loadRoutingConfig().modelAliases;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve a model id through the configured alias map. Returns the input
+ * verbatim when no aliases are configured or the input is not a known
+ * alias. Logs a warning and falls back to the input id when a circular
+ * alias is detected — auxiliary call sites should never fail just
+ * because an alias chain is misconfigured.
+ */
+export function applyModelAlias(modelId: string): string {
+  const aliases = loadAliases();
+  if (!aliases) {
+    return modelId;
+  }
+  try {
+    return resolveModelAlias(modelId, aliases);
+  } catch (err) {
+    if (err instanceof CircularAliasError) {
+      logger.warn(`Model alias '${modelId}': ${err.message}; using original id`);
+      return modelId;
+    }
+    throw err;
+  }
+}
 
 // ============ Types ============
 
@@ -192,11 +232,15 @@ export async function selectModelForTask(
 export async function getModel(modelID?: string, opts: GetModelOptions = {}): Promise<ModelRef> {
   if (modelID && modelID.trim().length > 0) {
     const trimmed = modelID.trim();
+    // Resolve aliases (e.g. `opus` ->
+    // `sap-ai-core/anthropic--claude-4.7-opus`) BEFORE provider lookup so
+    // CLI flags and config files can use short names interchangeably.
+    const resolved = applyModelAlias(trimmed);
     // Validate against the SAP orchestration model list only for the
     // sanity check; we do not swap the id here (the existing
     // `getProviderForModelWithFallback` handles fallback logic).
     void isOrchestrationModel;
-    return { providerID: 'sap-ai-core', modelID: trimmed };
+    return { providerID: 'sap-ai-core', modelID: resolved };
   }
   if (opts.auxiliary) {
     return selectModelForTask('auxiliary', buildContext());

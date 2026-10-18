@@ -41,3 +41,41 @@ The mechanism lives in `src/config/pendingOverrides.ts`:
 
 Modes are supported via an optional `mode` argument so future plan/act
 splits can scope overrides independently without a schema change.
+
+## Model aliases
+
+Users repeatedly type long SAP AI Core model ids like
+`sap-ai-core/anthropic--claude-4.7-opus` on the CLI and in config files.
+The optional `modelAliases` section of `routing-config.json` maps short
+names to canonical model ids:
+
+```json
+{
+  "modelAliases": {
+    "opus":   "sap-ai-core/anthropic--claude-4.7-opus",
+    "sonnet": "sap-ai-core/anthropic--claude-4.5-sonnet",
+    "haiku":  "sap-ai-core/anthropic--claude-4.5-haiku"
+  }
+}
+```
+
+Resolution rules (implemented in `src/config/modelAliases.ts`):
+
+- `resolveModelAlias(nameOrAlias, aliases)` returns the canonical id when
+  `nameOrAlias` is a known alias key, otherwise returns the input
+  unchanged (so canonical ids pass straight through).
+- Aliases may chain (`a -> b -> c -> real-id`) up to `MAX_ALIAS_DEPTH`
+  levels (`5`).
+- Direct and indirect cycles (`a -> b -> a`) throw
+  `CircularAliasError`. The chat pipeline logs a warning and falls back
+  to the input id so a misconfigured alias does not break requests.
+- Empty / whitespace-only alias values are ignored (treated as
+  "no alias").
+- Alias keys that collide with real SAP orchestration model ids log a
+  warning (`shadows a real SAP orchestration model id`) but still work;
+  the alias wins when resolved.
+
+Alias resolution runs inside
+`src/providers/model-selection.ts::applyModelAlias` and is wired into
+`getModel()` before provider lookup, so both the CLI `-m` flag and any
+in-process consumers automatically pick up the short names.
