@@ -31,6 +31,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
   - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
   - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
 - [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
+- [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -12257,3 +12258,81 @@ The suite then writes concrete session files via `writeSession(session)` helpers
 3. **Use real session shapes.** The `makeMessage` / `makeSession` helpers construct `Message` and `SessionMetadata` with the actual production types — not a bespoke fixture type. A regression where `SessionMetadata` grows a required field is caught at `tsc` time instead of at runtime.
 4. **One session file per logical run.** Session granularity is the whole contract; writing more than one session per run would obscure the aggregator's behaviour. If the schema ever grows a per-message `agentId`, this suite should be extended with new cases rather than mutated.
 5. **Idle gap threshold cases need realistic durations.** The one-hour idle gap in the `excludes idle gaps larger than the threshold` test is intentional — it is far enough from the default threshold that off-by-one unit mistakes (seconds vs milliseconds) are visible in the assertion.
+
+## Testing provider health check (`src/providers/health.ts`, issue #2067)
+
+Two test suites cover the provider health check surface introduced in commit `ee97bf47`:
+
+- `tests/providers/health.test.ts` — exercises the check module (env-var validation, JSON parsing, connectivity probe, skipNetwork, timeout plumbing, unknown-provider handling, `listConfiguredProviders`, `checkAllProviderHealth` aggregation).
+- `tests/cli/commands/provider.test.ts` — exercises the Commander wiring (`registerProviderCommand`, flag parsing, JSON/human output formatting, exit code on failure).
+
+### Mocking strategy
+
+The health module reads env vars via `src/config/env.js:env` and probes the network via `src/providers/connectivity.js:checkConnectivity`. Both are mocked with `vi.hoisted` so no real env is read and no real socket is opened:
+
+```typescript
+// tests/providers/health.test.ts
+const { envMock } = vi.hoisted(() => ({ envMock: vi.fn() }));
+vi.mock('../../src/config/env.js', () => ({ env: envMock }));
+
+const { connectivityMock } = vi.hoisted(() => ({ connectivityMock: vi.fn() }));
+vi.mock('../../src/providers/connectivity.js', () => ({ checkConnectivity: connectivityMock }));
+
+import {
+  checkAllProviderHealth,
+  checkProviderHealth,
+  KNOWN_PROVIDERS,
+  listConfiguredProviders,
+} from '../../src/providers/health.js';
+```
+
+Each test resets both mocks in `beforeEach` and restores all mocks in `afterEach` so cross-test state leakage is impossible. A `serviceKey(url?)` helper builds a realistic SAP AI Core service-key payload so the JSON-parse + `serviceurls.AI_API_URL` extraction paths exercise realistic data.
+
+### What the suites pin
+
+| Case | Contract pinned |
+|------|-----------------|
+| `fails when AICORE_SERVICE_KEY is not set` | Missing required env short-circuits before the probe; `attemptedProbe: false`, no `checkConnectivity` call. |
+| `fails when AICORE_SERVICE_KEY is not valid JSON` | JSON parse failure surfaces a specific `not valid JSON` error; no probe. |
+| `fails when the service key is missing serviceurls.AI_API_URL` | A well-formed JSON missing the URL field surfaces an `AI_API_URL`-specific error. |
+| `returns ok with latency on reachable endpoint` | Happy path: `ok: true`, `latency` is a number, `endpoint` equals the extracted URL, `attemptedProbe: true`, and `checkConnectivity` was called with `(url, 10_000)` (the `DEFAULT_HEALTH_TIMEOUT_MS` default). |
+| `returns not-ok with connectivity error` | Probe failure surfaces as `ok: false` with the connectivity error AND the measured latency so operators still see how long the probe took. |
+| `skips the network probe when skipNetwork is set` | `skipNetwork: true` returns `ok: true` without calling `checkConnectivity`; `latency` is `undefined`; `attemptedProbe: false`. |
+| `honours a custom timeoutMs option` | `checkConnectivity` is called with the caller-supplied timeout, not the default. |
+| `reports AICORE_RESOURCE_GROUP as optional in details` | `envVars` details flag the resource group as `required: false` so verbose output can render it correctly. |
+| `fails when SAP_PROXY_BASE_URL is not a valid URL` | URL shape is validated via `new URL(...)` before the probe is attempted; a malformed URL short-circuits with `not a valid URL`. |
+| `fails when SAP_PROXY_API_KEY is missing` | Required API key check runs AFTER URL shape validation; order matters for the error message operators see first. |
+| `returns a structured error listing known providers` for an unknown id | Unknown provider ids surface a message listing the known set so operators can self-correct a typo. |
+| `listConfiguredProviders` env-driven discovery | Returns `[]` when nothing is set, `['sap-ai-core']` or `['sap-proxy']` for a single configured provider, and `['sap-ai-core', 'sap-proxy']` when both are set (order matters — ai-core first). |
+| `checkAllProviderHealth` preserves input order | Running `['sap-proxy', 'sap-ai-core']` returns results in that same order. Catches a future refactor that silently reorders the output. |
+
+### CLI test strategy
+
+`tests/cli/commands/provider.test.ts` spies on `process.stdout.write` / `process.stderr.write`, resets `process.exitCode`, and drives the subcommand via `program.parseAsync(['node', 'alexi', 'provider', 'health', ...])`:
+
+```typescript
+async function runProviderCommand(argv: string[]): Promise<Captured> {
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(/* ... */);
+  const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(/* ... */);
+
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+
+  const program = new Command();
+  program.exitOverride();
+  registerProviderCommand(program);
+  // ... await program.parseAsync(argv)
+}
+```
+
+The underlying `checkProviderHealth` / `checkAllProviderHealth` / `listConfiguredProviders` are mocked at module scope so the CLI tests focus on output rendering and flag plumbing — the semantic validation is already covered by the health module suite.
+
+### Patterns worth internalising
+
+1. **Mock the shared connectivity module, not `fetch`.** The health module calls `src/providers/connectivity.ts:checkConnectivity`; mocking `fetch` directly would also exercise the connectivity module's own retry logic and make assertions brittle. Mock at the module boundary that the system under test actually imports.
+2. **Use `vi.hoisted` for mock factories.** Vitest hoists `vi.mock` above imports, so the factory supplied to `vi.mock` must capture a reference that is hoisted too. `vi.hoisted(() => ({ envMock: vi.fn() }))` keeps the mock function in scope for both the mock factory and the test body.
+3. **Assert on `attemptedProbe` AND on `connectivityMock` call count.** Tests that assert both pin the dual contract — `attemptedProbe: false` means "we skipped the probe" AND `expect(connectivityMock).not.toHaveBeenCalled()` means the module did not call `checkConnectivity`. Either assertion alone can be defeated by a refactor.
+4. **Isolate `process.exitCode` across runs.** The CLI harness saves `previousExitCode` before each case and restores it after; without this, a failing provider in one case would leak `process.exitCode = 1` into unrelated cases and make them look broken.
+5. **Pin the exact error strings only where they matter.** The health module's error strings are a UX contract (operators read them). Tests use `toMatch(/AICORE_SERVICE_KEY/)` for broad invariants and `toContain('ECONNREFUSED')` for propagated upstream reasons, so cosmetic rewording does not break the suite but a semantic change does.

@@ -8993,3 +8993,54 @@ Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream op
 - Non-object inputs always return `false` so the helper is safe to call on arbitrary `catch` values.
 - Keep in sync with: `src/providers/modelFetchErrors.ts` `TRANSIENT_FETCH_ERROR_REGEX`, `src/session/network.ts` `isRetryableConnectionReset`, `src/mcp/client.ts` `TRANSIENT_ERROR_CODES`, and the AGENTS.md "Error classification" section (authoritative).
 
+## Provider Health Check (`src/providers/health.ts`)
+
+Introduced to resolve issue #2067 (commit `ee97bf47`). Validates provider credentials and connectivity BEFORE a session starts, so misconfiguration is surfaced at the operator terminal instead of mid-session after wasting quota on failed requests. The module is reachable from the CLI (`alexi provider health`, registered by `src/cli/commands/provider.ts:registerProviderCommand`), from CI gates (`alexi provider health --json` + `jq` on exit code `1`), and programmatically from any future doctor/preflight path.
+
+### Call flow
+
+```mermaid
+flowchart LR
+    CLI[alexi provider health] -->|options| Register[registerProviderCommand]
+    Register -->|--provider id| Single[checkProviderHealth id]
+    Register -->|no filter| List[listConfiguredProviders]
+    List -->|ProviderId[]| All[checkAllProviderHealth]
+    All --> Single
+    Single --> EnvCheck[validate env vars]
+    EnvCheck -->|sap-ai-core| JsonParse[parse AICORE_SERVICE_KEY]
+    JsonParse --> ExtractUrl[extract serviceurls.AI_API_URL]
+    EnvCheck -->|sap-proxy| UrlShape[validate URL via new URL]
+    ExtractUrl --> SkipDecision{skipNetwork?}
+    UrlShape --> SkipDecision
+    SkipDecision -->|yes| OkNoProbe[HealthResult ok, attemptedProbe=false]
+    SkipDecision -->|no| Probe[checkConnectivity baseUrl, timeoutMs]
+    Probe --> Classify{ConnectivityResult.reachable?}
+    Classify -->|yes| OkProbed[HealthResult ok + latency]
+    Classify -->|no| FailProbed[HealthResult ok=false + latency + error]
+    OkNoProbe --> Format[formatHealthReport verbose]
+    OkProbed --> Format
+    FailProbed --> Format
+    EnvCheck -->|missing/malformed| FailEnv[HealthResult ok=false, attemptedProbe=false]
+    FailEnv --> Format
+    Format -->|exitCode = 1 if any fail| ProcessExit[process.exitCode]
+```
+
+### Module structure
+
+- `src/providers/health.ts` — the typed check surface. Exports: `HealthResult`, `HealthDetails`, `ProviderId`, `KNOWN_PROVIDERS`, `CheckProviderHealthOptions`, `listConfiguredProviders`, `checkProviderHealth`, `checkAllProviderHealth`. Internal helpers `checkSapAiCoreHealth` and `checkSapProxyHealth` encode the per-provider validation + probe steps. Delegates network reachability to `src/providers/connectivity.ts:checkConnectivity` so the probe shape stays consistent with other callers.
+- `src/cli/commands/provider.ts` — the Commander wiring. Exports `registerProviderCommand`, plus pure formatters `formatHealthResult(result, verbose)` and `formatHealthReport(results, verbose)` for programmatic reuse. Internal `parseTimeoutMs(value)` converts `--timeout <seconds>` → ms and rejects non-positive / non-finite values.
+- `src/cli/commands/index.ts` — composes `registerProviderCommand` into the top-level `registerAllCommands` orchestrator.
+- `src/providers/connectivity.ts` — shared `HEAD`-based reachability probe (`checkConnectivity(baseUrl, timeoutMs?): Promise<ConnectivityResult>`). Used by the health module and reusable from future `doctor` / preflight paths.
+
+### Design notes
+
+- **No chat/completion call.** A `HEAD` on the deployment base URL confirms DNS + TLS + reachability without burning quota. Auth failures (`401`/`403`) still count as "reachable" at the network layer; they are not detected by this check — operators who want deeper verification run `alexi models` after `alexi provider health` to force an actual token exchange via `src/providers/auth.ts`.
+- **`checkProviderHealth` never throws.** Every inner failure is converted into a `HealthResult` with `ok: false` and a specific `error` field. This keeps the CLI output clean and lets callers rely on the structured result rather than `try/catch`.
+- **`DEFAULT_HEALTH_TIMEOUT_MS = 10_000`.** Deliberately shorter than the connectivity module's own `15_000` ms default — `provider health` is interactive and must fail fast when things are wrong. Live chat paths that call `checkConnectivity` directly can tolerate a longer handshake and use the longer default.
+- **Permissive discovery.** `listConfiguredProviders` treats a provider as "configured" when AT LEAST its first required env var is set, so half-configured providers are still checked and the operator sees exactly WHICH env var is missing. Silent skip here would hide misconfiguration.
+- **Sequential aggregation.** `checkAllProviderHealth` runs the per-provider checks sequentially (not `Promise.all`) so results arrive in a predictable order; one slow probe does not block or interleave with another.
+- **Exit code is actionable.** The CLI sets `process.exitCode = 1` when ANY result has `ok: false`, so a chat invocation can gate on config health: `alexi provider health && alexi chat -m "..."`. The `--json` flag emits the typed `HealthResult[]` array so `jq` consumers can branch on individual providers.
+- **Separate from SAP AI Core auth.** This module validates reachability and env-var presence. Actual OAuth client-credentials token acquisition lives in `src/providers/auth.ts`; a passing health check does NOT prove that `clientid`/`clientsecret` are valid, only that the service key is well-formed and the AI API URL is reachable.
+
+See [API.md — `provider health` command](API.md#provider-health), [PROVIDERS.md — Provider Health Check](PROVIDERS.md#provider-health-check-srcprovidershealthts), [TESTING.md — Testing provider health check](TESTING.md#testing-provider-health-check-srcprovidershealthts-issue-2067), and [CONTRIBUTING.md — Provider Health Check](CONTRIBUTING.md#provider-health-check-srcprovidershealthts).
+
