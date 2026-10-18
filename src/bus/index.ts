@@ -314,11 +314,19 @@ export const AgentThinking = defineEvent(
 );
 
 // Chat/Message events
+//
+// Alexi_change (opencode #56504 — "accept idle in message-type filter"):
+// `idle` is now a legitimate message role used to signal that the
+// orchestrator has drained the current turn and is waiting for the
+// next user input. Downstream consumers (TUI status bar, telemetry
+// relays) treat `idle` as a state transition rather than a chat
+// payload, but the event bus still has to accept it so publishers
+// don't get a Zod validation throw.
 export const MessageReceived = defineEvent(
   'message.received',
   z.object({
     sessionId: z.string().optional(),
-    role: z.enum(['user', 'assistant', 'system']),
+    role: z.enum(['user', 'assistant', 'system', 'idle']),
     content: z.string(),
     timestamp: z.number(),
   })
@@ -328,7 +336,7 @@ export const MessageSent = defineEvent(
   'message.sent',
   z.object({
     sessionId: z.string().optional(),
-    role: z.enum(['user', 'assistant', 'system']),
+    role: z.enum(['user', 'assistant', 'system', 'idle']),
     content: z.string(),
     timestamp: z.number(),
   })

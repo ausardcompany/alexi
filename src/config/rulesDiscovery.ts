@@ -197,22 +197,71 @@ function resolveRuleDir(entry: string, workdir: string, homedir: string): string
 }
 
 /**
+ * Load-rule-file outcome marker. Mirrors upstream opencode's
+ * instruction-read fix which splits "file not there yet" (NotFound,
+ * transient — may be mid-save by an editor) from "operator refused us
+ * access" (Denied, permanent). Callers should re-poll on the former
+ * and leave the slot absent on the latter.
+ *
+ * `null` remains the legacy "either unavailable or empty" sentinel so
+ * existing call sites that don't care about the distinction still work
+ * — new code should prefer the explicit `'denied'` string.
+ */
+export type LoadRuleFileResult = DiscoveredRule | 'denied' | null;
+
+/**
+ * Classify a filesystem error into the Alexi error buckets. `ENOENT`
+ * is transient (editor save in progress, race during symlink swap);
+ * `EACCES` / `EPERM` is a permission denial that requires operator
+ * intervention. See `AGENTS.md#error-classification`.
+ */
+function classifyReadError(err: unknown): 'notfound' | 'denied' | 'other' {
+  if (!err || typeof err !== 'object') {
+    return 'other';
+  }
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') {
+    return 'notfound';
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return 'denied';
+  }
+  return 'other';
+}
+
+/**
  * Load one file safely — returns null on any I/O or decode failure so that
  * missing/unreadable rule files degrade gracefully rather than crashing
  * discovery.
+ *
+ * Alexi_change (opencode instruction-read fix): `'denied'` is now a
+ * distinct return value from `null`. A denied path should stay absent
+ * from the discovered-rules set across the whole session — retrying
+ * will not change the outcome. A `null` result (file genuinely missing
+ * OR empty content) is treated the same as before: skip for now, let
+ * the next discovery pass re-check.
  */
 function loadRuleFile(
   filePath: string,
   source: DiscoveredRule['source'],
   originDir: string
-): DiscoveredRule | null {
+): LoadRuleFileResult {
   let stat: fs.Stats;
   try {
     // `statSync` follows symlinks, so a valid symlink to a file resolves to
     // the target's stat (isFile() === true). A broken symlink throws and is
     // skipped silently via the catch below.
     stat = fs.statSync(filePath);
-  } catch {
+  } catch (err) {
+    const kind = classifyReadError(err);
+    if (kind === 'denied') {
+      logger.debug(`rule file skipped (denied): ${filePath}`);
+      return 'denied';
+    }
+    // Both `notfound` and `other` fall through to the legacy "skip
+    // and try again later" behaviour — `notfound` is transient
+    // (editor save in progress) and `other` is rare enough that
+    // demoting it to a soft miss keeps discovery robust.
     return null;
   }
   if (!stat.isFile() && !stat.isSymbolicLink()) {
@@ -221,7 +270,12 @@ function loadRuleFile(
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf-8');
-  } catch {
+  } catch (err) {
+    const kind = classifyReadError(err);
+    if (kind === 'denied') {
+      logger.debug(`rule file skipped (denied): ${filePath}`);
+      return 'denied';
+    }
     return null;
   }
   const content = stripUtf8Bom(raw).trim();
@@ -349,7 +403,10 @@ export function discoverRules(options: DiscoverRulesOptions = {}): RulesDiscover
     scannedDirs.push(dir);
     for (const f of mdFiles) {
       const loaded = loadRuleFile(f, source, dir);
-      if (loaded) {
+      // `'denied'` is a permanent skip (no retry across the session);
+      // `null` is a soft skip. Both drop the file from the result set.
+      // Only a fully-populated `DiscoveredRule` object is pushed on.
+      if (loaded && loaded !== 'denied') {
         allFiles.push(loaded);
       }
     }

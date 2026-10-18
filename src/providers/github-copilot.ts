@@ -85,21 +85,41 @@ export type ParsedCopilotEvent =
  * is treated identically to `response.reasoning.delta`, but with
  * `opaque: true` so downstream renderers know the content is encrypted
  * blob data rather than human-readable reasoning text.
+ *
+ * Alexi_change (opencode fix #56669): the OpenAI-compatible Responses
+ * API now sends explicit `null` for optional fields (`delta`, `item`,
+ * `output`) instead of omitting them. A naive `chunk.delta ?? ''`
+ * handles that for scalar strings, but nested property access on a
+ * `null` `item` would still throw. Normalise `null` to "absent" on
+ * every path so a forward-rolled server cannot crash the decoder.
  */
 export function parseCopilotResponseStream(chunk: CopilotStreamChunk): ParsedCopilotEvent {
+  // Guard: the whole chunk may itself be malformed. A `null`/non-object
+  // payload should degrade to a logged-and-skipped `ignored` event
+  // rather than throw.
+  if (!chunk || typeof chunk !== 'object' || typeof chunk.type !== 'string') {
+    return { type: 'ignored', reason: 'untyped' };
+  }
+  // Normalise `null` deltas to '' (same bucket as "omitted" per the
+  // Responses API spec). Non-string deltas also fall through to ''.
+  const delta = typeof chunk.delta === 'string' ? chunk.delta : '';
   switch (chunk.type) {
     case 'response.output_text.delta':
-      return { type: 'text', text: chunk.delta ?? '' };
+      return { type: 'text', text: delta };
     case 'response.reasoning.delta':
-      return { type: 'reasoning', text: chunk.delta ?? '', opaque: false };
+      return { type: 'reasoning', text: delta, opaque: false };
     case 'response.reasoning_opaque.delta':
       // NEW: accept opaque reasoning interleaved with text deltas.
-      return { type: 'reasoning', text: chunk.delta ?? '', opaque: true };
-    case 'response.output_item.added':
-      if (chunk.item?.type === 'reasoning') {
-        return { type: 'reasoning_start', id: chunk.item.id };
+      return { type: 'reasoning', text: delta, opaque: true };
+    case 'response.output_item.added': {
+      // `item` may be explicitly `null` on forward-rolled servers.
+      // Treat it as absent rather than reading `.type` on `null`.
+      const item = chunk.item ?? undefined;
+      if (item?.type === 'reasoning') {
+        return { type: 'reasoning_start', id: item.id };
       }
-      return { type: 'ignored', reason: `output_item.added type=${chunk.item?.type ?? '?'}` };
+      return { type: 'ignored', reason: `output_item.added type=${item?.type ?? '?'}` };
+    }
     default:
       return { type: 'ignored', reason: chunk.type };
   }
