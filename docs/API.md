@@ -717,6 +717,174 @@ type Refresher = () => Promise<void>;
 
 See [ARCHITECTURE.md — `/reload` Command Primitive](ARCHITECTURE.md#reload-command-primitive-srcclicommandsreloadts) for the design contract.
 
+### provider health
+
+Validate provider credentials and connectivity before starting a session, so misconfiguration (missing env vars, bad credentials, unreachable endpoints) is surfaced at the operator terminal instead of mid-session after wasting quota on failed requests. Introduced to resolve issue #2067. Registered by `src/cli/commands/provider.ts`; underlying checks live in `src/providers/health.ts`.
+
+```bash
+alexi provider health [options]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `-p, --provider <name>` | string | Check a specific provider only. Must be one of `sap-ai-core`, `sap-proxy`. When omitted, every provider returned by `listConfiguredProviders()` is checked. |
+| `-v, --verbose` | boolean | Show detailed diagnostics: env-var table (present/missing + required/optional), probed endpoint, and raw connectivity reason. |
+| `--json` | boolean | Emit the typed `HealthResult[]` array as pretty-printed JSON on stdout, suitable for `jq` and CI scripts. |
+| `--skip-network` | boolean | Skip the HEAD connectivity probe. Validates env-var presence and shape only — useful for air-gapped CI and config lints. |
+| `--timeout <seconds>` | string | Connectivity probe timeout in seconds. Converted to ms via `parseTimeoutMs` (positive, finite). Default: `10` (equivalent to `DEFAULT_HEALTH_TIMEOUT_MS = 10_000` ms in `src/providers/health.ts`). |
+
+#### Exit codes
+
+- `0` — every checked provider returned `ok: true`.
+- `1` — at least one provider returned `ok: false`, OR the command itself threw (invalid `--timeout`, etc.). CI pipelines can gate a chat call on this: `alexi provider health --skip-network && alexi chat -m "..."`.
+
+#### Examples
+
+```bash
+# Compact human-readable summary of every configured provider.
+alexi provider health
+
+# Verbose diagnostics for one provider (env-var table + endpoint + reachability).
+alexi provider health --provider sap-ai-core --verbose
+
+# JSON for CI gates and dashboards.
+alexi provider health --json
+
+# Env-var-only check (no network) with a tighter timeout.
+alexi provider health --skip-network
+
+# Longer timeout for a slow corporate HTTP proxy.
+alexi provider health --timeout 30
+```
+
+#### Human output
+
+```text
+  Provider Health Check
+
+  [OK] sap-ai-core (142ms)
+  [FAIL] sap-proxy
+    SAP_PROXY_API_KEY is not set
+
+  Summary: 1 ok, 1 failed
+```
+
+Verbose mode (`--verbose`) adds the env-var table, the probed endpoint, and the raw connectivity reason under each provider:
+
+```text
+  [OK] sap-ai-core (142ms)
+    Environment:
+      + AICORE_SERVICE_KEY
+      - AICORE_RESOURCE_GROUP (optional)
+    Endpoint: https://api.ai.core.cloud.sap
+    Probed: yes
+    Reachable: yes
+```
+
+#### JSON output
+
+`--json` emits the typed `HealthResult[]` array (one entry per checked provider) with `JSON.stringify(results, null, 2)` so operators can pipe into `jq` without extra flags:
+
+```json
+[
+  {
+    "provider": "sap-ai-core",
+    "ok": true,
+    "latency": 142,
+    "details": {
+      "envVars": [
+        { "name": "AICORE_SERVICE_KEY", "present": true, "required": true },
+        { "name": "AICORE_RESOURCE_GROUP", "present": false, "required": false }
+      ],
+      "endpoint": "https://api.ai.core.cloud.sap",
+      "connectivity": { "reachable": true },
+      "attemptedProbe": true
+    }
+  }
+]
+```
+
+#### Programmatic API
+
+```typescript
+import {
+  checkProviderHealth,
+  checkAllProviderHealth,
+  listConfiguredProviders,
+  KNOWN_PROVIDERS,
+  type HealthResult,
+  type HealthDetails,
+  type ProviderId,
+  type CheckProviderHealthOptions,
+} from './providers/health.js';
+
+// Discover which providers have at least their first required env var set.
+const configured: ProviderId[] = listConfiguredProviders();
+
+// Check every configured provider sequentially (preserves input order).
+const results: HealthResult[] = await checkAllProviderHealth(configured, {
+  timeoutMs: 10_000,
+  skipNetwork: false,
+});
+
+// Or check a single provider — never throws, surfaces errors as ok: false.
+const one: HealthResult = await checkProviderHealth('sap-ai-core');
+
+interface HealthResult {
+  provider: string;              // 'sap-ai-core' | 'sap-proxy'
+  ok: boolean;
+  latency?: number;              // ms, present when probe attempted
+  error?: string;                // first failure reason
+  details?: HealthDetails;       // populated when --verbose
+}
+
+interface HealthDetails {
+  envVars: Array<{ name: string; present: boolean; required: boolean }>;
+  endpoint?: string;             // base URL probed
+  connectivity?: ConnectivityResult; // from src/providers/connectivity.ts
+  attemptedProbe: boolean;       // true when env validation passed + probe ran
+}
+
+type ProviderId = 'sap-ai-core' | 'sap-proxy';
+
+export const KNOWN_PROVIDERS: readonly ProviderId[]; // ['sap-ai-core', 'sap-proxy']
+
+interface CheckProviderHealthOptions {
+  timeoutMs?: number;            // default DEFAULT_HEALTH_TIMEOUT_MS = 10_000
+  skipNetwork?: boolean;         // default false
+}
+```
+
+#### Formatter API
+
+Two pure formatters live in `src/cli/commands/provider.ts` and are exported for programmatic reuse (e.g. a future TUI view or external dashboard):
+
+```typescript
+import {
+  formatHealthResult,
+  formatHealthReport,
+  registerProviderCommand,
+} from './cli/commands/provider.js';
+
+// Format a single result as a human-readable block.
+const line = formatHealthResult(result, /* verbose */ false);
+
+// Format a complete report with a Summary footer.
+const report = formatHealthReport(results, /* verbose */ true);
+```
+
+#### Behavioural notes
+
+- **Never throws.** `checkProviderHealth` catches every inner exception and surfaces it as `ok: false` with a specific error message. The CLI wrapper additionally catches `parseTimeoutMs` errors and other command-level exceptions.
+- **No chat/completion call is issued.** The probe uses `HEAD` on the derived base URL via `src/providers/connectivity.ts:checkConnectivity`. This confirms DNS + TLS + reachability without burning model quota. Auth failures (`401`/`403`) still count as "reachable" at the network layer.
+- **`listConfiguredProviders` is permissive.** A provider is considered configured when AT LEAST its first required env var is set, so a half-configured provider is still checked and the operator sees exactly which env var is missing instead of a silent skip.
+- **Sequential, not parallel.** `checkAllProviderHealth` walks the input array sequentially so output arrives in a predictable order; one slow probe does not block or interleave with another.
+- **Provider-specific validation.** For `sap-ai-core`, the check additionally parses `AICORE_SERVICE_KEY` as JSON and derives the API base URL from `serviceurls.AI_API_URL` — a missing or malformed service key surfaces a specific error (`AICORE_SERVICE_KEY is set but not valid JSON` or `AICORE_SERVICE_KEY is missing serviceurls.AI_API_URL`) rather than a generic failure. For `sap-proxy`, the base URL is validated with `new URL(baseUrl)` before the probe is attempted.
+
+See [PROVIDERS.md — Provider Health Check](PROVIDERS.md#provider-health-check-srcprovidershealthts) for the provider-layer design contract and [ARCHITECTURE.md — Provider Health Check](ARCHITECTURE.md#provider-health-check-srcprovidershealthts) for the end-to-end call flow.
+
 ### server
 
 Manage the local UNIX socket server that exposes Alexi's slash command surface to remote clients (VS Code extension, JetBrains plugin, test harnesses). Registered by `src/cli/commands/server.ts`. The full wire protocol lives in [`docs/SERVER.md`](SERVER.md).

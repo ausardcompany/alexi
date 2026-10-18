@@ -10,6 +10,7 @@ This document describes the provider system in Alexi, focusing on the SAP AI Cor
 - [Supported Models](#supported-models)
 - [Configuration](#configuration)
 - [Usage Examples](#usage-examples)
+- [Provider Health Check (`src/providers/health.ts`)](#provider-health-check-srcprovidershealthts)
 
 ## Overview
 
@@ -4426,6 +4427,121 @@ switch (event.type) {
 - Classifiers do not infer the known set; the caller supplies `knownTypes: ReadonlySet<string>` per decoder.
 
 See [docs/API.md — Stream Event Guards API](API.md#stream-event-guards-api) for the typed surface.
+
+## Provider Health Check (`src/providers/health.ts`)
+
+Introduced to resolve issue #2067 (commit `ee97bf47`). Validates provider credentials and connectivity BEFORE a session starts, so misconfiguration (missing env vars, bad credentials, unreachable endpoints) is surfaced at the operator terminal instead of mid-session after wasting quota on failed requests. Exposed to end users as the `alexi provider health` CLI subcommand (see [API.md — `provider health` command](API.md#provider-health)); exposed to programmatic callers through the typed API in `src/providers/health.ts`.
+
+### Call flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as alexi provider health
+    participant Reg as registerProviderCommand
+    participant List as listConfiguredProviders
+    participant Check as checkProviderHealth
+    participant Conn as checkConnectivity
+    participant SAP as SAP AI Core / proxy
+
+    CLI->>Reg: --provider? --skip-network? --timeout?
+    alt --provider <id>
+        Reg->>Check: checkProviderHealth(id, options)
+    else default
+        Reg->>List: listConfiguredProviders()
+        List-->>Reg: ProviderId[]
+        Reg->>Check: checkAllProviderHealth(ids, options)
+    end
+    Check->>Check: validate env vars
+    alt skipNetwork
+        Check-->>Reg: HealthResult (ok, no latency)
+    else probe
+        Check->>Conn: HEAD baseUrl, timeoutMs
+        Conn->>SAP: HEAD
+        SAP-->>Conn: 2xx/4xx/5xx or timeout
+        Conn-->>Check: ConnectivityResult
+        Check-->>Reg: HealthResult (ok + latency)
+    end
+    Reg-->>CLI: formatHealthReport(results, verbose)
+    Note over CLI: exitCode = 1 if any fail
+```
+
+### Public surface
+
+```typescript
+// src/providers/health.ts
+
+export interface HealthResult {
+  /** Short identifier (e.g. 'sap-ai-core', 'sap-proxy'). */
+  provider: string;
+  /** `true` when every validation passed. */
+  ok: boolean;
+  /** Round-trip latency of the connectivity probe in ms, when attempted. */
+  latency?: number;
+  /** First failure reason, intended for CLI display. */
+  error?: string;
+  /** Rich per-step details, surfaced under `--verbose`. */
+  details?: HealthDetails;
+}
+
+export interface HealthDetails {
+  envVars: Array<{ name: string; present: boolean; required: boolean }>;
+  endpoint?: string;
+  connectivity?: ConnectivityResult;
+  attemptedProbe: boolean;
+}
+
+export type ProviderId = 'sap-ai-core' | 'sap-proxy';
+export const KNOWN_PROVIDERS: readonly ProviderId[] = ['sap-ai-core', 'sap-proxy'];
+
+export interface CheckProviderHealthOptions {
+  timeoutMs?: number;    // default 10_000 ms (DEFAULT_HEALTH_TIMEOUT_MS)
+  skipNetwork?: boolean; // default false
+}
+
+export function listConfiguredProviders(): ProviderId[];
+export function checkProviderHealth(
+  provider: string,
+  options?: CheckProviderHealthOptions
+): Promise<HealthResult>;
+export function checkAllProviderHealth(
+  providers: readonly string[],
+  options?: CheckProviderHealthOptions
+): Promise<HealthResult[]>;
+```
+
+### Per-provider contract
+
+| Provider | Required env | Optional env | Validation on top of env |
+|----------|--------------|--------------|--------------------------|
+| `sap-ai-core` | `AICORE_SERVICE_KEY` | `AICORE_RESOURCE_GROUP` | Service key must be valid JSON AND must contain `serviceurls.AI_API_URL`. The probed endpoint is that URL. |
+| `sap-proxy` | `SAP_PROXY_BASE_URL`, `SAP_PROXY_API_KEY` | (none) | `SAP_PROXY_BASE_URL` must parse through `new URL(...)`. The probed endpoint is the base URL itself. |
+
+The internal `DEFAULT_HEALTH_TIMEOUT_MS = 10_000` ms is deliberately shorter than the `src/providers/connectivity.ts` module-level default (`15_000` ms) — `provider health` is interactive and must fail fast when things are wrong, whereas the connectivity probe used from live chat paths tolerates a longer handshake.
+
+### Error-to-message mapping
+
+Each distinct failure mode has a specific error message so the operator knows exactly which knob to fix:
+
+| Scenario | `error` string |
+|----------|----------------|
+| `AICORE_SERVICE_KEY` not set | `AICORE_SERVICE_KEY is not set` |
+| `AICORE_SERVICE_KEY` not JSON | `AICORE_SERVICE_KEY is set but not valid JSON` |
+| Service key missing URL field | `AICORE_SERVICE_KEY is missing serviceurls.AI_API_URL` |
+| `SAP_PROXY_BASE_URL` not set | `SAP_PROXY_BASE_URL is not set` |
+| `SAP_PROXY_BASE_URL` not a URL | `SAP_PROXY_BASE_URL is not a valid URL: ${value}` |
+| `SAP_PROXY_API_KEY` not set | `SAP_PROXY_API_KEY is not set` |
+| Unknown provider id | `Unknown provider '${id}'. Known providers: sap-ai-core, sap-proxy` |
+| Connectivity probe failed | the `error` field from `ConnectivityResult`, falling back to `endpoint unreachable` / `proxy unreachable` |
+
+### Design notes
+
+- **No chat/completion call.** The probe uses a `HEAD` request via `src/providers/connectivity.ts:checkConnectivity`. This confirms DNS + TLS + reachability without burning model quota. Auth failures (`401`/`403`) still count as "reachable" at the network layer but surface as `ok: false` on the check that cares about auth (today only env-var presence; a future deeper probe could issue a lightweight authenticated GET).
+- **Never throws.** `checkProviderHealth` catches every inner exception (JSON parse errors, URL constructor failures, connectivity errors) and surfaces them as `ok: false` with a specific error message. The CLI wrapper additionally catches command-level errors (invalid `--timeout`) and emits them on stderr.
+- **Permissive discovery.** `listConfiguredProviders` treats a provider as "configured" when AT LEAST its first required env var is set, so a half-configured provider is still checked and the operator sees exactly WHICH variable is missing. Silent skip here would hide the misconfiguration.
+- **Sequential aggregation.** `checkAllProviderHealth` walks the input array sequentially so results arrive in a predictable order; one slow probe does not block or interleave with another. Preserves input order in the output array.
+- **Separate from SAP AI Core auth.** This module validates reachability and env-var presence. The actual OAuth client-credentials token acquisition lives in `src/providers/auth.ts`; a successful health check does NOT prove that `clientid`/`clientsecret` are valid, only that the service key is well-formed and the AI API URL is reachable. Operators who want deeper verification should run `alexi models` after `alexi provider health` to force an actual token exchange.
+
+See [API.md — `provider health` command](API.md#provider-health) for the user-facing surface, [ARCHITECTURE.md — Provider Health Check](ARCHITECTURE.md#provider-health-check-srcprovidershealthts) for the architectural context, [TESTING.md — Testing provider health check](TESTING.md#testing-provider-health-check-srcprovidershealthts-issue-2067) for the test strategy, and [CONTRIBUTING.md — Provider Health Check](CONTRIBUTING.md#provider-health-check-srcprovidershealthts) for the maintainer invariants.
 
 ## Shared Model Retry Policy (`src/core/model-retry.ts`)
 

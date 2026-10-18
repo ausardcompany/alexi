@@ -20,6 +20,7 @@ import { registerServerCommand } from './server.js';
 import { registerGenerateCommand } from './generate.js';
 import { registerReloadCommand } from './reload.js';
 import { registerUsageCommand } from './usage.js';
+import { registerProviderCommand } from './provider.js';
 
 /**
  * Register all CLI commands on the program
@@ -43,6 +44,7 @@ export function registerAllCommands(program: Command): void {
   registerGenerateCommand(program);
   registerReloadCommand(program);
   registerUsageCommand(program);
+  registerProviderCommand(program);
 }
 
 export {
@@ -63,4 +65,5 @@ export {
   registerGenerateCommand,
   registerReloadCommand,
   registerUsageCommand,
+  registerProviderCommand,
 };
