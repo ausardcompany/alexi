@@ -942,6 +942,51 @@ interface ModelCapability {
 }
 ```
 
+### Model Aliases (`modelAliases`)
+
+The optional top-level `modelAliases` field maps short names to canonical SAP AI Core model ids. The resolver in `src/config/modelAliases.ts` is invoked by `src/providers/model-selection.ts::applyModelAlias` before any provider lookup, so the alias is interchangeable with the full id anywhere a model id is accepted — the CLI `-m` flag, the `AICORE_MODEL` environment variable, and in-process callers of `getModel`.
+
+```typescript
+// src/config/routingConfig.ts
+export interface RoutingConfig {
+  models: ModelCapability[];
+  rules: RoutingRule[];
+  preferences: RoutingPreferences;
+  /**
+   * Optional short-name aliases for model ids. Maps a short alias
+   * (e.g. `opus`) to the canonical model id (e.g.
+   * `sap-ai-core/anthropic--claude-4.7-opus`). Resolved by
+   * `src/config/modelAliases.ts::resolveModelAlias` before provider
+   * lookup. Aliases may chain (up to `MAX_ALIAS_DEPTH` levels); cycles
+   * are reported as warnings and the invalid alias is skipped.
+   */
+  modelAliases?: Record<string, string>;
+}
+```
+
+Minimal example (from `routing-config.example.json`):
+
+```json
+{
+  "modelAliases": {
+    "opus": "sap-ai-core/anthropic--claude-4.7-opus",
+    "sonnet": "sap-ai-core/anthropic--claude-4.5-sonnet",
+    "haiku": "sap-ai-core/anthropic--claude-4.5-haiku"
+  }
+}
+```
+
+Key properties:
+
+- **Chaining up to `MAX_ALIAS_DEPTH = 5`.** An alias value may itself be another alias key; the resolver follows at most five hops before treating the chain as a cycle.
+- **Cycle detection.** A direct (`a -> a`) or indirect (`a -> b -> a`) cycle throws `CircularAliasError`; the chat pipeline logs a warning and returns the original id so a bad alias cannot wedge the request.
+- **Empty / whitespace-only values are ignored** (treated as "no alias" — the input is returned verbatim).
+- **Case-sensitive.** Keys are trimmed before lookup, but letter case is preserved. `opus` and `Opus` are distinct keys.
+- **Shadowing warning.** `validateModelAliases` logs a `shadows a real SAP orchestration model id` warning if an alias key collides with a known orchestration id; the alias still works and takes precedence.
+- **Graceful config failure.** If `routing-config.json` cannot be loaded, `applyModelAlias` silently returns the input id — a missing or malformed config means "no aliases configured", never a chat-pipeline crash.
+
+See [docs/ROUTING.md — Model aliases](ROUTING.md#model-aliases) for the full resolution flow diagram and [docs/PROVIDERS.md — Model Alias Resolution](PROVIDERS.md#model-alias-resolution) for the provider-side wiring.
+
 ### Example Routing Configuration
 
 ```json
@@ -2975,6 +3020,49 @@ One `AgentUsageRecord` per line (JSON Lines). Sessions without a `usage.jsonl` a
 - Pair with `alexi usage --json` for programmatic ingestion into SAP cost tooling or SAP Alert Notification Service dashboards.
 
 See [docs/API.md — `usage`](API.md#usage) for the CLI surface and [docs/ARCHITECTURE.md — Agent Usage Aggregation](ARCHITECTURE.md#agent-usage-aggregation-srccliagent-usagets) for the aggregation design.
+
+## Sandbox-Tolerant Config Discovery (1.22.50)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode fix #55817). Alexi's boot-time filesystem reads now tolerate both missing files AND access denials for the global config, instruction files, and rule file paths. Historically a hardened container (SAP BTP job runners, read-only filesystems, GitHub Codespaces) that returned `EACCES` or `EPERM` on an ancestor directory would abort boot. Treating a denied path as "unavailable" (same bucket as missing) lets Alexi still start up with a reduced-but-functional configuration.
+
+### Behaviour by configuration surface
+
+| Config surface | Missing (ENOENT) | Denied (EACCES / EPERM) | Other error (EIO, etc.) |
+|---|---|---|---|
+| Global config (`~/.alexi/config.json`) | Skipped silently; project config / defaults apply | Skipped silently (new in 1.22.50) | Propagates |
+| Project config (`<workdir>/.alexi/config.json`) | Skipped silently; defaults apply | Skipped silently (new in 1.22.50) | Propagates |
+| Rule file (`<rulesPath>/*.md`) | Soft skip, retried on next discovery pass | PERMANENT skip for the whole session (new in 1.22.50) | Soft skip |
+| Instruction file (`AGENTS.md`, `CLAUDE.md`, …) | Skipped silently | Skipped silently (new in 1.22.50) | Propagates |
+
+The denied-vs-missing split matters most for the rule file discovery: an `EACCES` on a user-local rule file is often expected (the operator does not have read permission on another user's rules directory) and would be noisy at `warn`. The denied path becomes a permanent in-session skip so a slow directory walk is not re-attempted on every discovery pass. Rule discovery emits `rule file skipped (denied): <path>` at `debug`; operators who want to audit denied paths can raise log level. See [docs/ARCHITECTURE.md — Rule Discovery Denied vs Missing](ARCHITECTURE.md#rule-discovery-denied-vs-missing-srcconfigrulesdiscoveryts).
+
+### Operator action
+
+No action required. Containers that previously had to grant permissive read access on every ancestor directory can now return `EACCES` on paths Alexi does not strictly need, and Alexi will degrade gracefully. The predicates powering this behaviour (`isAccessDenied`, `isMissingOrDenied`, `statOptional`) are exported from `src/core/filesystem.ts` for extension developers writing new config-reading plugins; see [docs/API.md — Filesystem Predicates API](API.md#filesystem-predicates-api).
+
+## Skill Discovery Depth Limit (1.22.50)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #55597 "bound skill discovery"). The skill discovery walk now enforces a hard depth cap and a noise-directory blocklist so a mis-rooted scan (e.g. a skill directory accidentally pointed at a monorepo root) cannot stall the agent loop.
+
+### Caps
+
+- **MAX_DEPTH = 6** — directories visited. `0` means only the scan root is read. The upstream default is generous enough for every real monorepo skill layout and short enough to prevent runaway walks on `node_modules` symlink loops or recursive `.git` worktrees.
+- **IGNORED_DIRS** — directory basenames always skipped regardless of depth: `node_modules`, `.git`, `dist`, `build`, `.next`, `target`, `.cache`, `.turbo`. Dotfile directories (basename starts with `.`) are also skipped by the filter.
+- **Flat-vs-nested layout**: at the scan root (depth 0) every `*.md` file is a candidate (legacy flat layout: one skill per markdown file in the root directory). Below the root only files literally named `SKILL.md` qualify, and the subtree is pruned once one is found.
+
+### Operator action
+
+Operators placing skill directories deeper than 6 levels below a project root should move them closer to the scan root. There is no operator-facing override for `MAX_DEPTH` — the value is a hardcoded constant exported from `src/core/skill-scan.ts`. Extensions / tests can import the constant and compose their own scanner if they need a different depth. See [docs/API.md — Skill Scanner API](API.md#skill-scanner-api) and [docs/ARCHITECTURE.md — Depth-Limited Skill Scanner](ARCHITECTURE.md#depth-limited-skill-scanner-srccoreskill-scants).
+
+## Message Bus `idle` Role (1.22.50)
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #56504). The `role` field of `MessageReceived` and `MessageSent` events in `src/bus/index.ts` now accepts `'idle'` in addition to the previous `'user' | 'assistant' | 'system'` union.
+
+### Impact on consumers
+
+- **TUI status bar / telemetry relays**: should treat `role: 'idle'` as a state transition rather than a chat payload. Downstream consumers that enumerate the message list should filter `role === 'idle'` before rendering.
+- **Custom bus subscribers**: Zod schemas that previously used `z.enum(['user', 'assistant', 'system'])` to narrow the event will now reject `idle` events. Update the enum to the four-value union to receive the state-transition events, or filter them out before narrowing.
+- **Wire format**: purely additive expansion. No change to the serialised shape when callers do not emit `idle`.
 
 ## Related Documentation
 

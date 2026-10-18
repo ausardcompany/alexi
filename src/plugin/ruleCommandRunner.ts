@@ -397,7 +397,12 @@ export async function runRuleCommandLenient(
       finalize(null);
     });
 
-    child.on('exit', (code) => {
+    // Use `close` rather than `exit` so stdout/stderr pipes are guaranteed
+    // to be flushed before we resolve. `exit` fires as soon as the process
+    // terminates, but data buffered in the OS pipe can still arrive on the
+    // reader side afterwards — resolving on `exit` therefore truncates
+    // trailing output. Mirrors opencode fix #56321.
+    child.on('close', (code) => {
       finalize(code);
     });
   });

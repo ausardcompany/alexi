@@ -3708,6 +3708,50 @@ Design constraints:
 
 See [`docs/TESTING.md#testing-byok-langfuse-telemetry`](TESTING.md#testing-byok-langfuse-telemetry) for the unit + integration test contract. The unit suite in `src/providers/__tests__/langfuse-telemetry.test.ts` (now 575 lines) covers the opt-in gate, env parsing, merge rules, span-lifecycle no-ops, AND the full `classifyLangfuseError` matrix (content filter, permanent auth, free-tier rate limit, 429 transient, 4xx terminal, 5xx transient, network transient, axios `response.status`, unknown-shape fallback, non-`Error` coercion). The integration suite in `tests/providers/langfuse-telemetry-integration.test.ts` (260 lines) adds a dedicated case that drives a terminal 401 through `failLangfuseGeneration` and asserts the real SDK ships `metadata: { errorType, errorMessage, isTerminal: true }` on the `generation-update` batch.
 
+## Model Alias Resolution
+
+Explicit `modelID` inputs passed to `getModel(modelID?, opts?)` in `src/providers/model-selection.ts` are now run through `applyModelAlias(trimmed)` **before** provider lookup. This threads the alias map configured in `routing-config.json` (`modelAliases`) through every entry point — CLI `-m` flag, `AICORE_MODEL`, in-process `getModel` callers, and the `getProviderForModelWithFallback` path — so short names like `opus` resolve to canonical ids such as `sap-ai-core/anthropic--claude-4.7-opus` without a per-call code change.
+
+```typescript
+// src/providers/model-selection.ts
+export function applyModelAlias(modelId: string): string {
+  const aliases = loadAliases(); // loadRoutingConfig().modelAliases, swallows load errors
+  if (!aliases) {
+    return modelId;
+  }
+  try {
+    return resolveModelAlias(modelId, aliases);
+  } catch (err) {
+    if (err instanceof CircularAliasError) {
+      logger.warn(`Model alias '${modelId}': ${err.message}; using original id`);
+      return modelId;
+    }
+    throw err;
+  }
+}
+
+export async function getModel(modelID?: string, opts: GetModelOptions = {}): Promise<ModelRef> {
+  if (modelID && modelID.trim().length > 0) {
+    const trimmed = modelID.trim();
+    const resolved = applyModelAlias(trimmed); // short name -> canonical id
+    return { providerID: 'sap-ai-core', modelID: resolved };
+  }
+  if (opts.auxiliary) {
+    return selectModelForTask('auxiliary', buildContext());
+  }
+  return { providerID: 'sap-ai-core', modelID: getDefaultModel() };
+}
+```
+
+Safety properties:
+
+- A missing or malformed `routing-config.json` degrades silently to "no aliases configured" (the inner `try/catch` in `loadAliases()` swallows the load error) so a corrupted config file never breaks the chat pipeline.
+- A `CircularAliasError` (direct or indirect cycle, or a chain that exceeds `MAX_ALIAS_DEPTH = 5`) is logged at `warn` level and the **original** id is returned verbatim. The provider lookup then rejects the id via its usual catalog check rather than crashing with an unhandled exception.
+- Explicit overrides win: `getModel('sap-ai-core/gpt-4o')` returns `gpt-4o` even if an alias maps `gpt-4o` elsewhere, because the input is not a key in `modelAliases` (it is the full canonical id).
+- The resolver is invoked **before** `isOrchestrationModel()` catalog validation, so an alias that points at a well-known orchestration id will pass the catalog check correctly.
+
+See [Routing → Model aliases](ROUTING.md#model-aliases) for the resolution semantics, validation rules, and alias-chain diagram, and [Configuration → Model Aliases](CONFIGURATION.md#model-aliases-modelaliases) for the `routing-config.json` schema and example configurations.
+
 ## Auxiliary-Task Model Selection
 
 Introduced 2026-09-12 (`1.22.18`, ports upstream kilocode `1e73d3862` and opencode `provider.ts` +14/-3). Auxiliary background tasks — title generation, session summarisation, context compaction, and commit-message generation — resolve their target model through `selectModelForTask` in `src/providers/model-selection.ts` instead of the primary chat path.
@@ -4498,6 +4542,65 @@ Each distinct failure mode has a specific error message so the operator knows ex
 - **Separate from SAP AI Core auth.** This module validates reachability and env-var presence. The actual OAuth client-credentials token acquisition lives in `src/providers/auth.ts`; a successful health check does NOT prove that `clientid`/`clientsecret` are valid, only that the service key is well-formed and the AI API URL is reachable. Operators who want deeper verification should run `alexi models` after `alexi provider health` to force an actual token exchange.
 
 See [API.md — `provider health` command](API.md#provider-health) for the user-facing surface, [ARCHITECTURE.md — Provider Health Check](ARCHITECTURE.md#provider-health-check-srcprovidershealthts) for the architectural context, [TESTING.md — Testing provider health check](TESTING.md#testing-provider-health-check-srcprovidershealthts-issue-2067) for the test strategy, and [CONTRIBUTING.md — Provider Health Check](CONTRIBUTING.md#provider-health-check-srcprovidershealthts) for the maintainer invariants.
+
+## Shared Model Retry Policy (`src/core/model-retry.ts`)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #56497 "extract shared retry policy"). Although the module lives in `src/core/` (because it is model-agnostic — any streaming provider can compose it), it defines the retry contract every SAP AI Core generate / stream caller is expected to use so permanent-vs-transient classification stays identical across the fleet.
+
+```mermaid
+flowchart TD
+    Call[retryable fn, opts] --> Attempt[attempt N: fn attempt]
+    Attempt -->|resolved| Done[return value]
+    Attempt -->|rejected err| Classify[isRetryable err]
+    Classify --> Check1{err.retryable === true}
+    Check1 -->|yes| Yes[retry]
+    Check1 -->|no| Check2{isRetryableError err}
+    Check2 -->|yes rate-limit/xAI capacity| Yes
+    Check2 -->|no| Check3{status in 429/502/503/504}
+    Check3 -->|yes| Yes
+    Check3 -->|no| Check4{code in TRANSIENT_ERROR_CODES}
+    Check4 -->|yes ECONNRESET/EPIPE/...| Yes
+    Check4 -->|no| No[rethrow]
+    Yes --> Budget{attempts < maxAttempts}
+    Budget -->|yes| Backoff[sleep baseMs * 2^N with jitter, capped at maxMs]
+    Backoff --> Attempt
+    Budget -->|no| No
+```
+
+### Public surface
+
+- `RetryableError` interface — `{ readonly retryable: boolean; readonly retryAfterMs?: number }`.
+- `isRetryable(error: unknown): boolean` — classification helper.
+- `DEFAULT_MODEL_RETRY_OPTIONS` — `{ maxAttempts: 3, baseMs: 500, maxMs: 30_000, jitter: true }`. Matches upstream Effect-TS schedule bytewise.
+- `retryable<T>(fn, opts?): Promise<T>` — wraps a model-call producer with the shared policy.
+
+### Scope
+
+Covers three transient buckets per the AGENTS.md error contract:
+
+- Rate limits (HTTP 429, excluding permanent free-tier rate limits — those are classified as fatal by `isRetryableError`).
+- Transient server errors (HTTP 502, 503, 504).
+- Network blips (`ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `EPIPE`, `EAGAIN`, `EBUSY`).
+
+Permanent failures (4xx auth / validation, free-tier rate limits, content-filter rejections) are NOT retried — retrying only burns the deployment quota without changing the outcome. Composable with the SAP AI Core orchestration path: callers wrap their generate / stream producer in `retryable()` and leave downstream backoff loops (`ErrorBackoff` in `src/core/error-backoff.ts`, the streaming retry in `src/core/session/retry.ts`) in place for the finer-grained reconnect semantics.
+
+See [docs/API.md — Shared Model Retry Policy API](API.md#shared-model-retry-policy-api) for the typed surface.
+
+## GitHub Copilot Provider: Null-Safe Response Stream Parser (`src/providers/github-copilot.ts`)
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode fix #56669). The OpenAI-compatible Responses API that GitHub Copilot proxies has started sending explicit `null` for optional fields (`delta`, `item`, `output`) instead of omitting them. A naive `chunk.delta ?? ''` handles that for scalar strings, but nested property access on a `null` `item` would still throw.
+
+### Guard order in `parseCopilotResponseStream`
+
+1. Top-level untyped-chunk guard: `!chunk || typeof chunk !== 'object' || typeof chunk.type !== 'string'` returns `{ type: 'ignored', reason: 'untyped' }`.
+2. Delta normalisation: `const delta = typeof chunk.delta === 'string' ? chunk.delta : ''` for `response.output_text.delta`, `response.reasoning.delta`, and `response.reasoning_opaque.delta`.
+3. `response.output_item.added` extracts `item` via `chunk.item ?? undefined` before reading `.type` or `.id`.
+4. Any unknown `type` still returns `{ type: 'ignored', reason: chunk.type }`.
+
+### Design notes
+
+- Forward-compatible with any future field that the Responses API may start sending as explicit `null`. The top-level `isTypedStreamEvent`-shaped guard, the `typeof === 'string'` delta coercion, and the nullish-coalescing on nested property access combine to make `null` structurally equivalent to "absent" at every known access point.
+- Mirrors the broader stream-event tolerance pattern established by `src/providers/protocols/stream-events.ts`: decoders prefer `ignored` over `throw` so a forward-rolled upstream server stays usable.
 
 ## Related Documentation
 

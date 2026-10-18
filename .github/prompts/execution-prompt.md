@@ -6,293 +6,285 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-17
+Generated: 2026-10-18
 Based on upstream commits analyzed:
-- **kilocode**: 3a3271de2..1552877e8 (62 commits)
-- **opencode**: 00e7472..22e771f (29 commits)
+- opencode: 214fb7f, 60a5a6c, 63c1a27, 49e9786, c38d83c, 3bdab63, 86c7f7c
+- kilocode: 2a1903f29 (JetBrains CLI pin bump — no action needed)
 
 ## Summary
-- Total changes planned: 11
-- Critical: 1 | High: 4 | Medium: 4 | Low: 2
-
-Focus areas identified from upstream:
-1. **AI stream resilience** (Gemini MALFORMED_RESPONSE retry, unknown event tolerance, broken-pipe retry)
-2. **Snapshot/Git concurrency safety** on Windows
-3. **MCP OAuth token refresh**
-4. **Session list pagination refactor** + cursor schema
-5. **Model config enhancements** (reasoning in config, releaseDate, temperature capability)
-6. **Agent usage aggregation (CLI)**
-7. **TUI worker console isolation**
-8. **Reasoning replay persistence (OpenRouter)**
-
----
+- Total changes planned: 7
+- Critical: 1 | High: 3 | Medium: 2 | Low: 1
 
 ## Changes
 
-### 1. Retry broken-pipe transport failures in HTTP utility
-**File**: `src/util/retry.ts` (or `src/util/http.ts`)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream `opencode` #56307 adds EPIPE/broken-pipe to retry-eligible transport errors. Without this, long-running SAP AI Core calls through load balancers can fail intermittently with unhandled broken pipes.
-
-**New code** (add to retry predicate):
-```typescript
-// src/util/retry.ts
-const TRANSIENT_ERROR_CODES = new Set([
-  "ECONNRESET",
-  "ECONNREFUSED",
-  "ETIMEDOUT",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "EPIPE",          // NEW: broken-pipe (opencode #56307)
-]);
-
-export function isRetryableTransportError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const code = (err as { code?: string }).code;
-  if (code && TRANSIENT_ERROR_CODES.has(code)) return true;
-  const message = (err as { message?: string }).message ?? "";
-  if (/broken pipe|EPIPE/i.test(message)) return true;
-  return false;
-}
-```
-
----
-
-### 2. Tolerate unknown / untyped stream events in AI protocol parsers
-**File**: `src/providers/sap-ai-core/stream.ts` (or wherever stream events are decoded)
+### 1. Tolerate sandboxed filesystem denials during location boot
+**File**: `src/core/filesystem.ts` (and/or `src/core/location.ts`)
 **Priority**: critical
 **Type**: bugfix
-**Reason**: `opencode` #56286 (`fix(ai): tolerate unknown and untyped stream events`) prevents crashes when upstream providers emit new event kinds. Critical for SAP AI Core since it proxies multiple providers (Anthropic, Gemini, OpenAI) and may forward unexpected shapes.
+**Reason**: Mirrors opencode fix (#55817). When Alexi runs inside a sandbox (SAP BTP, container, Codespaces), filesystem access to parent directories (e.g., global config dirs) may be denied with `EACCES`/`EPERM`. Current code likely treats these as fatal and aborts boot. Treat denied paths the same as missing paths so Alexi can still start.
 
-**Current code** (example pattern to replace):
+**Current code** (typical pattern to look for):
 ```typescript
-switch (event.type) {
-  case "content_block_delta": /* ... */ break;
-  case "message_stop":        /* ... */ break;
-  default:
-    throw new Error(`Unknown stream event: ${event.type}`);
-}
+// Likely in location/boot path
+const stat = await fs.stat(path)  // throws on EACCES
+if (stat.isDirectory()) { /* ... */ }
 ```
 
 **New code**:
 ```typescript
-switch (event.type) {
-  case "content_block_delta": /* ... */ break;
-  case "message_stop":        /* ... */ break;
-  default:
-    // Gracefully ignore unknown/untyped events to stay forward-compatible
-    // with new provider SSE formats (opencode #56286).
-    logger.debug?.("stream.unknown_event", { type: event?.type ?? "<untyped>" });
-    break;
+// Add helper to util/fs-util equivalent
+export function isAccessDenied(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false
+  const code = (err as NodeJS.ErrnoException).code
+  return code === "EACCES" || code === "EPERM"
 }
-```
 
-Also guard untyped events:
-```typescript
-if (!event || typeof event !== "object" || typeof event.type !== "string") {
-  logger.debug?.("stream.untyped_event", { event });
-  return;
+// Then in location boot:
+const stat = await fs.stat(path).catch((err) => {
+  if (err.code === "ENOENT" || isAccessDenied(err)) return undefined
+  throw err
+})
+if (!stat) {
+  logger.debug("location skipped", { path, reason: stat === undefined ? "unavailable" : "denied" })
+  continue
 }
 ```
 
 ---
 
-### 3. Retry Gemini `MALFORMED_RESPONSE` finishes
-**File**: `src/providers/sap-ai-core/gemini.ts`
+### 2. Report shell exit only after output is captured
+**File**: `src/tool/bash.ts` (or `src/tool/shell.ts`)
 **Priority**: high
 **Type**: bugfix
-**Reason**: `opencode` #56232 — Gemini (and Vertex via SAP AI Core) occasionally completes with `finishReason: MALFORMED_RESPONSE`. Treat as transient and retry once instead of surfacing to the agent loop.
+**Reason**: Upstream fix #56321 — shell tool was emitting the exit event before stdout/stderr pipes drained, so consumers saw truncated output. This is a race in Alexi's bash tool too if it listens to `child.on('exit', ...)` directly.
+
+**Current code**:
+```typescript
+child.on("exit", (code) => {
+  resolve({ stdout, stderr, exitCode: code })
+})
+```
 
 **New code**:
 ```typescript
-// src/providers/sap-ai-core/gemini.ts
+let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined
+let stdoutClosed = false
+let stderrClosed = false
 
-const MALFORMED_FINISH_REASONS = new Set(["MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL"]);
-
-export async function invokeGeminiWithRetry(req: GeminiRequest): Promise<GeminiResponse> {
-  const MAX_ATTEMPTS = 2;
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const res = await invokeGemini(req);
-      const finish = res?.candidates?.[0]?.finishReason;
-      if (finish && MALFORMED_FINISH_REASONS.has(finish) && attempt < MAX_ATTEMPTS) {
-        logger.warn("gemini.malformed_finish.retrying", { finish, attempt });
-        continue;
-      }
-      return res;
-    } catch (err) {
-      lastErr = err;
-      if (!isRetryableTransportError(err)) throw err;
-    }
+const maybeFinish = () => {
+  if (exited && stdoutClosed && stderrClosed) {
+    resolve({ stdout, stderr, exitCode: exited.code, signal: exited.signal })
   }
-  throw lastErr ?? new Error("Gemini call failed after retries");
 }
+
+child.stdout.on("end", () => { stdoutClosed = true; maybeFinish() })
+child.stderr.on("end", () => { stderrClosed = true; maybeFinish() })
+child.on("exit", (code, signal) => {
+  exited = { code, signal }
+  maybeFinish()
+})
 ```
 
 ---
 
-### 4. Retry concurrent snapshot/Git object writes (Windows safety)
-**File**: `src/core/snapshot.ts` or `src/core/git.ts`
-**Priority**: medium
-**Type**: bugfix
-**Reason**: `opencode` #56190 — on Windows, concurrent Git writes to loose objects collide. If Alexi uses Git snapshots on Windows-hosted BAS/Dev Spaces, apply retry. Otherwise, keep code path no-op on non-Windows.
-
-**New code**:
-```typescript
-// src/core/git.ts
-import { setTimeout as sleep } from "node:timers/promises";
-
-async function retryConcurrentObjectWrite<T>(fn: () => Promise<T>): Promise<T> {
-  if (process.platform !== "win32") return fn();
-  const MAX = 3;
-  for (let i = 1; i <= MAX; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      // Only retry Git exit (non-zero) errors — not spawn failures.
-      const isGitExit = (err as { exitCode?: number }).exitCode !== undefined;
-      if (!isGitExit || i === MAX) throw err;
-      await sleep(50);
-    }
-  }
-  throw new Error("unreachable");
-}
-
-// Wrap update-index call:
-await retryConcurrentObjectWrite(() =>
-  runGit(["update-index", "--add", "--remove", "--replace", "-z", "--stdin"], { stdin, cwd })
-);
-```
-
----
-
-### 5. MCP OAuth token auto-refresh with bounded timeout
-**File**: `src/tool/mcp/refresh.ts` (new) + wire into `src/tool/mcp/client.ts`
+### 3. Treat null OpenAI Responses stream fields as absent
+**File**: `src/providers/openai-responses.ts` (if present) or `src/providers/sap-aicore.ts` for the Responses-compatible path
 **Priority**: high
-**Type**: feature + security
-**Reason**: `kilocode` adds `fix(cli): refresh expired MCP OAuth tokens automatically` (f9b632fd6) and bounded single-flight refresh (fb9277937, 9204aac51). SAP integrations commonly ship short-lived tokens; without this Alexi forces users to re-auth MCP servers manually.
+**Type**: bugfix
+**Reason**: Upstream fix #56669 — OpenAI-compatible Responses API now sends explicit `null` for optional fields (`id`, `output`, `delta`) instead of omitting them. Current `if (value !== undefined)` checks miss these and cause downstream `TypeError: cannot read property 'x' of null`. Since SAP AI Core exposes OpenAI-compatible endpoints, this likely affects Alexi.
 
-**New code**:
+**Current code**:
 ```typescript
-// src/tool/mcp/refresh.ts
-type RefreshFn = () => Promise<{ accessToken: string; expiresAt: number }>;
-
-const inflight = new Map<string, Promise<string>>();
-
-export async function ensureFreshToken(
-  serverId: string,
-  current: { accessToken: string; expiresAt: number } | undefined,
-  refresh: RefreshFn,
-  opts: { connectTimeoutMs: number; skewMs?: number } = { connectTimeoutMs: 10_000 },
-): Promise<string> {
-  const now = Date.now();
-  const skew = opts.skewMs ?? 30_000;
-  if (current && current.expiresAt - skew > now) return current.accessToken;
-
-  const existing = inflight.get(serverId);
-  if (existing) return existing;
-
-  const p = (async () => {
-    try {
-      const refreshed = await withTimeout(refresh(), opts.connectTimeoutMs, "mcp.refresh.timeout");
-      return refreshed.accessToken;
-    } finally {
-      // CRITICAL: clear the single-flight entry so later retries aren't poisoned
-      inflight.delete(serverId);
-    }
-  })();
-  inflight.set(serverId, p);
-  return p;
+if (chunk.response !== undefined) {
+  state.responseId = chunk.response.id
 }
-
-async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return await Promise.race([
-    p,
-    new Promise<T>((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
-  ]);
+if (chunk.delta !== undefined) {
+  state.text += chunk.delta
 }
 ```
 
-Call site:
+**New code**:
 ```typescript
-// src/tool/mcp/client.ts
-const token = await ensureFreshToken(server.id, server.oauth, () => oauthRefresh(server), {
-  connectTimeoutMs: server.connectTimeoutMs ?? 10_000,
-});
-request.headers.set("Authorization", `Bearer ${token}`);
+// Treat null the same as undefined for optional fields
+if (chunk.response != null) {
+  state.responseId = chunk.response.id ?? state.responseId
+}
+if (chunk.delta != null) {
+  state.text += chunk.delta
+}
+// Also guard: output arrays may be null
+const outputs = chunk.output ?? []
+for (const item of outputs) { /* ... */ }
 ```
 
 ---
 
-### 6. Persist late OpenRouter reasoning details for replay
-**File**: `src/core/session/reasoning-replay.ts` (new)
+### 4. Retry buffered generations with shared retry policy
+**File**: `src/core/model-retry.ts` (new) + `src/core/generate.ts`
+**Priority**: high
+**Type**: refactor + bugfix
+**Reason**: Upstream #56497 extracts a shared retry policy (`packages/core/src/model-retry.ts`) and reduces `session/runner/retry.ts` from 47 lines to 10. Alexi's SAP AI Core integration benefits from a single, consistent retry policy (handling rate limits, transient 5xx, and timeouts) rather than scattered retry logic.
+
+**New file** `src/core/model-retry.ts`:
+```typescript
+import { Effect, Schedule, Duration } from "effect"
+
+export interface RetryableError {
+  readonly retryable: boolean
+  readonly retryAfter?: Duration.Duration
+}
+
+export const isRetryable = (error: unknown): error is RetryableError => {
+  if (!error || typeof error !== "object") return false
+  const e = error as any
+  // Rate limit, transient server errors, network blips
+  if (e.status === 429 || e.status === 503 || e.status === 502 || e.status === 504) return true
+  if (e.code === "ECONNRESET" || e.code === "ETIMEDOUT") return true
+  return e.retryable === true
+}
+
+export const policy = Schedule.exponential(Duration.millis(500), 2.0).pipe(
+  Schedule.jittered,
+  Schedule.compose(Schedule.recurs(3)),
+)
+
+export const retryable = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.retry({ schedule: policy, while: isRetryable }))
+```
+
+**Modify** `src/core/generate.ts`:
+```typescript
+// Before: ad-hoc try/catch retry
+// After:
+import { retryable } from "./model-retry"
+
+export const generate = (opts: GenerateOpts) =>
+  retryable(doGenerate(opts))
+```
+
+---
+
+### 5. Bound skill discovery and watches (depth-limited scanning)
+**File**: `src/core/skill-scan.ts` (new) + update any skill/instruction discovery
+**Priority**: medium
+**Type**: performance + bugfix
+**Reason**: Upstream #55597 replaces unbounded glob `{*.md,**/SKILL.md}` with a depth-limited BFS (`MAX_DEPTH = 6`) that short-circuits on `SKILL.md` and skips ignored directories. Prevents runaway scans of large monorepos / `node_modules` symlink loops. Only apply if Alexi has an equivalent skill/instruction scan.
+
+**New file** `src/core/skill-scan.ts`:
+```typescript
+import path from "path"
+import { readdir, stat } from "fs/promises"
+
+const MAX_DEPTH = 6
+const IGNORED_DIRS = ["node_modules", ".git", "dist", "build", ".next", "target"]
+export const ignore = ["**/node_modules/**", "**/.git/**", "**/.*", "**/.*/**"]
+
+export async function scanSkills(root: string): Promise<string[]> {
+  const files: string[] = []
+  const queue: Array<{ directory: string; depth: number }> = [{ directory: root, depth: 0 }]
+
+  while (queue.length) {
+    const item = queue.shift()!
+    const entries = await readdir(item.directory, { withFileTypes: true }).catch(() => [])
+    const children = await Promise.all(
+      entries
+        .filter((e) => !e.name.startsWith(".") && !IGNORED_DIRS.includes(e.name))
+        .map(async (e) => {
+          const target = path.join(item.directory, e.name)
+          let type: "file" | "directory" | "other" = "other"
+          if (e.isFile()) type = "file"
+          else if (e.isDirectory()) type = "directory"
+          else if (e.isSymbolicLink()) {
+            const s = await stat(target).catch(() => null)
+            if (s?.isDirectory()) type = "directory"
+            else if (s?.isFile()) type = "file"
+          }
+          return { name: e.name, path: target, type }
+        }),
+    )
+
+    const skill = children.find((c) => c.type === "file" && c.name === "SKILL.md")
+    if (skill) { files.push(skill.path); continue }
+
+    if (item.depth === 0) {
+      files.push(...children.filter((c) => c.type === "file" && c.name.endsWith(".md")).map((c) => c.path))
+    }
+    if (item.depth < MAX_DEPTH) {
+      queue.push(...children.filter((c) => c.type === "directory").map((c) => ({ directory: c.path, depth: item.depth + 1 })))
+    }
+  }
+  return files.sort()
+}
+```
+
+---
+
+### 6. Accept `idle` in message-type filter
+**File**: `src/bus/message.ts` or `src/router/message-filter.ts`
 **Priority**: medium
 **Type**: bugfix
-**Reason**: `kilocode` 0f4936df1 — OpenRouter sometimes emits reasoning tokens after the final content; they must be persisted so session replay matches live display. If Alexi offers transcript/replay, add equivalent.
+**Reason**: Upstream protocol fix #56504 — the message type filter rejected `idle` messages, which are now a legitimate state transition. If Alexi mirrors opencode's protocol message group, update the allowed-types list.
+
+**Current code**:
+```typescript
+export const MessageType = Schema.Union(
+  Schema.Literal("user"),
+  Schema.Literal("assistant"),
+  Schema.Literal("tool"),
+  // idle missing
+)
+```
 
 **New code**:
 ```typescript
-// src/core/session/reasoning-replay.ts
-export interface ReasoningEvent {
-  index: number;
-  text: string;
-  receivedAt: number;
-}
-
-export class ReasoningBuffer {
-  private events: ReasoningEvent[] = [];
-  private finalized = false;
-
-  append(ev: Omit<ReasoningEvent, "receivedAt">) {
-    this.events.push({ ...ev, receivedAt: Date.now() });
-  }
-
-  /** Called when the stream completes; accepts late events arriving after finalize. */
-  finalize() { this.finalized = true; }
-
-  acceptLate(ev: Omit<ReasoningEvent, "receivedAt">) {
-    if (!this.finalized) return this.append(ev);
-    // Still persist — ordering by `index` protects replay fidelity.
-    this.events.push({ ...ev, receivedAt: Date.now() });
-    this.events.sort((a, b) => a.index - b.index);
-  }
-
-  snapshot() { return [...this.events]; }
-}
+export const MessageType = Schema.Union(
+  Schema.Literal("user"),
+  Schema.Literal("assistant"),
+  Schema.Literal("tool"),
+  Schema.Literal("idle"),
+)
 ```
-
-Hook into session persister so late events trigger a resave of the assistant message.
 
 ---
 
-### 7. Project-scoped agent usage aggregation (CLI)
-**File**: `src/cli/agent-usage.ts` (new) + `src/cli/commands/usage.ts`
-**Priority**: medium
-**Type**: feature
-**Reason**: `kilocode` 88312a65b + db5fb2ae1 add project-scoped agent usage aggregation. Useful for SAP cost-tracking across customer engagements.
+### 7. Instruction read: distinguish NotFound (transient) vs Denied (permanent)
+**File**: `src/core/instruction.ts` or `src/config/instruction.ts`
+**Priority**: low
+**Type**: bugfix
+**Reason**: Upstream fix in `instruction.ts` differentiates mid-save (NotFound → transient, retry allowed) from permission denial (stay-absent). Improves UX in sandboxed environments and avoids spurious "unavailable" markers when files are briefly missing during editor saves.
 
-**New code** (shape outline):
+**Current code**:
 ```typescript
-// src/cli/agent-usage.ts
-export interface AgentUsageRecord {
-  sessionId: string;
-  agent: string;
-  project: string;
-  startedAt: number;
-  endedAt?: number;
-  outcome: "success" | "aborted" | "error" | "unknown";
-  tokensIn: number;
-  tokensOut: number;
-  costUSD?: number;
+const read = async (filepath: string) => {
+  const content = await fs.readFile(filepath, "utf8").catch(() => undefined)
+  if (content === undefined) {
+    logger.debug("instruction file skipped", { path: filepath, reason: "unavailable" })
+    return undefined
+  }
+  return { path: filepath, content }
 }
+```
 
-export interface A
-{"prompt_tokens":17116,"completion_tokens":4096,"total_tokens":21212,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+**New code**:
+```typescript
+const read = async (filepath: string): Promise<InstructionFile | "denied" | undefined> => {
+  try {
+    const content = await fs.readFile(filepath, "utf8")
+    return { path: filepath, content }
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
+      logger.debug("instruction file skipped", { path: filepath, reason: "NotFound" })
+      return undefined  // transient, caller may mark unavailable
+    }
+    if (err.code === "EACCES" || err.code === "EPERM") {
+      logger.debug("instruction file skipped", { path: filepath, reason: "denied" })
+      return "denied"  // stay absent
+    }
+    throw err
+{"prompt_tokens":12374,"completion_tokens":4096,"total_tokens":16470,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
-[Session: 293619d2-ced2-43e0-b564-2098cd9870bc]
-[Messages: 2, Tokens: 21212]
+[Session: db454442-9a2a-408b-bdde-76f245ca9c38]
+[Messages: 2, Tokens: 16470]
 
 ## Execution Instructions
 
