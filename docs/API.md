@@ -8622,3 +8622,140 @@ Semantics:
 - Retries only non-zero Git exits (`typeof err.exitCode === 'number'`). Spawn failures (`ENOENT` because `git` is not on PATH) are permanent configuration errors per AGENTS.md and are NOT retried.
 - Linear 50 ms sleep between attempts. No exponential multiplier — Windows file-lock contention clears sub-millisecond on a healthy filesystem.
 
+## Shared Model Retry Policy API
+
+Introduced in the 2026-10-18 upstream sync (ports opencode #56497). The `src/core/model-retry.ts` module exposes a single `retryable()` facade that combines the bounded-exponential-backoff primitive from `src/core/session/retry.ts` with the canonical `isRetryableError` classifier from `src/core/error-backoff.ts`.
+
+```typescript
+export interface RetryableError {
+  readonly retryable: boolean;
+  readonly retryAfterMs?: number;
+}
+
+export function isRetryable(error: unknown): boolean;
+
+export const DEFAULT_MODEL_RETRY_OPTIONS: Readonly<Required<Omit<RetryOptions, 'onRetry'>>>;
+
+export function retryable<T>(
+  fn: (attempt: number) => Promise<T>,
+  opts?: RetryOptions
+): Promise<T>;
+```
+
+### `isRetryable(error)`
+
+Returns `true` for transient failures, `false` for permanent ones. Checked in order of cheapest-first:
+
+1. Explicit `retryable: true` on the error (callers that mint their own classes).
+2. `isRetryableError(error)` from `src/core/error-backoff.ts` — rate-limit / xAI-capacity errors with `isFatal() === false`.
+3. HTTP status extracted from `err.status`, `err.statusCode`, or `err.response.status` matches `429 | 502 | 503 | 504`.
+4. `typeof err.code === 'string'` and `err.code` is one of `ECONNRESET | ECONNREFUSED | ETIMEDOUT | ENOTFOUND | EAI_AGAIN | EPIPE | EAGAIN | EBUSY`.
+
+Any other error — including `401`, `403`, `404`, `400`, `422`, `ENOENT`, `EACCES` — returns `false` and propagates on the first throw.
+
+### `DEFAULT_MODEL_RETRY_OPTIONS`
+
+```typescript
+{
+  maxAttempts: 3,   // initial attempt + 2 retries
+  baseMs: 500,      // 500 ms base delay
+  maxMs: 30_000,    // 30 s per-attempt cap
+  jitter: true,     // full jitter
+}
+```
+
+Mirrors upstream Effect-TS `Schedule.exponential(500ms, 2).jittered.compose(recurs(3))` bytewise. Exported so tests can override deterministically (`jitter: false`) and background jobs can lengthen the budget.
+
+### `retryable(fn, opts?)`
+
+Equivalent to `withRetry(fn, isRetryable, { ...DEFAULT_MODEL_RETRY_OPTIONS, ...opts })`. Caller-supplied `opts` override individual defaults — notably `onRetry` for stream-finalisation hooks and `maxAttempts` for background jobs that can afford a longer budget.
+
+```typescript
+import { retryable } from '../core/model-retry.js';
+
+const result = await retryable(
+  async (attempt) => {
+    return await provider.streamComplete(request);
+  },
+  {
+    onRetry: ({ attempt, delayMs, err }) => {
+      logger.warn('model.retry', { attempt, delayMs, code: (err as any)?.code });
+    },
+  }
+);
+```
+
+## Skill Scanner API
+
+Introduced in the 2026-10-18 upstream sync (ports opencode #55597). The `src/core/skill-scan.ts` module exposes a bounded breadth-first skill-file scanner.
+
+```typescript
+export const MAX_DEPTH: number; // 6
+export const IGNORED_DIRS: ReadonlySet<string>;
+export const ignore: readonly string[];
+export function scanSkills(root: string): Promise<string[]>;
+```
+
+Semantics:
+
+- `MAX_DEPTH = 6` — inclusive depth cap on directories visited. `0` means only the scan root is read.
+- `IGNORED_DIRS` — basenames always skipped regardless of depth: `node_modules`, `.git`, `dist`, `build`, `.next`, `target`, `.cache`, `.turbo`.
+- `ignore` — equivalent glob-style patterns for callers using a glob library elsewhere.
+- `scanSkills(root)` — returns the discovered skill file paths, sorted lexicographically. At depth 0 any `*.md` qualifies (legacy flat layout); below depth 0 only `SKILL.md` qualifies, and the subtree is pruned once one is found. `readdir` / `stat` failures are tolerated — the scanner treats a failed branch as "empty directory" rather than aborting the whole walk.
+
+## Filesystem Predicates API
+
+Introduced in the 2026-10-18 upstream sync (ports opencode fix #55817). The `src/core/filesystem.ts` module exposes predicates for sandbox-tolerant filesystem reads.
+
+```typescript
+export function isAccessDenied(err: unknown): boolean;
+export function isMissingOrDenied(err: unknown): boolean;
+export function statOptional(path: string): Promise<Stats | undefined>;
+```
+
+- `isAccessDenied(err)` — true when `err.code` is `EACCES` or `EPERM`.
+- `isMissingOrDenied(err)` — true for `ENOENT`, `EACCES`, or `EPERM`. Boot-time optional lookups (location discovery, global config, instruction files) that must degrade gracefully in both missing and denied cases.
+- `statOptional(path)` — `fs.stat` wrapper that returns `undefined` for missing OR denied paths; any other error (e.g. `EIO`) propagates so a corrupt disk or hostile filesystem remains visible.
+
+## Rule Discovery Load Result API
+
+Updated in the 2026-10-18 upstream sync (ports opencode's instruction-read fix). `src/config/rulesDiscovery.ts` now exposes a discriminated union for the per-file load outcome.
+
+```typescript
+export type LoadRuleFileResult = DiscoveredRule | 'denied' | null;
+```
+
+Semantics:
+
+- `DiscoveredRule` — the file was readable and non-empty; its content is included in the next `discoverRules()` return.
+- `'denied'` — the file (or its parent directory) returned `EACCES` / `EPERM`. Permanent skip for the whole session; retrying will not change the outcome.
+- `null` — legacy "unavailable or empty" sentinel. The file is missing, empty, not a file/symlink, or produced an unclassified error. Soft skip — the next discovery pass re-checks the path.
+
+Callers that need the distinction (sandboxed deployments, defensive logging) should branch on `'denied'` explicitly. Legacy callers that only need the "produced a rule or not" bit can keep using the `if (loaded)` truthiness check.
+
+## Message Bus Role Enum
+
+Updated in the 2026-10-18 upstream sync (ports opencode #56504). The `role` field of `MessageReceived` and `MessageSent` events in `src/bus/index.ts` now accepts a four-value union:
+
+```typescript
+role: z.enum(['user', 'assistant', 'system', 'idle']),
+```
+
+`idle` is a state-transition role used by the orchestrator to signal that the current turn has drained and the next user input is expected. TUI status-bar consumers and telemetry relays treat `idle` as a status update, not a chat payload; renderers that enumerate the message list should filter `role === 'idle'` before display.
+
+## GitHub Copilot Stream Parser Guards
+
+Updated in the 2026-10-18 upstream sync (ports opencode fix #56669). `parseCopilotResponseStream(chunk)` in `src/providers/github-copilot.ts` is now null-safe on forward-rolled Responses API servers that emit explicit `null` for optional fields.
+
+```typescript
+export function parseCopilotResponseStream(chunk: CopilotStreamChunk): ParsedCopilotEvent;
+```
+
+Guard order (first match wins):
+
+1. `!chunk || typeof chunk !== 'object' || typeof chunk.type !== 'string'` → `{ type: 'ignored', reason: 'untyped' }`.
+2. `delta` is coerced via `typeof chunk.delta === 'string' ? chunk.delta : ''` for `response.output_text.delta`, `response.reasoning.delta`, and `response.reasoning_opaque.delta`.
+3. `response.output_item.added` extracts `item` via `chunk.item ?? undefined` before reading `.type` or `.id`.
+
+Any unknown `type` field still returns `{ type: 'ignored', reason: chunk.type }` so a forward-rolled server cannot crash the decoder.
+
