@@ -4023,6 +4023,72 @@ Introduced in the 2026-10-17 upstream sync (`1.22.49`, ports upstream kilocode `
 - **The CLI silently skips sessions without `usage.jsonl`.** This is forward-compatible with older sessions that pre-date the ledger. Do NOT change the command to error when the ledger is absent — the vast majority of pre-1.22.49 sessions have no ledger and would otherwise crash the command.
 - **Table columns stay narrow.** `formatUsageTable` targets 100-col terminals and does NOT wrap. Widening the columns is a UX regression for operators on standard terminals; add a `--wide` or `--json` mode instead.
 
+## Shared Model Retry Policy (`src/core/model-retry.ts`)
+
+Introduced in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode #56497). References: [docs/ARCHITECTURE.md — Shared Model Retry Policy](ARCHITECTURE.md#shared-model-retry-policy-srccoremodel-retryts), [docs/API.md — Shared Model Retry Policy API](API.md#shared-model-retry-policy-api).
+
+- **Prefer `retryable()` over hand-rolled try/catch loops.** The whole point of the shared facade is to keep classification + backoff identical across every model-call site. A new caller that rewrites its own retry loop reintroduces the drift the upstream commit was explicitly reducing — the first review question on a new retry loop should be "why not `retryable()`?".
+- **Do NOT add new transient status codes without updating AGENTS.md.** `TRANSIENT_STATUS_CODES` is `{ 429, 502, 503, 504 }`. Any addition (e.g. `524`, `522`) must be mirrored in the AGENTS.md "Error classification" table (authoritative) so operators can diagnose a retry pattern without reading the source. Adding a status code to the retry set that is NOT genuinely transient (e.g. `401`, `403`) is a correctness regression that will burn deployment quota and mask misconfiguration.
+- **Keep `isRetryable` cheapest-first.** The current order (explicit flag → canonical classifier → HTTP status → Node code) short-circuits on the common fast paths. A reordering that puts the Node-code check first would slow every rate-limit error by one extra property lookup.
+- **Do NOT re-check free-tier rate limits in `isRetryable`.** The canonical `isRetryableError` classifier in `src/core/error-backoff.ts` already filters permanent free-tier rate limits. A duplicate check in `isRetryable` would either diverge (correctness regression) or be redundant (noise).
+- **`DEFAULT_MODEL_RETRY_OPTIONS` must stay bytewise-equivalent to the upstream schedule.** Upstream opencode uses `Schedule.exponential(500ms, 2).jittered.compose(recurs(3))`. Divergence makes future upstream merges harder to reason about and makes operator-side retry budget tuning cross-tool.
+- **`onRetry` is intentionally absent from the defaults.** Callers always opt in to the stream-finalisation hook explicitly. Baking `onRetry` into the defaults would make it hard to run a quiet retry (e.g. in a test fixture) without a tombstone log line.
+
+## Depth-Limited Skill Scanner (`src/core/skill-scan.ts`)
+
+Introduced in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode #55597). References: [docs/ARCHITECTURE.md — Depth-Limited Skill Scanner](ARCHITECTURE.md#depth-limited-skill-scanner-srccoreskill-scants), [docs/API.md — Skill Scanner API](API.md#skill-scanner-api).
+
+- **Do NOT raise `MAX_DEPTH` without a concrete repro.** The current value (6) is calibrated for every real monorepo skill layout we have seen. Raising it costs real walk time on `node_modules` symlink loops and recursive `.git` worktrees. If a specific layout needs more depth, document it in the PR and update tests to pin the new default.
+- **Keep `IGNORED_DIRS` synced with upstream opencode.** If upstream grows the set (e.g. adds `.yarn/cache`), update ours to match. Divergence masks a bug behind "it works on my machine" and makes merge conflicts harder.
+- **Tolerate `readdir` / `stat` failures everywhere.** The scanner is called at agent boot and must NOT abort on a sandboxed filesystem (`EACCES`), a broken symlink, or a mount error (`EIO`). The current `.catch(() => [])` on `readdir` and `.catch(() => null)` on `stat` are correctness-critical — a reviewer catching a strict `.catch(err => throw)` should block the PR.
+- **Short-circuit on `SKILL.md`.** A `SKILL.md` file IS the skill marker; recursing further would double-count or pick up unrelated markdown. Changing this to "walk into the subtree anyway" is a semantics regression that opencode specifically engineered against — do not re-introduce.
+- **Keep the flat-vs-nested behaviour.** At depth 0 every `*.md` is a candidate (legacy flat layout). Below depth 0 only `SKILL.md` qualifies. This is deliberate backward compatibility; collapsing both branches would either break the legacy layout or pick up every README.md in the tree.
+- **Sort the result deterministically.** `files.sort()` at the end gives callers stable ordering between runs regardless of underlying filesystem ordering. Removing the sort would make the agent prompt order non-deterministic and leak into test flakes.
+
+## Sandbox-Tolerant Filesystem Predicates (`src/core/filesystem.ts`)
+
+Introduced in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode fix #55817). References: [docs/ARCHITECTURE.md — Sandbox-Tolerant Filesystem Predicates](ARCHITECTURE.md#sandbox-tolerant-filesystem-predicates-srccorefilesystemts), [docs/API.md — Filesystem Predicates API](API.md#filesystem-predicates-api).
+
+- **Keep `isAccessDenied` and `isMissingOrDenied` separate.** Not every caller wants to collapse missing with denied — rule discovery explicitly separates them so a denied path becomes a permanent in-session skip while a missing path is retried on the next pass. Collapsing them into a single predicate is a correctness regression for the discovery path.
+- **`statOptional` must propagate non-expected errors.** Returning `undefined` for `EIO` would silently swallow a corrupt disk or a hostile filesystem. The `undefined` return is reserved for the two expected-but-degraded states (`ENOENT`, `EACCES`/`EPERM`).
+- **Mirror upstream opencode's `util/fs-util` surface.** Keep names and semantics in sync. Divergence makes future upstream merges harder; if upstream adds a new predicate (e.g. `isReadOnly`), add it with the same name here.
+
+## Rule Discovery Denied Sentinel (`src/config/rulesDiscovery.ts`)
+
+Introduced in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode's instruction-read fix). References: [docs/ARCHITECTURE.md — Rule Discovery Denied vs Missing](ARCHITECTURE.md#rule-discovery-denied-vs-missing-srcconfigrulesdiscoveryts), [docs/API.md — Rule Discovery Load Result API](API.md#rule-discovery-load-result-api).
+
+- **Treat the `LoadRuleFileResult` discriminated union as a stable contract.** New callers should branch on `'denied'` explicitly when they need the distinction (sandboxed deployments, defensive logging). Legacy callers that only need "produced a rule or not" can keep using the `if (loaded)` truthiness check — `'denied'` is truthy, so a legacy caller that does `if (loaded) push(loaded)` would push the string into `allFiles`. That is why `discoverRules` uses `if (loaded && loaded !== 'denied')` explicitly.
+- **A denied path MUST stay out of the discovered-rules set for the whole session.** Re-attempting the read will not change the outcome (an `EACCES` on a rule file is permanent). Retrying would just slow discovery without producing a rule.
+- **Log denied events at `debug`, not `warn`.** An `EACCES` on a user-local rule file is often expected (the operator does not have read permission on another user's `~/.alexi/rules`). `warn` would be noisy and operators would learn to ignore it; `debug` lets interested operators audit denied paths by raising log level.
+- **Do NOT change `null` to represent denied.** The legacy `null` sentinel is "unavailable or empty" — reusable, soft skip. Collapsing `'denied'` into `null` would re-introduce the per-pass retry on denied paths that this change was designed to prevent.
+- **Keep `classifyReadError` three-valued.** `notfound` | `denied` | `other`. Adding a fourth bucket (e.g. `isDirectory`) is fine, but preserve the existing three so the two call sites in `loadRuleFile` stay symmetric.
+
+## Message Bus `idle` Role (`src/bus/index.ts`)
+
+Updated in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode #56504). References: [docs/ARCHITECTURE.md — Message Bus `idle` Role](ARCHITECTURE.md#message-bus-idle-role-srcbusindexts), [docs/API.md — Message Bus Role Enum](API.md#message-bus-role-enum).
+
+- **The `role` enum is additive-only.** Removing or renaming an existing value (`user`, `assistant`, `system`, `idle`) is a wire-breaking change for TUI consumers and telemetry relays. New roles should be added at the end of the Zod enum literal.
+- **Treat `idle` as a state transition, not a chat payload.** TUI renderers that enumerate the message list MUST filter `role === 'idle'` before display. Rendering an `idle` event as a chat message is a UX regression; it would appear as a blank message or a status string in the transcript.
+- **Keep `content` required.** Even for `idle` events, `content` is a non-optional string so the schema shape stays stable. Publishers can pass an empty string or a short status description; dropping the field would break every structural consumer of the event.
+- **Don't filter `idle` server-side.** The event bus is intentionally promiscuous — it accepts `idle` so publishers don't get a Zod validation throw. Filtering is the consumer's responsibility (TUI vs transcript renderer have different needs).
+
+## Child-Process `close` Flush Fix
+
+Updated in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode fix #56321). References: [docs/ARCHITECTURE.md — Child-Process Flush Fix](ARCHITECTURE.md#child-process-flush-fix-close-vs-exit).
+
+- **Prefer `child.on('close', …)` over `child.on('exit', …)` for result settlement.** `exit` fires as soon as the process terminates, but data buffered in the OS pipe can still arrive on the reader side afterwards — resolving on `exit` therefore truncates trailing output. `close` fires after stdout/stderr pipes drain. If you add a new child-process-based tool, mirror this pattern.
+- **Keep the `exit`-based status transition when NOT reading stdout/stderr.** Code that only needs to know the child's exit code and does not read its output can still use `exit`. The `close` fix is specifically for pipe-reading call sites.
+- **Both call sites (`src/plugin/ruleCommandRunner.ts` and `src/tool/tools/background-process.ts`) must stay in sync.** If a third call site is added that reads stdout, it should also use `close` and reference opencode fix #56321 in the comment.
+
+## GitHub Copilot Null-Safe Parser (`src/providers/github-copilot.ts`)
+
+Updated in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode fix #56669). References: [docs/ARCHITECTURE.md — GitHub Copilot Null-Safe Stream Parser](ARCHITECTURE.md#github-copilot-null-safe-stream-parser-srcprovidersgithub-copilotts), [docs/PROVIDERS.md — GitHub Copilot Provider: Null-Safe Response Stream Parser](PROVIDERS.md#github-copilot-provider-null-safe-response-stream-parser-srcprovidersgithub-copilotts), [docs/API.md — GitHub Copilot Stream Parser Guards](API.md#github-copilot-stream-parser-guards).
+
+- **Prefer `?? undefined` over direct property access on potentially-null fields.** The Responses API has started sending explicit `null` where it previously omitted the field. `chunk.item?.type` throws on `item === null`; `(chunk.item ?? undefined)?.type` does not. If you add a new case to the parser, apply the same pattern.
+- **Keep the top-level untyped-chunk guard.** A `null` chunk, a non-object chunk, or a chunk whose `type` is not a string must return `{ type: 'ignored', reason: 'untyped' }` rather than throwing on the `switch` lookup. This is the first line of defence against a malformed stream event.
+- **Coerce `delta` via `typeof === 'string'`.** Both omitted and explicit-`null` deltas should land in the same empty-string bucket. Using `chunk.delta ?? ''` is NOT equivalent — `0` or `false` deltas (unlikely but possible on forward-rolled servers) would survive, whereas the parser specifically wants to accept only string deltas.
+- **Unknown `type` values stay in the `ignored` bucket.** The default-case path returns `{ type: 'ignored', reason: chunk.type }` so forward-rolled servers that add new event types do not crash the decoder. Removing this default is a reliability regression.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

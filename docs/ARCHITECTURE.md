@@ -8993,3 +8993,207 @@ Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream op
 - Non-object inputs always return `false` so the helper is safe to call on arbitrary `catch` values.
 - Keep in sync with: `src/providers/modelFetchErrors.ts` `TRANSIENT_FETCH_ERROR_REGEX`, `src/session/network.ts` `isRetryableConnectionReset`, `src/mcp/client.ts` `TRANSIENT_ERROR_CODES`, and the AGENTS.md "Error classification" section (authoritative).
 
+## Shared Model Retry Policy (`src/core/model-retry.ts`)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #56497 "extract shared retry policy"). The upstream commit reduced `session/runner/retry.ts` from 47 lines to 10 by having every caller compose a single shared primitive rather than hand-rolling its own try/catch loop. Alexi already shipped `src/core/session/retry.ts` (bounded exponential backoff + full jitter + onRetry hook) and `src/core/error-backoff.ts` (rate-limit / xAI-capacity classification); what was missing was a single model-focused *facade* that combined them into one `retryable()` wrapper for the generate / stream hot path.
+
+```mermaid
+flowchart TD
+    Call[retryable fn, opts] --> Merge[merge opts over DEFAULT_MODEL_RETRY_OPTIONS]
+    Merge --> WithRetry[withRetry fn, isRetryable, merged]
+    WithRetry --> Attempt[attempt n: run fn]
+    Attempt -->|resolved| Done[return value]
+    Attempt -->|rejected| Classify{isRetryable err?}
+    Classify -->|yes & attempts < max| Backoff[sleep baseMs * 2^n with jitter, capped at maxMs]
+    Backoff --> Attempt
+    Classify -->|no OR exhausted| Throw[rethrow err]
+    Classify --> Check1{err.retryable === true?}
+    Check1 -->|yes| Yes[return true]
+    Check1 -->|no| Check2{isRetryableError err?}
+    Check2 -->|yes| Yes
+    Check2 -->|no| Check3{status in 429/502/503/504?}
+    Check3 -->|yes| Yes
+    Check3 -->|no| Check4{code in TRANSIENT_ERROR_CODES?}
+    Check4 -->|yes| Yes
+    Check4 -->|no| No[return false]
+```
+
+### Public surface
+
+- `RetryableError` interface — `{ readonly retryable: boolean; readonly retryAfterMs?: number }`. Mirrors the upstream interface so callers that mint their own error classes can declare them `extends RetryableError`.
+- `isRetryable(error: unknown): boolean` — classification helper. See flow diagram above.
+- `DEFAULT_MODEL_RETRY_OPTIONS: Readonly<Required<Omit<RetryOptions, 'onRetry'>>>` — `{ maxAttempts: 3, baseMs: 500, maxMs: 30_000, jitter: true }`. Chosen to mirror the upstream Effect-TS `Schedule.exponential(500ms, 2).jittered.compose(recurs(3))` schedule bytewise.
+- `retryable<T>(fn: (attempt: number) => Promise<T>, opts?: RetryOptions): Promise<T>` — wraps a model-call producer with the shared policy. Behaves identically to `withRetry` with `isRetryable` as the classifier and `DEFAULT_MODEL_RETRY_OPTIONS` as the baseline schedule.
+
+### Design notes
+
+- Three transient buckets per the AGENTS.md error contract: rate limits (HTTP 429, excluding permanent free-tier limits), transient server errors (HTTP 502 / 503 / 504), and network blips (`ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `EPIPE`, `EAGAIN`, `EBUSY`). Permanent failures (4xx auth / validation, free-tier rate limits, content-filter rejections) are NOT retried — retrying only burns the deployment quota without changing the outcome.
+- Backoff defaults match the upstream schedule bytewise: 500 ms base, 2× multiplier with full jitter, max 30 s per attempt, 3 attempts total (initial + 2 retries). No single backoff ever stalls an interactive session for more than half a minute.
+- `isRetryable` defers to the canonical `isRetryableError` classifier from `src/core/error-backoff.ts` for rate-limit / xAI-capacity errors so Alexi stays in sync with the single source of truth for the transient-vs-permanent split. That classifier already filters permanent free-tier rate limits — do not re-check them in `isRetryable`.
+- `DEFAULT_MODEL_RETRY_OPTIONS` is exported so tests can override deterministically (`jitter: false`) and background jobs can lengthen the budget without reinventing the policy. The `onRetry` option is deliberately absent from the defaults so callers always opt in to the stream-finalisation hook explicitly.
+- `extractStatusCode` tolerates the many shapes upstream libraries use (`err.status`, `err.statusCode`, `err.response.status`) so the classifier works across the SAP AI Core orchestration adapter, undici `fetch`, and the AI SDK provider wrappers without caller-side glue.
+
+## Depth-Limited Skill Scanner (`src/core/skill-scan.ts`)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #55597 "bound skill discovery"). Replaces unbounded glob expansion (`{*.md,**/SKILL.md}`) with a breadth-first walk that enforces depth and noise-directory caps so a mis-rooted scan (e.g. starting at `/`) cannot stall the agent loop.
+
+```mermaid
+flowchart TD
+    Enter[scanSkills root] --> Init[queue = [{dir: root, depth: 0}]]
+    Init --> Loop{queue non-empty?}
+    Loop -->|no| Sort[sort files lexicographically]
+    Sort --> Return[return files]
+    Loop -->|yes| Pop[pop item]
+    Pop --> ReadDir[readdir item.directory]
+    ReadDir -->|fails EACCES/EIO| EmptyDir[treat as empty]
+    ReadDir -->|ok| Filter[filter: skip dotfiles + IGNORED_DIRS]
+    EmptyDir --> SkipItem[continue]
+    Filter --> Classify[classify each entry file/directory/other]
+    Classify --> HasSkill{SKILL.md among children?}
+    HasSkill -->|yes| PushSkill[push SKILL.md path, continue]
+    HasSkill -->|no & depth==0| CollectMd[push each *.md child]
+    HasSkill -->|no & depth>0| EnqueueOnly
+    CollectMd --> EnqueueOnly{depth < MAX_DEPTH?}
+    EnqueueOnly -->|yes| EnqueueChildren[enqueue each directory child with depth+1]
+    EnqueueOnly -->|no| SkipItem
+    EnqueueChildren --> Loop
+    PushSkill --> Loop
+    SkipItem --> Loop
+```
+
+### Public surface
+
+- `MAX_DEPTH = 6` — maximum directory depth the scanner will descend into. `0` means only the scan root itself is visited. The upstream default is generous enough for every real monorepo skill layout and short enough to prevent runaway walks on `node_modules` symlink loops or recursive `.git` worktrees.
+- `IGNORED_DIRS: ReadonlySet<string>` — directory basenames always skipped regardless of depth: `node_modules`, `.git`, `dist`, `build`, `.next`, `target`, `.cache`, `.turbo`. Matches upstream opencode's list; keep synced if upstream grows the set.
+- `ignore: readonly string[]` — glob-style ignore patterns (`**/node_modules/**`, `**/.git/**`, `**/.*`, `**/.*/**`) re-exported for callers that still use a glob library elsewhere (e.g. the test harness).
+- `scanSkills(root: string): Promise<string[]>` — BFS scan of `root` returning the discovered skill file paths, sorted lexicographically so callers can rely on stable ordering between runs.
+
+### Design notes
+
+- At the scan root (depth 0) every `*.md` file is a candidate (legacy flat layout: one skill per markdown file in the root directory). Below the root only files literally named `SKILL.md` qualify, and the subtree is pruned once one is found — a `SKILL.md` file *is* the skill marker and recursing further would double-count sub-skills that should be scanned separately via their own `SKILL.md`.
+- `readdir` can fail on sandboxed filesystems (`EACCES`) or broken mount points (`EIO`). The scanner treats any failure as "empty directory" via `.catch(() => [])` so the scan continues on the next queued entry rather than aborting the whole walk.
+- Symbolic links are resolved up front via the per-entry `classify` helper so the caller does not need a second round of `stat` calls. A broken symlink or stat failure yields `type: 'other'` and is ignored.
+- `MAX_DEPTH` acts as an inclusive depth cap on **directories visited**, not on **files returned**. The final level's children are still inspected (so their files are collected) but their descendants are not enqueued. Comparison is `item.depth < MAX_DEPTH` so a scanner started at depth 0 visits 7 levels of directories total.
+- Keeping this behaviour isolated in a dedicated module means `src/skill/index.ts` can migrate to it one call site at a time, and tests can exercise the bounds without spinning up a full skill registry.
+
+## Sandbox-Tolerant Filesystem Predicates (`src/core/filesystem.ts`)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode fix #55817). When Alexi runs inside a sandboxed environment (SAP BTP job runners, hardened containers, GitHub Codespaces, read-only filesystems), filesystem reads of ancestor directories — notably the global config / instructions / location discovery paths — can fail with `EACCES` or `EPERM` instead of `ENOENT`. Historically Alexi treated these as fatal and aborted boot. Treating a denied path as "unavailable" (same bucket as missing) lets Alexi still start up with a reduced-but-functional configuration.
+
+### Public surface
+
+- `isAccessDenied(err: unknown): boolean` — true when `err.code` is `EACCES` or `EPERM`. Mirrors upstream `isAccessDenied` from opencode's `util/fs-util`.
+- `isMissingOrDenied(err: unknown): boolean` — true for `ENOENT`, `EACCES`, or `EPERM`. Convenience predicate for boot-time optional lookups that must degrade gracefully in both cases.
+- `statOptional(path: string): Promise<Stats | undefined>` — `fs.stat` wrapper that returns `undefined` for missing OR denied paths; any other error (e.g. `EIO`) propagates.
+
+### Design notes
+
+- The split between `isAccessDenied` and `isMissingOrDenied` is deliberate. Not every caller wants to collapse missing with denied — rule discovery (`src/config/rulesDiscovery.ts`) explicitly separates them so a denied path becomes a permanent skip while a missing path is retried on the next pass. Boot-time location discovery, on the other hand, cannot usefully retry either case and uses `isMissingOrDenied` for brevity.
+- `statOptional` throws on genuine failures (`EIO`, `EROFS` on a write path, etc.) so a corrupt disk or a hostile filesystem is visible to the caller instead of being silently swallowed. The `undefined` return is reserved for the two expected-but-degraded states.
+- Mirrors upstream opencode's `util/fs-util` surface. Keep names and semantics in sync — divergence makes future upstream merges harder to reason about.
+
+## Rule Discovery Denied vs Missing (`src/config/rulesDiscovery.ts`)
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode's "instruction-read fix"). The historical contract was that `loadRuleFile(filePath, source, originDir)` returned `DiscoveredRule | null`, where `null` collapsed every failure mode (`ENOENT`, `EACCES`, broken symlink, empty content) into a single "skip and try again later" bucket. For sandboxed deployments that bucketing is wrong — an `EACCES` on a rule file is permanent and retrying produces the same error indefinitely.
+
+```mermaid
+flowchart TD
+    Load[loadRuleFile path, source, originDir] --> Stat{statSync path}
+    Stat -->|ENOENT| NullA[return null transient]
+    Stat -->|EACCES/EPERM| Denied1[logger.debug denied + return 'denied']
+    Stat -->|other error| NullB[return null soft miss]
+    Stat -->|ok, not file/symlink| NullC[return null]
+    Stat -->|ok, is file| Read{readFileSync utf-8}
+    Read -->|ENOENT/other| NullD[return null]
+    Read -->|EACCES/EPERM| Denied2[logger.debug denied + return 'denied']
+    Read -->|ok, empty| NullE[return null]
+    Read -->|ok, content| Rule[return DiscoveredRule]
+
+    Rule --> Discover[discoverRules filter]
+    NullA --> Discover
+    NullB --> Discover
+    NullC --> Discover
+    NullD --> Discover
+    NullE --> Discover
+    Denied1 --> Discover
+    Denied2 --> Discover
+
+    Discover --> Branch{loaded truthy & !== denied?}
+    Branch -->|yes| Push[allFiles.push loaded]
+    Branch -->|no| Skip[omit from set]
+```
+
+### Public surface changes
+
+- New exported type `LoadRuleFileResult = DiscoveredRule | 'denied' | null`.
+- Internal `classifyReadError(err): 'notfound' | 'denied' | 'other'` splits `ENOENT` (transient — editor save in progress, race during symlink swap) from `EACCES` / `EPERM` (permanent — permission denial that requires operator intervention). See `AGENTS.md#error-classification`.
+- `loadRuleFile` now returns `'denied'` from both the `statSync` and `readFileSync` catches when `classifyReadError(err) === 'denied'`, logging `rule file skipped (denied): <path>` at `debug`. Both `notfound` and `other` fall through to the legacy "skip and try again later" behaviour via `null`.
+- `discoverRules` uses `if (loaded && loaded !== 'denied') { allFiles.push(loaded); }` so a denied path stays absent from the discovered-rules set across the whole session (retrying will not change the outcome) while a `null` result (file genuinely missing OR empty content) is treated the same as before.
+
+### Design notes
+
+- `null` is retained as the legacy "either unavailable or empty" sentinel so existing call sites that don't care about the distinction still work. New code should prefer the explicit `'denied'` string over inspecting the discriminated union manually.
+- The `'denied'` sentinel is a string, not a `Symbol`, because the result crosses an exported type boundary (`LoadRuleFileResult`) and symbols do not survive structural type checks across compilation units. A string literal in the union is TypeScript-friendly and still unambiguous.
+- Logging denied events at `debug` (not `warn`) is intentional: an `EACCES` on a user-local rule file is often expected (the operator does not have read permission on another user's `~/.alexi/rules`) and would be noisy at `info`. Operators who want to audit denied paths can raise log level.
+
+## Message Bus `idle` Role (`src/bus/index.ts`)
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #56504 "accept idle in message-type filter"). `idle` is now a legitimate message role used to signal that the orchestrator has drained the current turn and is waiting for the next user input.
+
+### Change
+
+The `role` field of both `MessageReceived` and `MessageSent` events now accepts the four-value union instead of the previous three-value union:
+
+```typescript
+export const MessageReceived = defineEvent(
+  'message.received',
+  z.object({
+    sessionId: z.string().optional(),
+    role: z.enum(['user', 'assistant', 'system', 'idle']),
+    content: z.string(),
+    timestamp: z.number(),
+  })
+);
+```
+
+The same expansion applies to `MessageSent`.
+
+### Design notes
+
+- Downstream consumers (TUI status bar, telemetry relays) treat `idle` as a state transition rather than a chat payload, but the event bus still has to accept it so publishers don't get a Zod validation throw. The role-based routing on the consumer side is responsible for mapping `idle` to a status update rather than appending it to the message list.
+- Purely additive expansion of the accepted values. No change to the serialised wire shape when callers do not emit `idle`.
+- The `content` field is still required on `idle` events to keep the schema shape stable. Publishers that emit `idle` pass an empty string or a short status description; consumers that render chat messages should filter `role === 'idle'` before rendering.
+
+## Child-Process Flush Fix: `close` vs `exit`
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode fix #56321). Two call sites that previously registered a `child.on('exit', ...)` listener to settle their result have been switched to `child.on('close', ...)`:
+
+- `src/plugin/ruleCommandRunner.ts` — `runRuleCommandLenient`, the legacy / materialization path for plugin rule commands.
+- `src/tool/tools/background-process.ts` — the `start` action's exit handler on tracked background processes.
+
+### Rationale
+
+`exit` fires as soon as the process terminates, but data buffered in the OS pipe can still arrive on the reader side afterwards — resolving on `exit` therefore truncates trailing output. `close` fires AFTER stdout/stderr pipes drain, so any trailing bytes written in the final millisecond of child life are captured instead of dropped.
+
+### Impact
+
+- `runRuleCommandLenient`: a plugin rule command that finishes with a short burst of output (e.g. `echo 'rule line'; exit 0`) could lose its final line on `exit`. The fix captures it reliably.
+- `background-process`: the status transition `running → stopped/failed` now reflects a flushed-stdio state. A late port-detection read scheduled before the exit no longer sees a stale `running` status after the child has terminated.
+
+No API change — the only observable behaviour difference is that trailing bytes written in the final millisecond of child life are now captured instead of dropped.
+
+## GitHub Copilot Null-Safe Stream Parser (`src/providers/github-copilot.ts`)
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode fix #56669). The OpenAI-compatible Responses API now sends explicit `null` for optional fields (`delta`, `item`, `output`) instead of omitting them. A naive `chunk.delta ?? ''` handles that for scalar strings, but nested property access on a `null` `item` would still throw.
+
+### Changes to `parseCopilotResponseStream`
+
+- Top-level guard: a `null` or non-object `chunk` (and any chunk whose `type` is missing or not a string) returns `{ type: 'ignored', reason: 'untyped' }` instead of throwing on the `switch (chunk.type)` lookup.
+- `delta` normalisation: `const delta = typeof chunk.delta === 'string' ? chunk.delta : ''`. Both omitted and explicit-`null` deltas land in the same bucket. Applied to `response.output_text.delta`, `response.reasoning.delta`, and `response.reasoning_opaque.delta`.
+- `response.output_item.added` extracts `item` through `chunk.item ?? undefined` before reading `.type` or `.id` — treating `null` as absent rather than reading `.type` on `null`.
+
+### Design notes
+
+- The parser is forward-compatible with any future field that the Responses API may start sending as explicit `null`: the top-level `isTypedStreamEvent`-shaped guard, the `typeof === 'string'` delta coercion, and the nullish-coalescing on nested property access combine to make `null` structurally equivalent to "absent" at every known access point.
+- Mirrors the broader stream-event tolerance pattern established by `src/providers/protocols/stream-events.ts` (see [Stream Event Classification](#stream-event-classification-srcprovidersprotocolsstream-eventsts)): decoders prefer `ignored` over `throw` so a forward-rolled upstream server stays usable.
+

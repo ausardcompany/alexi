@@ -8,78 +8,18 @@ You are a senior software architect analyzing upstream changes from three AI cod
 ## Diff Report
 
 # Upstream Changes Report
-Generated: 2026-10-17 10:15:44
+Generated: 2026-10-18 10:30:55
 
 ## Summary
-- kilocode: 62 commits, 141 files changed
-- opencode: 29 commits, 141 files changed
+- kilocode: 2 commits, 1 files changed
+- opencode: 33 commits, 199 files changed
 
-## kilocode Changes (3a3271de2..1552877e8)
+## kilocode Changes (1552877e8..2a1903f29)
 
 ### Commits
 
-- 1552877e8 - release: v7.8.14 (kilo-maintainer[bot], 2026-10-16)
-- 297dbf8e3 - Merge pull request #15185 from Kilo-Org/feat/agent-usage-aggregation (Kirill Kalishev, 2026-10-16)
-- a9d5f293f - Merge pull request #15186 from Kilo-Org/jetbrains/release/v7.1.11 (Kirill Kalishev, 2026-10-16)
-- db5fb2ae1 - fix(cli): harden agent usage outcome precedence and index coverage (kirillk, 2026-10-16)
-- 5b2afc3fd - docs(jetbrains): edit changelog for v7.1.11 (Kirill Kalishev, 2026-10-16)
-- f620746e3 - release(jetbrains): v7.1.11 (kilo-maintainer[bot], 2026-10-16)
-- 88312a65b - feat(cli): add project-scoped agent usage aggregation (kirillk, 2026-10-16)
-- 6e1cb4519 - Merge pull request #15184 from Kilo-Org/chore/jetbrains-cli-pin-v7.8.13 (Kirill Kalishev, 2026-10-16)
-- 0d2e17ca8 - chore(jetbrains): bump CLI pin to v7.8.13 (kilo-maintainer[bot], 2026-10-16)
-- b95fd1271 - release: v7.8.13 (kilo-maintainer[bot], 2026-10-16)
-- 7801b4e55 - Merge pull request #15180 from Kilo-Org/tidy-reef (Kirill Kalishev, 2026-10-16)
-- 10062ecff - Merge pull request #15179 from Kilo-Org/swift-yak (Kirill Kalishev, 2026-10-16)
-- 0f4936df1 - fix(cli): persist late OpenRouter reasoning details for replay (#15104) (Christiaan Arnoldus, 2026-10-16)
-- ea8815511 - fix(jetbrains): guard deferred prompt dispatch (kirillk, 2026-10-16)
-- ec376c55b - fix(cli): keep worker console writes off the TUI frame (kirillk, 2026-10-16)
-- 90791a055 - fix(jetbrains): load editor context ignores off EDT (kirillk, 2026-10-16)
-- 2c01c3680 - Merge pull request #15131 from Kilo-Org/mighty-jaguar (Kirill Kalishev, 2026-10-16)
-- 68587ee75 - Merge pull request #15166 from Kilo-Org/chore/jetbrains-gradle-bump (Bruno Agatão, 2026-10-16)
-- 1c500df6c - Merge pull request #15134 from Kilo-Org/shiny-grove (Kirill Kalishev, 2026-10-16)
-- e0f25c5da - chore: remove v2 port implementation plan (kirillk, 2026-10-16)
-- 37397495a - chore(jetbrains): bump gradle wrapper to 9.8.1 and openapi-generator to 7.26.0 (Bruno Agatao, 2026-10-16)
-- 03dd86a37 - Merge pull request #14326 from Kilo-Org/docs/auto-sync/other (Andrea Giammarchi, 2026-10-16)
-- 7da1559c0 - Merge branch 'main' into docs/auto-sync/other (Andrea Giammarchi, 2026-10-16)
-- 32b825aac - Merge pull request #15158 from Kilo-Org/refactor/community-maintainers-file (Bruno Agatão, 2026-10-16)
-- 91caec10b - Merge pull request #14925 from abdulhusainahk/fix/14882-workspace-scope-hint (Andrea Giammarchi, 2026-10-16)
-- 7fd05e998 - Merge branch 'main' into fix/14882-workspace-scope-hint (Andrea Giammarchi, 2026-10-16)
-- 384f064df - Merge pull request #15041 from hdcodedev/fix/review-comments-from-history (Andrea Giammarchi, 2026-10-16)
-- 5b7b62e3e - Merge branch 'main' into fix/14882-workspace-scope-hint (Andrea Giammarchi, 2026-10-16)
-- 4e527a9d3 - Merge pull request #15156 from Kilo-Org/refactor/community-triage-simplify-labels (Bruno Agatão, 2026-10-16)
-- e7d732d08 - Merge pull request #15045 from hdcodedev/fix/worktree-unicode-untracked (Andrea Giammarchi, 2026-10-16)
-- e694e67d4 - Merge branch 'main' into fix/worktree-unicode-untracked (Andrea Giammarchi, 2026-10-16)
-- 9eb607fdb - Merge branch 'main' into fix/review-comments-from-history (Andrea Giammarchi, 2026-10-16)
-- 7013eeed7 - Merge pull request #15124 from Kilo-Org/igor/agent-briefing-cli-status (Igor Šćekić, 2026-10-16)
-- 60c97b1a5 - Merge pull request #15159 from Kilo-Org/igor/remote-list-agents (Igor Šćekić, 2026-10-16)
-- 34daa5c10 - fix(ci): harden v2 port tracker inputs (kirillk, 2026-10-16)
-- ead7fde20 - docs: note that a missing member token fails the jobs (Bruno Agatao, 2026-10-16)
-- b61c1f688 - fix: fail when the member token is not set (Bruno Agatao, 2026-10-16)
-- 6cc2630a9 - chore(ci): list all PRs in community sweep summary (Bruno Agatao, 2026-10-16)
-- 7420e70bd - feat(cli): list remote agents for the mobile app (Igor Šćekić, 2026-10-16)
-- 084ce2d71 - docs: describe the shared maintainers list (Bruno Agatao, 2026-10-16)
-- 4c6aac369 - refactor: read extra maintainers from a shared file (Bruno Agatao, 2026-10-16)
-- 022bad9b4 - docs: spell out the priority rules and label upkeep (Bruno Agatao, 2026-10-16)
-- 5d45168f7 - fix: update existing community labels when their definition changes (Bruno Agatao, 2026-10-16)
-- bc3e9ed0c - docs: fix digest wording (Bruno Agatao, 2026-10-16)
-- b81b960e8 - docs: describe the community triage digest (Bruno Agatao, 2026-10-16)
-- d24f710c1 - refactor: simplify community triage labels and set priority upfront (Bruno Agatao, 2026-10-16)
-- 71f96c3ea - feat(ci): track merged core PRs for the opencode v2 rewrite (kirillk, 2026-10-15)
-- 9204aac51 - test(cli): assert the MCP refresh single-flight entry is cleared (kirillk, 2026-10-15)
-- fb9277937 - fix(cli): bound the MCP token refresh with the connect timeout (kirillk, 2026-10-15)
-- f9b632fd6 - fix(cli): refresh expired MCP OAuth tokens automatically (kirillk, 2026-10-15)
-- 2b477699a - fix(cli): keep an event's status when a full sync samples concurrently (Igor Šćekić, 2026-10-15)
-- feb79e46a - fix(cli): contain status derivation failures and transition key collisions (Igor Šćekić, 2026-10-15)
-- a85b9a8ba - fix(cli): preserve session status occurrence timing (Igor Šćekić, 2026-10-15)
-- 6fcbc6683 - fix(agent-manager): keep new files with non-ASCII names when moving a chat to a worktree (hdcode.dev, 2026-10-14)
-- 1843270da - Merge branch 'main' into fix/review-comments-from-history (hdcode.dev, 2026-10-13)
-- 32bc7248e - fix(vscode): send review comments from the Changes view while History is open (hdcode.dev, 2026-10-13)
-- 6a199f250 - fix(vscode): complete workspace scope locales and CI baselines (Abdul Kanchwala, 2026-10-09)
-- 4516a4832 - fix(vscode): disclose first-folder chat scope in multi-root workspaces (Abdul Kanchwala, 2026-10-09)
-- d1d758019 - Merge remote-tracking branch 'origin/main' into HEAD (github-actions[bot], 2026-09-24)
-- 7735b792b - Merge remote-tracking branch 'origin/main' into HEAD (github-actions[bot], 2026-09-23)
-- aecd83356 - Merge remote-tracking branch 'origin/main' into HEAD (github-actions[bot], 2026-09-22)
-- 551c1599d - docs: sync other with merged PRs (2026-09-20) (github-actions[bot], 2026-09-20)
+- 2a1903f29 - Merge pull request #15188 from Kilo-Org/chore/jetbrains-cli-pin-v7.8.14 (Kirill Kalishev, 2026-10-17)
+- 08687cc77 - chore(jetbrains): bump CLI pin to v7.8.14 (kilo-maintainer[bot], 2026-10-16)
 
 ### Changed Files by Category
 
@@ -96,202 +36,52 @@ Generated: 2026-10-17 10:15:44
 (no changes)
 
 #### Core (**/core/)
-- `packages/core/package.json` (+1, -1)
+(no changes)
 
 #### Other Changes
-- `.changeset/agent-manager-agent-validation.md` (+0, -5)
-- `.changeset/agent-manager-custom-agent-field.md` (+0, -5)
-- `.changeset/anaconda-yellow-hover.md` (+0, -5)
-- `.changeset/cli-brand-yellow.md` (+0, -5)
-- `.changeset/custom-delegator-edit-permissions.md` (+0, -5)
-- `.changeset/dialog-filter-home-end.md` (+0, -5)
-- `.changeset/jetbrains-brand-yellow.md` (+0, -5)
-- `.changeset/openai-compatible-tool-content.md` (+0, -5)
-- `.changeset/provider-failure-reason.md` (+0, -6)
-- `.changeset/tidy-terminal-restarts.md` (+0, -5)
-- `.changeset/vscode-brand-yellow.md` (+0, -5)
-- `.changeset/worktree-base-branch-header.md` (+0, -5)
-- `.github/community-maintainers.json` (+14, -0)
-- `.github/v2-port/README.md` (+117, -0)
-- `.github/v2-port/gate.mjs` (+198, -0)
-- `.github/v2-port/gate.test.mjs` (+361, -0)
-- `.github/v2-port/issue.mjs` (+273, -0)
-- `.github/v2-port/issue.test.mjs` (+433, -0)
-- `.github/v2-port/prompt.md` (+54, -0)
-- `.github/workflows/community-label.yml` (+1, -2)
-- `.github/workflows/community-sweep.yml` (+0, -1)
-- `.github/workflows/community-triage-test.yml` (+1, -0)
-- `.github/workflows/v2-port-tracker.yml` (+170, -0)
-- `.kilo/skills/pr-track-v1/SKILL.md` (+212, -0)
-- `artifacts/glm52-rise-video/package.json` (+1, -1)
-- `bun.lock` (+33, -33)
-- `docs/community-triage.md` (+74, -22)
-- `package.json` (+1, -1)
-- `packages/client/package.json` (+1, -1)
-- `packages/codemode/package.json` (+1, -1)
-- `packages/effect-drizzle-sqlite/package.json` (+1, -1)
-- `packages/effect-sqlite-node/package.json` (+1, -1)
-- `packages/extensions/zed/extension.toml` (+6, -6)
-- `packages/http-recorder/package.json` (+1, -1)
-- `packages/httpapi-codegen/package.json` (+1, -1)
-- `packages/kilo-console/package.json` (+1, -1)
-- `packages/kilo-docs/LEARNINGS.md` (+3, -3)
-- `packages/kilo-docs/package.json` (+1, -1)
-- `packages/kilo-docs/public/img/screenshot-tests/kilo-vscode/visual-regression/chat-workspace-scope/multiple-folders-chromium-linux.png` (+3, -0)
-- `packages/kilo-docs/public/img/screenshot-tests/kilo-vscode/visual-regression/chat-workspace-scope/narrow-long-name-chromium-linux.png` (+3, -0)
-- `packages/kilo-docs/public/img/screenshot-tests/kilo-vscode/visual-regression/chat-workspace-scope/onboarding-chromium-linux.png` (+3, -0)
-- `packages/kilo-docs/public/img/screenshot-tests/kilo-vscode/visual-regression/chat-workspace-scope/single-folder-chromium-linux.png` (+3, -0)
-- `packages/kilo-gateway/package.json` (+1, -1)
-- `packages/kilo-i18n/package.json` (+1, -1)
-- `packages/kilo-indexing/package.json` (+1, -1)
-- `packages/kilo-jetbrains/CHANGELOG.md` (+29, -0)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/SessionUi.kt` (+23, -19)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/context/EditorContextGatherer.kt` (+1, -1)
-- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/context/KiloIgnoreCache.kt` (+7, -2)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/SessionUiEditorSelectionTest.kt` (+1, -1)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/context/EditorContextGathererTest.kt` (+6, -5)
-- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/context/KiloIgnoreCacheTest.kt` (+5, -4)
-- `packages/kilo-jetbrains/gradle.properties` (+1, -1)
-- `packages/kilo-jetbrains/gradle/libs.versions.toml` (+1, -1)
-- `packages/kilo-jetbrains/gradle/wrapper/gradle-wrapper.jar` (+-, --)
-- `packages/kilo-jetbrains/gradle/wrapper/gradle-wrapper.properties` (+1, -1)
 - `packages/kilo-jetbrains/package.json` (+1, -1)
-- `packages/kilo-memory/package.json` (+1, -1)
-- `packages/kilo-sandbox/package.json` (+1, -1)
-- `packages/kilo-telemetry/package.json` (+1, -1)
-- `packages/kilo-ui/package.json` (+1, -1)
-- `packages/kilo-vscode/CHANGELOG.md` (+28, -0)
-- `packages/kilo-vscode/package.json` (+1, -1)
-- `packages/kilo-vscode/src/KiloProvider.ts` (+19, -0)
-- `packages/kilo-vscode/src/agent-manager/git-transfer.ts` (+3, -2)
-- `packages/kilo-vscode/tests/fixtures/welcome-recent-sessions.tsx` (+10, -7)
-- `packages/kilo-vscode/tests/package.json` (+1, -1)
-- `packages/kilo-vscode/tests/setup/vscode-mock.ts` (+1, -0)
-- `packages/kilo-vscode/tests/unit/chat-input-route.test.ts` (+12, -0)
-- `packages/kilo-vscode/tests/unit/git-transfer.test.ts` (+26, -0)
-- `packages/kilo-vscode/webview-ui/src/components/chat/SidebarEmptyState.tsx` (+2, -0)
-- `packages/kilo-vscode/webview-ui/src/components/chat/WelcomeEmptyState.tsx` (+2, -0)
-- `packages/kilo-vscode/webview-ui/src/components/chat/WorkspaceScopeHint.tsx` (+49, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ar.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/br.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/bs.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/da.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/de.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/en.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/es.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/fa.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/fr.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/it.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ja.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ko.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/nl.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/no.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/pl.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/ru.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/th.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/tr.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/uk.ts` (+5, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/zh.ts` (+4, -0)
-- `packages/kilo-vscode/webview-ui/src/i18n/zht.ts` (+3, -0)
-- `packages/kilo-vscode/webview-ui/src/stories/workspace-scope.stories.tsx` (+57, -0)
-- `packages/kilo-vscode/webview-ui/src/styles/welcome.css` (+28, -0)
-- `packages/kilo-vscode/webview-ui/src/types/messages/extension-messages.ts` (+6, -0)
-- `packages/kilo-vscode/webview-ui/src/types/messages/webview-messages.ts` (+1, -0)
-- `packages/kilo-vscode/webview-ui/src/utils/chat-input-route.ts` (+3, -2)
-- `packages/kilo-web-ui/package.json` (+1, -1)
-- `packages/llm/package.json` (+1, -1)
-- `packages/opencode/CHANGELOG.md` (+26, -0)
-- `packages/opencode/package.json` (+1, -1)
-- `packages/opencode/src/cli/tui/worker.ts` (+2, -0)
-- `packages/opencode/src/kilo-sessions/ingest-queue.ts` (+22, -7)
-- `packages/opencode/src/kilo-sessions/kilo-sessions.ts` (+82, -67)
-- `packages/opencode/src/kilo-sessions/remote-agent-catalog.ts` (+57, -0)
-- `packages/opencode/src/kilo-sessions/remote-sender.ts` (+55, -0)
-- `packages/opencode/src/kilo-sessions/status-sync.ts` (+67, -0)
-- `packages/opencode/src/kilocode/agent-usage/index.ts` (+366, -0)
-- `packages/opencode/src/kilocode/cli/cmd/tui/worker-console.ts` (+62, -0)
-- `packages/opencode/src/kilocode/mcp/refresh.ts` (+127, -0)
-- `packages/opencode/src/kilocode/session/reasoning-replay.ts` (+98, -0)
-- `packages/opencode/src/mcp/index.ts` (+10, -0)
-- `packages/opencode/src/session/processor.ts` (+21, -0)
-- `packages/opencode/test/kilocode/agent-usage/agent-usage.test.ts` (+458, -0)
-- `packages/opencode/test/kilocode/cli/tui/worker-console.test.ts` (+117, -0)
-- `packages/opencode/test/kilocode/mcp/refresh-expired.test.ts` (+162, -0)
-- `packages/opencode/test/kilocode/session/reasoning-replay.test.ts` (+437, -0)
-- `packages/opencode/test/kilocode/sessions/ingest-queue.test.ts` (+73, -0)
-- `packages/opencode/test/kilocode/sessions/kilo-sessions-status.test.ts` (+172, -0)
-- `packages/opencode/test/kilocode/sessions/remote-agent-catalog.test.ts` (+189, -0)
-- `packages/opencode/test/kilocode/sessions/status-sync.test.ts` (+159, -0)
-- `packages/plugin-atomic-chat/package.json` (+1, -1)
-- `packages/plugin/package.json` (+1, -1)
-- `packages/protocol/package.json` (+1, -1)
-- `packages/schema/package.json` (+1, -1)
-- `packages/script/package.json` (+1, -1)
-- `packages/sdk-next/package.json` (+1, -1)
-- `packages/sdk/js/package.json` (+1, -1)
-- `packages/sdk/js/src/v2/gen/types.gen.ts` (+1, -0)
-- `packages/server/package.json` (+1, -1)
-- `packages/session-ui/package.json` (+1, -1)
-- `packages/storybook/package.json` (+1, -1)
-- `packages/tui/package.json` (+1, -1)
-- `packages/ui/package.json` (+1, -1)
-- `script/check-workflows.ts` (+1, -0)
-- `script/kilocode/community-triage.test.ts` (+158, -9)
-- `script/kilocode/community-triage.ts` (+133, -49)
-- `script/upstream/package.json` (+1, -1)
 
 ### Key Diffs
 
-#### packages/core/package.json
-```diff
-diff --git a/packages/core/package.json b/packages/core/package.json
-index a292b5082..2ea35022d 100644
---- a/packages/core/package.json
-+++ b/packages/core/package.json
-@@ -1,6 +1,6 @@
- {
-   "$schema": "https://json.schemastore.org/package.json",
--  "version": "7.8.12",
-+  "version": "7.8.14",
-   "name": "@opencode-ai/core",
-   "type": "module",
-   "license": "MIT",
-```
+(no key diffs to show)
 
-
-## opencode Changes (00e7472..22e771f)
+## opencode Changes (22e771f..214fb7f)
 
 ### Commits
 
-- 22e771f - fix(util): retry broken-pipe transport failures (#56307) (Divanshu, 2026-10-17)
-- bc5fa1c - feat(plugin): expose session list (#56264) (Aiden Cline, 2026-10-17)
-- 4a53028 - fix(ai): tolerate unknown and untyped stream events (#56286) (Aiden Cline, 2026-10-16)
-- 1cb7bca - refactor(core): page session lists in core (#56243) (Aiden Cline, 2026-10-16)
-- ae6a706 - docs(console): remove Muse Spark 1.3 Contributor Free (#56301) (opencode-agent[bot], 2026-10-17)
-- 512165c - fix(tui): share dialog width instead of one resize listener per row (#56234) (tobwen, 2026-10-16)
-- 65932e8 - refactor(app): share the workspace submenu with the missing-location menu (#55665) (Brendan Allan, 2026-10-17)
-- 7e1bc91 - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-17)
-- a70eaa7 - fix(app): show free models alongside their paid twins by default (#55712) (opencode-agent[bot], 2026-10-17)
-- 543b42e - test(cli): remove flaky managed service environment test (#56272) (Aiden Cline, 2026-10-16)
-- 07bbd0f - chore(ci): pause WinGet submission until packages are accepted (#56262) (opencode-agent[bot], 2026-10-17)
-- 4e95dac - sync release versions for v2.0.32 [skip ci] (opencode, 2026-10-16)
-- c77e748 - refactor(schema): move session list cursor into schema (#56205) (Aiden Cline, 2026-10-16)
-- d4a6223 - feat(server): add experimental voice session endpoint (#55951) (Kit Langton, 2026-10-16)
-- 180fd9d - fix(ai): retry Gemini MALFORMED_RESPONSE finishes (#56232) (Aiden Cline, 2026-10-16)
-- bc5ebf0 - fix(core): retry snapshot capture when concurrent Git writes collide on Windows (#56190) (Filip, 2026-10-16)
-- 0a03b4b - test: fix Windows flakes in cli standalone, Storybook and snapshot tests (#56181) (Filip, 2026-10-16)
-- 582c974 - fix(ci): include PrivacyUrl in WinGet locale manifests (#56123) (Filip, 2026-10-16)
-- 24c7f7a - fix(update): accept publish tokens only from dev and beta (#56085) (Filip, 2026-10-16)
-- b1d5965 - fix(ci): run app e2e on dev and every package's unit tests (#56117) (Filip, 2026-10-16)
-- ed772f5 - chore(release): drop the separate opencode-beta release repo (#56083) (opencode-agent[bot], 2026-10-16)
-- c5681f4 - fix(stats): merge Cat Jam usage into Reflection Beam (#56025) (Jack, 2026-10-16)
-- c3a73ec - fix(cli): don't crash auth login when no browser opener is available (#56082) (opencode-agent[bot], 2026-10-16)
-- e1bba47 - docs(console): rename Cat Jam Free to Beam Free (#55993) (opencode-agent[bot], 2026-10-16)
-- 83c5abb - sync release versions for v2.0.31 [skip ci] (opencode, 2026-10-16)
-- d68cf94 - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-16)
-- bd902fc - fix(tui): copy compaction summary as last message (#56055) (Victor Navarro, 2026-10-16)
-- b0d7621 - feat(tui): make /copy copy last assistant message (#56053) (Victor Navarro, 2026-10-16)
-- d889cb2 - feat(core): read model reasoning from config (#55853) (Victor Navarro, 2026-10-16)
+- 214fb7f - docs(console): add harness setup guides (#56364) (Victor Navarro, 2026-10-18)
+- 60a5a6c - fix(ai): treat null Responses stream fields as absent (#56669) (Aiden Cline, 2026-10-18)
+- 63c1a27 - fix(core): tolerate sandboxed filesystem denials during location boot (#55817) (Aiden Cline, 2026-10-17)
+- 49e9786 - fix(core): bound skill discovery and watches (#55597) (Aiden Cline, 2026-10-17)
+- c38d83c - fix(protocol): accept idle in the message type filter (#56504) (Aiden Cline, 2026-10-17)
+- 3bdab63 - fix(core): report shell exit only after output is captured (#56321) (Aiden Cline, 2026-10-17)
+- 3099ec2 - chore(console): retire the Black pages and redirect them to Go (#56612) (Kit Langton, 2026-10-17)
+- 4745089 - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-18)
+- e4b2afc - fix(www): scroll wide docs tables and label the docs search (#56592) (Kit Langton, 2026-10-17)
+- a124688 - fix(console): fix marketing copy, stale stats and redirected links (#56589) (Kit Langton, 2026-10-17)
+- 0168c62 - fix(console): redirect /en URLs to the unprefixed English pages (#56593) (Kit Langton, 2026-10-17)
+- a416379 - fix(console): make the mobile menu and copy buttons keyboard accessible (#56591) (Kit Langton, 2026-10-17)
+- 49be0c5 - docs(www): fix contradictions and typos in the v2 docs (#56588) (Kit Langton, 2026-10-17)
+- 797d2af - perf(console): load only the IBM Plex Mono faces the site uses (#56595) (Kit Langton, 2026-10-17)
+- eb9351c - feat(console): redirect /llms.txt to the docs index (#56594) (Kit Langton, 2026-10-17)
+- 3a96edc - fix(console): show an error when newsletter signup fails (#56587) (Kit Langton, 2026-10-17)
+- 8f7b012 - docs(www): format yield* in Effect snippets (#56568) (Kit Langton, 2026-10-17)
+- fd7bb3b - chore(console): remove the unused /temp page (#56566) (Kit Langton, 2026-10-17)
+- 736d2fe - fix(console): give marketing pages complete social preview tags (#56565) (Kit Langton, 2026-10-17)
+- 3921f77 - fix(console): take the page language from the URL only (#56564) (Kit Langton, 2026-10-17)
+- c78b6ee - fix: add v2 docs to the sitemap and fix its broken entries (#56534) (Kit Langton, 2026-10-17)
+- cbbfd22 - test(app): fix races in the mobile timeline scroll e2e tests (#55881) (Filip, 2026-10-18)
+- 579b86f - docs(console): align card fee and billing wording with the billing page (#56532) (Kit Langton, 2026-10-17)
+- 9d97a5b - fix(console): send localized changelog URLs to the changelog worker (#56531) (Kit Langton, 2026-10-17)
+- 53cd745 - fix(console): render FAQ answers in the server HTML (#56535) (Kit Langton, 2026-10-17)
+- 657c566 - fix(console): give each marketing page a single meta description (#56533) (Kit Langton, 2026-10-17)
+- 07e7254 - fix(console): link header GitHub item to the repository root (#56529) (Kit Langton, 2026-10-17)
+- 594af42 - chore: update nix node_modules hashes (opencode-agent[bot], 2026-10-17)
+- 23359e9 - chore: upgrade typecheck to TypeScript 7.0.2 (#56300) (opencode-agent[bot], 2026-10-17)
+- 86c7f7c - fix(core): retry buffered generations with shared policy (#56497) (Aiden Cline, 2026-10-17)
+- 8c173a8 - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-17)
+- a49f179 - chore(infra): remove honeycomb and random providers (#56370) (Victor Navarro, 2026-10-17)
+- a801306 - chore(infra): remove dead honeycomb monitoring and log processor (#56226) (Victor Navarro, 2026-10-17)
 
 ### Changed Files by Category
 
@@ -309,308 +99,413 @@ index a292b5082..2ea35022d 100644
 
 #### Core (**/core/)
 - `packages/core/package.json` (+1, -1)
-- `packages/core/src/config/plugin/provider.ts` (+11, -2)
-- `packages/core/src/git.ts` (+26, -6)
-- `packages/core/src/instance.ts` (+2, -0)
-- `packages/core/src/model.ts` (+1, -0)
-- `packages/core/src/models-dev.ts` (+1, -0)
+- `packages/core/src/config/plugin/compatibility.ts` (+5, -5)
+- `packages/core/src/config/plugin/instruction.ts` (+14, -6)
+- `packages/core/src/config/plugin/skill-scan.ts` (+46, -0)
+- `packages/core/src/config/plugin/skill.ts` (+6, -6)
+- `packages/core/src/config/watch.ts` (+1, -1)
+- `packages/core/src/database/migration.ts` (+3, -1)
+- `packages/core/src/filesystem.ts` (+3, -8)
+- `packages/core/src/generate.ts` (+2, -0)
+- `packages/core/src/model-retry.ts` (+73, -0)
 - `packages/core/src/models-dev/snapshot.txt` (+1, -1)
-- `packages/core/src/plugin/host.ts` (+1, -0)
-- `packages/core/src/plugin/provider/opencode.ts` (+11, -1)
-- `packages/core/src/session.ts` (+42, -10)
-- `packages/core/src/session/error.ts` (+9, -0)
-- `packages/core/src/variant.ts` (+13, -0)
-- `packages/core/src/voice.ts` (+88, -0)
-- `packages/core/test/config/provider.test.ts` (+72, -0)
-- `packages/core/test/models.test.ts` (+2, -2)
-- `packages/core/test/plugin/host.ts` (+1, -0)
-- `packages/core/test/plugin/provider-opencode.test.ts` (+52, -0)
-- `packages/core/test/plugin/session-list.test.ts` (+52, -0)
-- `packages/core/test/session-list.test.ts` (+72, -0)
-- `packages/core/test/snapshot.test.ts` (+17, -3)
-- `packages/core/test/variant.test.ts` (+12, -0)
-- `packages/core/test/voice.test.ts` (+107, -0)
-- `packages/stats/core/package.json` (+2, -1)
-- `packages/stats/core/src/domain/inference.test.ts` (+5, -0)
-- `packages/stats/core/src/domain/model-normalization.ts` (+2, -0)
+- `packages/core/src/session/generate.ts` (+2, -1)
+- `packages/core/src/session/runner/retry.ts` (+10, -47)
+- `packages/core/src/shell.ts` (+64, -50)
+- `packages/core/src/skill.ts` (+8, -2)
+- `packages/core/test/config/config.test.ts` (+37, -1)
+- `packages/core/test/config/skill.test.ts` (+7, -6)
+- `packages/core/test/config/watch.test.ts` (+3, -2)
+- `packages/core/test/generate.test.ts` (+101, -2)
+- `packages/core/test/instruction-discovery.test.ts` (+43, -2)
+- `packages/core/test/session-generate.test.ts` (+38, -1)
+- `packages/core/test/session-runner-retry.test.ts` (+1, -1)
+- `packages/core/test/util/fs-util.test.ts` (+50, -0)
+- `packages/core/tsconfig.json` (+1, -0)
+- `packages/core/tsconfig.tests.json` (+1, -0)
+- `packages/stats/core/package.json` (+2, -2)
 
 #### Other Changes
-- `.github/workflows/publish.yml` (+3, -5)
-- `.github/workflows/test.yml` (+1, -1)
-- `.opencode/skills/unit-tests/SKILL.md` (+1, -1)
-- `CHANGELOG.md` (+31, -0)
-- `bun.lock` (+33, -33)
-- `package.json` (+1, -1)
-- `packages/ai/package.json` (+1, -1)
-- `packages/ai/src/experimental.ts` (+7, -0)
-- `packages/ai/src/experimental/realtime.ts` (+150, -0)
-- `packages/ai/src/protocols/anthropic-messages.ts` (+3, -2)
-- `packages/ai/src/protocols/cohere-chat.ts` (+24, -1)
-- `packages/ai/src/protocols/gemini.ts` (+13, -0)
-- `packages/ai/src/protocols/google-interactions.ts` (+21, -1)
-- `packages/ai/src/protocols/open-responses.ts` (+5, -20)
-- `packages/ai/src/protocols/shared.ts` (+17, -1)
-- `packages/ai/test/provider/anthropic-messages.test.ts` (+28, -0)
-- `packages/ai/test/provider/cohere.test.ts` (+24, -0)
-- `packages/ai/test/provider/gemini.test.ts` (+2, -1)
-- `packages/ai/test/provider/google-vertex-interactions.test.ts` (+24, -0)
-- `packages/ai/test/provider/open-responses-errors.test.ts` (+8, -6)
-- `packages/ai/test/provider/openai-responses.test.ts` (+24, -0)
-- `packages/ai/test/realtime.test.ts` (+127, -0)
-- `packages/app/e2e/regression/session-location-sync.spec.ts` (+1, -0)
-- `packages/app/package.json` (+1, -1)
-- `packages/app/src/new-session/workspace/selector.tsx` (+9, -96)
-- `packages/app/src/providers/models/models.tsx` (+7, -3)
-- `packages/app/src/providers/models/select-dialog.tsx` (+5, -7)
-- `packages/app/src/providers/models/unpaid.tsx` (+4, -6)
-- `packages/app/src/session/composer/location-missing.tsx` (+11, -15)
-- `packages/app/src/session/route.tsx` (+1, -1)
-- `packages/app/src/workspaces/submenu.tsx` (+117, -0)
-- `packages/cli/package.json` (+1, -1)
-- `packages/cli/src/acp/service.ts` (+2, -2)
-- `packages/cli/src/ui/prompt.ts` (+2, -1)
-- `packages/cli/test/prompt-open-url.test.ts` (+8, -0)
-- `packages/cli/test/service.test.ts` (+0, -56)
-- `packages/cli/test/standalone.test.ts` (+4, -5)
-- `packages/client/package.json` (+1, -1)
-- `packages/client/script/build.ts` (+0, -2)
-- `packages/client/src/effect/api/api.ts` (+24, -3)
-- `packages/client/src/effect/generated/client.ts` (+15, -0)
-- `packages/client/src/promise/generated/client.ts` (+16, -0)
-- `packages/client/src/promise/generated/types.ts` (+47, -2)
-- `packages/client/test/promise.test.ts` (+2, -0)
-- `packages/codemode/package.json` (+1, -1)
-- `packages/console/app/package.json` (+3, -2)
-- `packages/console/app/src/component/go-models.ts` (+3, -3)
-- `packages/console/app/src/routes/go/index.tsx` (+1, -1)
-- `packages/console/app/test/consoleMarketing.test.ts` (+2, -1)
-- `packages/console/function/package.json` (+1, -1)
-- `packages/desktop/package.json` (+1, -1)
-- `packages/desktop/scripts/finalize-latest-json.ts` (+0, -270)
-- `packages/desktop/scripts/finalize-latest-yml.ts` (+0, -142)
-- `packages/function/package.json` (+1, -1)
-- `packages/gui-extensions/package.json` (+1, -1)
-- `packages/http-recorder/package.json` (+1, -1)
-- `packages/httpapi-codegen/package.json` (+1, -1)
-- `packages/latex/package.json` (+1, -1)
-- `packages/merman/package.json` (+1, -1)
-- `packages/plugin-browser/package.json` (+1, -1)
-- `packages/plugin/package.json` (+1, -1)
-- `packages/plugin/src/effect/session.ts` (+1, -0)
-- `packages/plugin/src/promise/adapter.ts` (+1, -0)
-- `packages/plugin/src/promise/session.ts` (+1, -0)
-- `packages/plugins/figma/package.json` (+1, -1)
-- `packages/protocol/openapi.json` (+279, -0)
-- `packages/protocol/package.json` (+2, -1)
-- `packages/protocol/src/api.ts` (+3, -0)
-- `packages/protocol/src/client.ts` (+1, -0)
-- `packages/protocol/src/groups/session.ts` (+13, -92)
-- `packages/protocol/src/groups/voice.ts` (+65, -0)
-- `packages/protocol/test/session-cursor.test.ts` (+4, -15)
-- `packages/schema/package.json` (+2, -1)
-- `packages/schema/src/config/provider.ts` (+20, -0)
-- `packages/schema/src/model.ts` (+2, -0)
-- `packages/schema/src/session.ts` (+68, -2)
-- `packages/schema/test/contract-hygiene.test.ts` (+4, -1)
-- `packages/schema/test/session-cursor.test.ts` (+16, -0)
-- `packages/schema/test/v1-isolation.test.ts` (+3, -7)
-- `packages/sdk/package.json` (+1, -1)
-- `packages/server/package.json` (+1, -1)
-- `packages/server/src/handlers.ts` (+2, -0)
-- `packages/server/src/handlers/session.ts` (+8, -41)
-- `packages/server/src/handlers/voice.ts` (+39, -0)
-- `packages/server/test/voice.test.ts` (+88, -0)
-- `packages/session-ui/package.json` (+1, -1)
-- `packages/simulation/package.json` (+1, -1)
-- `packages/stats/app/package.json` (+3, -2)
-- `packages/stats/server/package.json` (+1, -1)
-- `packages/storybook/.storybook/main.ts` (+3, -1)
-- `packages/storybook/playwright/config.ts` (+3, -1)
-- `packages/theme/package.json` (+1, -1)
-- `packages/tui/package.json` (+1, -1)
-- `packages/tui/src/routes/session/index.tsx` (+14, -15)
-- `packages/tui/src/ui/dialog-select.tsx` (+8, -6)
-- `packages/tui/test/cli/tui/dialog-select.test.tsx` (+19, -0)
-- `packages/ui/package.json` (+1, -1)
-- `packages/util/package.json` (+1, -1)
-- `packages/util/src/retry.ts` (+1, -0)
-- `packages/web/package.json` (+1, -1)
-- `script/publish-winget.ts` (+1, -0)
-- `script/publish.ts` (+7, -6)
-- `script/version.ts` (+0, -2)
-- `sdks/vscode/package.json` (+1, -1)
-- `services/update/package.json` (+1, -1)
-- `services/update/src/index.ts` (+1, -5)
-- `services/update/test/index.test.ts` (+34, -1)
-- `services/www/openapi.json` (+279, -0)
-- `services/www/public/openapi.json` (+279, -0)
-- `services/www/src/docs/content/build/plugins/effect.mdx` (+14, -0)
-- `services/www/src/docs/content/build/plugins/index.mdx` (+8, -0)
-- `services/www/src/docs/content/console/go.mdx` (+8, -8)
-- `services/www/src/docs/content/console/models.mdx` (+4, -8)
-- `services/www/src/docs/content/models.mdx` (+31, -0)
-- `services/www/src/docs/content/providers.mdx` (+2, -1)
-- `turbo.json` (+2, -89)
+- `.github/workflows/deploy.yml` (+0, -1)
+- `bun.lock` (+73, -63)
+- `infra/console.ts` (+0, -10)
+- `infra/monitoring.ts` (+0, -287)
+- `infra/secret.ts` (+0, -10)
+- `nix/hashes.json` (+3, -3)
+- `package.json` (+4, -3)
+- `packages/ai/package.json` (+2, -2)
+- `packages/ai/src/protocols/open-responses.ts` (+32, -25)
+- `packages/ai/src/protocols/shared.ts` (+12, -1)
+- `packages/ai/test/provider/openai-compatible-responses.test.ts` (+47, -7)
+- `packages/ai/tsconfig.json` (+1, -0)
+- `packages/app/e2e/regression/mobile-timeline-scroll.spec.ts` (+34, -6)
+- `packages/app/e2e/tsconfig.json` (+1, -1)
+- `packages/app/e2e/utils/prompt-motion.ts` (+16, -6)
+- `packages/app/package.json` (+3, -3)
+- `packages/app/tsconfig.json` (+2, -0)
+- `packages/cli/package.json` (+2, -2)
+- `packages/cli/src/server-process.ts` (+5, -1)
+- `packages/cli/tsconfig.json` (+1, -0)
+- `packages/client/package.json` (+2, -2)
+- `packages/client/src/effect/api/api.ts` (+1, -0)
+- `packages/client/src/promise/generated/types.ts` (+4, -0)
+- `packages/client/tsconfig.json` (+1, -0)
+- `packages/codemode/package.json` (+2, -2)
+- `packages/codemode/tsconfig.json` (+1, -0)
+- `packages/console/app/package.json` (+2, -2)
+- `packages/console/app/public/robots.txt` (+1, -0)
+- `packages/console/app/script/generate-sitemap.ts` (+9, -3)
+- `packages/console/app/src/app.tsx` (+9, -5)
+- `packages/console/app/src/asset/lander/screenshot-splash.png` (+-, --)
+- `packages/console/app/src/component/email-signup.tsx` (+17, -7)
+- `packages/console/app/src/component/faq.tsx` (+1, -1)
+- `packages/console/app/src/component/go-plan-chart.tsx` (+1, -1)
+- `packages/console/app/src/component/header.tsx` (+16, -3)
+- `packages/console/app/src/component/limits-graph.tsx` (+1, -1)
+- `packages/console/app/src/component/social-meta.tsx` (+23, -0)
+- `packages/console/app/src/component/spotlight.css` (+0, -15)
+- `packages/console/app/src/component/spotlight.tsx` (+0, -820)
+- `packages/console/app/src/config.ts` (+3, -3)
+- `packages/console/app/src/context/language.tsx` (+2, -2)
+- `packages/console/app/src/entry-server.tsx` (+2, -4)
+- `packages/console/app/src/i18n/ar.ts` (+1, -43)
+- `packages/console/app/src/i18n/br.ts` (+1, -43)
+- `packages/console/app/src/i18n/da.ts` (+1, -43)
+- `packages/console/app/src/i18n/de.ts` (+1, -43)
+- `packages/console/app/src/i18n/en.ts` (+17, -59)
+- `packages/console/app/src/i18n/es.ts` (+1, -43)
+- `packages/console/app/src/i18n/fr.ts` (+1, -44)
+- `packages/console/app/src/i18n/it.ts` (+1, -45)
+- `packages/console/app/src/i18n/ja.ts` (+1, -43)
+- `packages/console/app/src/i18n/ko.ts` (+1, -43)
+- `packages/console/app/src/i18n/no.ts` (+1, -43)
+- `packages/console/app/src/i18n/pl.ts` (+1, -43)
+- `packages/console/app/src/i18n/ru.ts` (+1, -44)
+- `packages/console/app/src/i18n/th.ts` (+1, -43)
+- `packages/console/app/src/i18n/tr.ts` (+1, -43)
+- `packages/console/app/src/i18n/uk.ts` (+1, -43)
+- `packages/console/app/src/i18n/zh.ts` (+1, -43)
+- `packages/console/app/src/i18n/zht.ts` (+1, -43)
+- `packages/console/app/src/lib/language.ts` (+15, -1)
+- `packages/console/app/src/middleware.ts` (+18, -0)
+- `packages/console/app/src/routes/black.css` (+0, -843)
+- `packages/console/app/src/routes/black.tsx` (+0, -283)
+- `packages/console/app/src/routes/black/common.tsx` (+0, -65)
+- `packages/console/app/src/routes/black/index.tsx` (+0, -122)
+- `packages/console/app/src/routes/black/workspace.css` (+0, -214)
+- `packages/console/app/src/routes/black/workspace.tsx` (+0, -238)
+- `packages/console/app/src/routes/brand/index.css` (+2, -1)
+- `packages/console/app/src/routes/brand/index.tsx` (+2, -0)
+- `packages/console/app/src/routes/changelog/index.tsx` (+0, -2)
+- `packages/console/app/src/routes/docs/[...path].ts` (+3, -5)
+- `packages/console/app/src/routes/docs/index.ts` (+3, -5)
+- `packages/console/app/src/routes/download/index.css` (+2, -1)
+- `packages/console/app/src/routes/download/index.tsx` (+2, -0)
+- `packages/console/app/src/routes/enterprise/index.tsx` (+2, -0)
+- `packages/console/app/src/routes/go/index.tsx` (+9, -25)
+- `packages/console/app/src/routes/honeycomb/webhook.ts` (+0, -111)
+- `packages/console/app/src/routes/index.tsx` (+20, -6)
+- `packages/console/app/src/routes/llms.txt.ts` (+4, -0)
+- `packages/console/app/src/routes/temp.tsx` (+0, -179)
+- `packages/console/app/src/routes/zen/index.tsx` (+8, -2)
+- `packages/console/app/src/style/component/faq.css` (+4, -0)
+- `packages/console/app/src/style/component/focus.css` (+9, -0)
+- `packages/console/app/src/style/index.css` (+2, -0)
+- `packages/console/app/test/language.test.ts` (+29, -0)
+- `packages/console/function/package.json` (+0, -22)
+- `packages/console/function/src/log-processor.ts` (+0, -95)
+- `packages/console/function/sst-env.d.ts` (+0, -10)
+- `packages/console/function/tsconfig.json` (+0, -12)
+- `packages/containers/tsconfig.json` (+1, -0)
+- `packages/desktop/package.json` (+3, -3)
+- `packages/gui-extensions/package.json` (+2, -2)
+- `packages/http-recorder/package.json` (+2, -2)
+- `packages/http-recorder/test/tsconfig.json` (+1, -0)
+- `packages/http-recorder/tsconfig.json` (+1, -0)
+- `packages/httpapi-codegen/package.json` (+2, -2)
+- `packages/httpapi-codegen/tsconfig.json` (+1, -0)
+- `packages/latex/package.json` (+2, -2)
+- `packages/latex/tsconfig.json` (+1, -0)
+- `packages/merman/package.json` (+2, -2)
+- `packages/merman/tsconfig.json` (+1, -0)
+- `packages/plugin-browser/package.json` (+2, -2)
+- `packages/plugin-browser/tsconfig.json` (+1, -0)
+- `packages/plugin/package.json` (+2, -2)
+- `packages/plugin/tsconfig.json` (+1, -0)
+- `packages/plugins/figma/package.json` (+2, -2)
+- `packages/plugins/figma/tsconfig.json` (+1, -0)
+- `packages/protocol/openapi.json` (+2, -1)
+- `packages/protocol/package.json` (+2, -2)
+- `packages/protocol/src/groups/message.ts` (+16, -14)
+- `packages/protocol/tsconfig.json` (+1, -0)
+- `packages/schema/package.json` (+2, -2)
+- `packages/schema/tsconfig.json` (+1, -0)
+- `packages/script/tsconfig.json` (+1, -0)
+- `packages/sdk/package.json` (+2, -2)
+- `packages/sdk/tsconfig.json` (+1, -0)
+- `packages/server/package.json` (+2, -2)
+- `packages/server/test/message.test.ts` (+4, -0)
+- `packages/server/tsconfig.json` (+1, -0)
+- `packages/session-ui/package.json` (+2, -2)
+- `packages/session-ui/performance/markdown-lifetime/ui-styles.d.ts` (+3, -0)
+- `packages/simulation/package.json` (+2, -2)
+- `packages/simulation/tsconfig.json` (+1, -0)
+- `packages/stats/app/package.json` (+2, -2)
+- `packages/stats/server/package.json` (+2, -2)
+- `packages/theme/package.json` (+2, -2)
+- `packages/theme/tsconfig.json` (+1, -0)
+- `packages/tui/package.json` (+2, -2)
+- `packages/tui/src/component/terminal-pane.tsx` (+1, -1)
+- `packages/tui/tsconfig.json` (+1, -0)
+- `packages/ui/package.json` (+2, -2)
+- `packages/util/package.json` (+2, -2)
+- `packages/util/src/fs-util.ts` (+27, -6)
+- `packages/util/src/glob.ts` (+2, -0)
+- `packages/util/tsconfig.json` (+1, -0)
+- `script/lint-changed.ts` (+5, -1)
+- `script/profile-typecheck.ts` (+4, -4)
+- `services/changelog/package.json` (+2, -2)
+- `services/files/package.json` (+2, -2)
+- `services/update/package.json` (+2, -2)
+- `services/www/astro.config.ts` (+2, -1)
+- `services/www/openapi.json` (+2, -1)
+- `services/www/public/openapi.json` (+2, -1)
+- `services/www/src/docs/components/DocsHeader.astro` (+1, -1)
+- `services/www/src/docs/content/agents.mdx` (+1, -1)
+- `services/www/src/docs/content/build/client/effect.mdx` (+27, -25)
+- `services/www/src/docs/content/build/plugins/effect.mdx` (+12, -12)
+- `services/www/src/docs/content/build/plugins/effect/rpc.mdx` (+5, -5)
+- `services/www/src/docs/content/cli/commands.mdx` (+2, -1)
+- `services/www/src/docs/content/cli/theme.mdx` (+2, -2)
+- `services/www/src/docs/content/cli/web.mdx` (+3, -3)
+- `services/www/src/docs/content/config.mdx` (+1, -1)
+- `services/www/src/docs/content/console/go.mdx` (+6, -4)
+- `services/www/src/docs/content/console/harnesses/claude-code.mdx` (+92, -0)
+- `services/www/src/docs/content/console/harnesses/codex.mdx` (+98, -0)
+- `services/www/src/docs/content/console/harnesses/hermes.mdx` (+58, -0)
+- `services/www/src/docs/content/console/harnesses/index.mdx` (+87, -0)
+- `services/www/src/docs/content/console/harnesses/pi.mdx` (+66, -0)
+- `services/www/src/docs/content/console/harnesses/raycast.mdx` (+40, -0)
+- `services/www/src/docs/content/console/index.mdx` (+1, -0)
+- `services/www/src/docs/content/console/models.mdx` (+4, -11)
+- `services/www/src/docs/content/index.mdx` (+6, -6)
+- `services/www/src/docs/content/skills.mdx` (+5, -2)
+- `services/www/src/docs/content/themes.mdx` (+1, -1)
+- `services/www/src/docs/layouts/DocsLayout.astro` (+2, -2)
+- `services/www/src/docs/lib/navigation.ts` (+15, -1)
+- `services/www/src/docs/lib/sitemap.ts` (+16, -0)
+- `services/www/src/docs/rehype-table-scroll.ts` (+41, -0)
+- `services/www/src/pages/sitemap.xml.ts` (+9, -0)
+- `sst-env.d.ts` (+0, -13)
+- `sst.config.ts` (+0, -5)
+- `tsconfig.json` (+3, -1)
 
 ### Key Diffs
 
 #### packages/core/package.json
 ```diff
 diff --git a/packages/core/package.json b/packages/core/package.json
-index 54b5224..f33c3c7 100644
+index f33c3c7..b88ea5b 100644
 --- a/packages/core/package.json
 +++ b/packages/core/package.json
-@@ -1,6 +1,6 @@
- {
-   "$schema": "https://json.schemastore.org/package.json",
--  "version": "2.0.30",
-+  "version": "2.0.32",
-   "name": "@opencode/core",
-   "type": "module",
-   "license": "MIT",
+@@ -24,7 +24,7 @@
+     "build": "bun run script/build.ts",
+     "update-models-snapshot": "bun run script/update-models-snapshot.ts",
+     "test": "bun run script/test.ts",
+-    "typecheck": "tsgo -b tsconfig.json tsconfig.tests.json"
++    "typecheck": "tsc -b tsconfig.json tsconfig.tests.json"
+   },
+   "exports": {
+     "./*": "./src/*.ts"
 ```
 
-#### packages/core/src/config/plugin/provider.ts
+#### packages/core/src/config/plugin/compatibility.ts
 ```diff
-diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/config/plugin/provider.ts
-index 3844634..0c485c4 100644
---- a/packages/core/src/config/plugin/provider.ts
-+++ b/packages/core/src/config/plugin/provider.ts
-@@ -121,6 +121,7 @@ export const Plugin = define({
-             if (config.family !== undefined) model.family = config.family
-             if (config.name) model.name = config.name
-             if (config.modelID !== undefined) model.modelID = config.modelID
-+            if (config.releaseDate !== undefined) model.time = { released: Date.parse(config.releaseDate) }
-             if (config.compatibility !== undefined)
-               model.compatibility = { ...model.compatibility, ...config.compatibility }
-             if (config.package !== undefined) model.package = config.package
-@@ -129,6 +130,15 @@ export const Plugin = define({
-             if (config.body !== undefined) model.body = Provider.mergeOverlay(model.body, config.body)
-             if (config.capabilities !== undefined)
-               model.capabilities = Model.mergeCapabilities(config.capabilities, model.capabilities)
-+            if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
-+            // Configured reasoning replaces the base variants; configured variants still overlay them below.
-+            if (config.capabilities?.reasoning !== undefined)
-+              model.variants = [
-+                ...Variant.resolve(
-+                  { ...model, package: model.package ?? models.provider.get(providerID)?.provider.package },
-+                  Variant.supports(config.capabilities.reasoning),
-+                ),
-+              ]
-             if (config.variants !== undefined) {
-               model.variants ??= []
-               for (const variant of config.variants) {
-@@ -156,7 +166,6 @@ export const Plugin = define({
-               }))
-             }
-             if (config.disabled !== undefined) model.enabled = !config.disabled
--            if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
-           })
-           // Inherited variants are spelled for the base model's package, so a package override needs fresh ones.
-           // A base without variants has no reasoning support to respell.
-@@ -164,7 +173,7 @@ export const Plugin = define({
-             source?.base !== undefined &&
-             source.base.variants.length > 0 &&
-             models.get(providerID, id)?.package !== source.base.package
--          if (config.variants === undefined && (!source?.base || repackaged))
-+          if (config.variants === undefined && config.capabilities?.reasoning === undefined && (!source?.base || repackaged))
-             models.update(providerID, id, (model) => {
-               model.variants = [
-                 ...Variant.resolve({
-```
-
-#### packages/core/src/git.ts
-```diff
-diff --git a/packages/core/src/git.ts b/packages/core/src/git.ts
-index b633eed..87fab04 100644
---- a/packages/core/src/git.ts
-+++ b/packages/core/src/git.ts
-@@ -367,6 +367,22 @@ const layer = Layer.effect(
-       })
-     })
+diff --git a/packages/core/src/config/plugin/compatibility.ts b/packages/core/src/config/plugin/compatibility.ts
+index 792048d..2ca898a 100644
+--- a/packages/core/src/config/plugin/compatibility.ts
++++ b/packages/core/src/config/plugin/compatibility.ts
+@@ -8,6 +8,7 @@ import { Config } from "../../config.js"
+ import { Watcher } from "../../filesystem/watcher.js"
+ import { Skill } from "../../skill.js"
+ import { SkillFile } from "./skill-file.js"
++import { SkillScan } from "./skill-scan.js"
  
-+    /**
-+     * On Windows, Git exits non-zero instead of reusing a loose object that another process is finalizing at the
-+     * same moment. Objects are content-addressed, so one of at most two retries finds that copy in place. Only a Git
-+     * exit is retried, never a failure to start Git, and other platforms fail on the first attempt.
-+     */
-+    const retryConcurrentObjectWrite = <A, R>(effect: Effect.Effect<A, OperationError, R>) =>
-+      process.platform === "win32"
-+        ? effect.pipe(
-+            Effect.retry({
-+              times: 2,
-+              schedule: Schedule.spaced("50 millis"),
-+              while: (error) => error.cause === undefined,
-+            }),
-+          )
-+        : effect
-+
-     /**
-      * A new store is initialized in a temporary sibling directory and renamed into
-      * place, so processes racing to create the same store never observe or write a
-@@ -505,11 +521,13 @@ const layer = Layer.effect(
-         { concurrency: 8 },
-       )).filter((item): item is RelativePath => item !== undefined)
-       if (added.length)
--        yield* repositoryOperation(
--          "refresh",
--          input.repository,
--          ["update-index", "--add", "--remove", "--replace", "-z", "--stdin"],
--          { stdin: [...added, ...embedded].join("\0") + "\0", index: input.index },
-+        yield* retryConcurrentObjectWrite(
-+          repositoryOperation(
-+            "refresh",
-+            input.repository,
-+            ["update-index", "--add", "--remove", "--replace", "-z", "--stdin"],
-+            { stdin: [...added, ...embedded].join("\0") + "\0", index: input.index },
+ export const Plugin = define({
+   id: "opencode.config.compatibility",
+@@ -24,7 +25,9 @@ export const Plugin = define({
+       target: string,
+       type: "file" | "directory",
+     ) {
+-      const updates = yield* watcher.subscribe({ path: target, type })
++      const updates = yield* watcher.subscribe(
++        type === "directory" ? { path: target, type, ignore: SkillScan.ignore } : { path: target, type },
++      )
+       yield* FiberMap.run(
+         watches,
+         `${type}:${target}`,
+@@ -43,10 +46,7 @@ export const Plugin = define({
+           const resolved = yield* fs.realPath(directory).pipe(Effect.orElseSucceed(() => undefined))
+           if (!resolved) continue
+           yield* watch(resolved, "directory")
+-          const files = yield* fs
+-            .scan("{*.md,**/SKILL.md}", { cwd: resolved, absolute: true, include: "file", symlink: true, dot: true })
+-            .pipe(Effect.orElseSucceed(() => [] as string[]))
+-          for (const filepath of files.toSorted()) {
++          for (const filepath of yield* SkillScan.scan(resolved)) {
+             const content = yield* fs.readFileStringSafe(filepath).pipe(Effect.orElseSucceed(() => undefined))
+             if (!content) continue
+             const parsed = SkillFile.parse(resolved, filepath, content)
+```
+
+#### packages/core/src/config/plugin/instruction.ts
+```diff
+diff --git a/packages/core/src/config/plugin/instruction.ts b/packages/core/src/config/plugin/instruction.ts
+index 5fe1f79..133bf18 100644
+--- a/packages/core/src/config/plugin/instruction.ts
++++ b/packages/core/src/config/plugin/instruction.ts
+@@ -61,16 +61,24 @@ export const Plugin = define({
+         yield* updates.pipe(Stream.runForEach(publish), Effect.forkScoped({ startImmediately: true }))
+       }
+ 
++      // A missing file may be mid-save and is transient; a denied file (e.g. outside a sandbox grant) stays absent.
+       const read = Effect.fn("ConfigInstructionPlugin.read")(function* (filepath: string) {
+-        const content = yield* fs.readFileStringSafe(filepath)
+-        if (content !== undefined) return new InstructionDiscovery.File({ path: filepath, content })
+-        yield* Effect.logDebug("instruction file skipped", { path: filepath, reason: "unavailable" })
++        return yield* fs.readFileString(filepath).pipe(
++          Effect.map((content) => new InstructionDiscovery.File({ path: filepath, content })),
++          Effect.catchIf(
++            (error) => error.reason._tag === "NotFound" || FSUtil.isAccessDenied(error),
++            (error) =>
++              Effect.logDebug("instruction file skipped", { path: filepath, reason: error.reason._tag }).pipe(
++                Effect.as(error.reason._tag === "NotFound" ? undefined : ("denied" as const)),
++              ),
 +          ),
-         )
-       return { skipped }
-     })
-@@ -561,7 +579,9 @@ const layer = Layer.effect(
-     })
++        )
+       })
  
-     const writeTree = Effect.fn("Git.tree.write")(function* (repository: Repository, index?: string) {
+       const globalSource = Effect.fn("ConfigInstructionPlugin.globalSource")(function* () {
+         if (!discovery.global || !(yield* fs.isFile(globalFile))) return []
+         const file = yield* read(globalFile)
+-        return file ? [file] : []
++        return file instanceof InstructionDiscovery.File ? [file] : []
+       })
+ 
+       const projectSource = Effect.fn("ConfigInstructionPlugin.projectSource")(function* () {
+@@ -82,7 +90,7 @@ export const Plugin = define({
+         const discovered = new Set(walked.filter((file) => discovery.global || file !== globalFile))
+         const files = yield* Effect.forEach(discovered, read, { concurrency: "unbounded" })
+         if (files.some((file) => file === undefined)) return Instructions.unavailable
+-        return files.filter((file): file is InstructionDiscovery.File => file !== undefined)
++        return files.filter((file) => file instanceof InstructionDiscovery.File)
+       })
+ 
+       // Relative patterns search upward from the location to the project root. Without
+@@ -115,7 +123,7 @@ export const Plugin = define({
+             if (watched.has(resolved)) continue
+             watched.add(resolved)
+             const file = yield* read(resolved)
+-            if (file) files.push(file)
++            if (file instanceof InstructionDiscovery.File) files.push(file)
+           }
+         }
 ```
 
-#### packages/core/src/instance.ts
+#### packages/core/src/config/plugin/skill-scan.ts
 ```diff
-diff --git a/packages/core/src/instance.ts b/packages/core/src/instance.ts
-index 0586fba..9bcde2c 100644
---- a/packages/core/src/instance.ts
-+++ b/packages/core/src/instance.ts
-@@ -13,6 +13,7 @@ import { Formatter } from "./formatter.js"
- import { FileSystem } from "./filesystem.js"
- import { FileSystemSearch } from "./filesystem/search.js"
- import { Generate } from "./generate.js"
-+import { Voice } from "./voice.js"
- import { Form } from "./form.js"
- import { Image } from "./image.js"
- import { LocationWatcher } from "./filesystem/location-watcher.js"
-@@ -97,6 +98,7 @@ const nodes = [
-   InstructionEntry.node,
-   Form.node,
-   Generate.node,
-+  Voice.node,
-   ReadToolFileSystem.node,
-   McpTool.node,
-   SessionInstructions.node,
+diff --git a/packages/core/src/config/plugin/skill-scan.ts b/packages/core/src/config/plugin/skill-scan.ts
+new file mode 100644
+index 0000000..c955270
+--- /dev/null
++++ b/packages/core/src/config/plugin/skill-scan.ts
+@@ -0,0 +1,46 @@
++export * as SkillScan from "./skill-scan.js"
++
++import { FSUtil } from "@opencode/util/fs-util"
++import path from "path"
++import { Effect } from "effect"
++
++const MAX_DEPTH = 6
++
++export const ignore = [...FSUtil.ignoreGlobs, "**/.*", "**/.*/**"]
++
++export const scan = Effect.fn("SkillScan.scan")(function* (root: string) {
++  const fs = yield* FSUtil.Service
++  const files: string[] = []
++  const queue = [{ directory: root, depth: 0 }]
++  for (const item of queue) {
++    const entries = yield* fs.readDirectoryEntries(item.directory).pipe(Effect.orElseSucceed(() => []))
++    const children = yield* Effect.forEach(
++      entries.filter((entry) => !entry.name.startsWith(".") && !FSUtil.ignoredDirectories.includes(entry.name)),
++      (entry) => {
++        const target = path.join(item.directory, entry.name)
++        if (entry.type !== "symlink") return Effect.succeed({ name: entry.name, path: target, type: entry.type })
++        return fs.stat(target).pipe(
++          Effect.map((info) => (info.type === "Directory" ? "directory" : info.type === "File" ? "file" : "other")),
++          Effect.orElseSucceed(() => "other" as const),
++          Effect.map((type) => ({ name: entry.name, path: target, type })),
++        )
++      },
++    )
++    const skill = children.find((child) => child.type === "file" && child.name === "SKILL.md")
++    if (skill) {
++      files.push(skill.path)
++      continue
++    }
++    if (item.depth === 0)
++      files.push(
++        ...children.filter((child) => child.type === "file" && child.name.endsWith(".md")).map((child) => child.path),
++      )
++    if (item.depth < MAX_DEPTH)
++      queue.push(
++        ...children
++          .filter((child) => child.type === "directory")
++          .map((child) => ({ directory: child.path, depth: item.depth + 1 })),
++      )
++  }
 ```
 
-#### packages/core/src/model.ts
+#### packages/core/src/config/plugin/skill.ts
 ```diff
-diff --git a/packages/core/src/model.ts b/packages/core/src/model.ts
-index 49dc3cd..c0246ee 100644
---- a/packages/core/src/model.ts
-+++ b/packages/core/src/model.ts
-@@ -35,6 +35,7 @@ export const mergeCapabilities = (config: Partial<Capabilities>, base: Capabilit
-     tools: config.tools ?? fallback.tools,
-     input: [...(config.input ?? fallback.input)],
-     output: [...(config.output ?? fallback.output)],
-+    temperature: config.temperature ?? base?.temperature,
-   }
- }
+diff --git a/packages/core/src/config/plugin/skill.ts b/packages/core/src/config/plugin/skill.ts
+index 1338cab..be62b9c 100644
+--- a/packages/core/src/config/plugin/skill.ts
++++ b/packages/core/src/config/plugin/skill.ts
+@@ -13,6 +13,7 @@ import { AbsolutePath } from "../../schema.js"
+ import { Skill } from "../../skill.js"
+ import { SkillDiscovery } from "../../skill/discovery.js"
+ import { SkillFile } from "./skill-file.js"
++import { SkillScan } from "./skill-scan.js"
  
+ type Source = Skill.DirectorySource | Skill.UrlSource
+ 
+@@ -35,7 +36,9 @@ export const Plugin = define({
+ 
+     const watch = Effect.fn("ConfigSkillPlugin.watch")(function* (directory: string, type: "file" | "directory") {
+       const target = path.resolve(directory)
+-      const updates = yield* watcher.subscribe({ path: target, type })
++      const updates = yield* watcher.subscribe(
++        type === "directory" ? { path: target, type, ignore: SkillScan.ignore } : { path: target, type },
++      )
+       yield* FiberMap.run(
+         watches,
+         `${type}:${target}`,
+@@ -117,12 +120,9 @@ export const Plugin = define({
+       const roots = (yield* Effect.forEach(directories, watchDirectory)).flat()
+       const skills: Skill.Info[] = []
+       for (const directory of directories) {
+-        const files = yield* fs
+-          .scan("{*.md,**/SKILL.md}", { cwd: directory, absolute: true, include: "file", symlink: true, dot: true })
+-          .pipe(Effect.orElseSucceed(() => [] as string[]))
+-        for (const filepath of files.toSorted()) {
++        for (const filepath of yield* SkillScan.scan(directory)) {
+           const resolved = yield* fs.realPath(filepath).pipe(Effect.orElseSucceed(() => filepath))
+-          if (!roots.some((root) => FSUtil.contains(root, resolved))) yield* watch(path.dirname(resolved), "directory")
++          if (!roots.some((root) => FSUtil.contains(root, resolved))) yield* watch(resolved, "file")
+           const content = yield* fs.readFileStringSafe(filepath).pipe(Effect.orElseSucceed(() => undefined))
+           if (!content) continue
+           const parsed = SkillFile.parse(directory, filepath, content)
 ```
 
 
@@ -620,7 +515,7 @@ index 49dc3cd..c0246ee 100644
 
 Based on the changes, the following files in Alexi should be reviewed:
 
-- `src/core/` - review core changes from packages/core/package.json
+- No specific recommendations - review changes manually
 
 ## Your Task
 

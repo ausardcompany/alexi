@@ -4427,6 +4427,65 @@ switch (event.type) {
 
 See [docs/API.md — Stream Event Guards API](API.md#stream-event-guards-api) for the typed surface.
 
+## Shared Model Retry Policy (`src/core/model-retry.ts`)
+
+Introduced in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode #56497 "extract shared retry policy"). Although the module lives in `src/core/` (because it is model-agnostic — any streaming provider can compose it), it defines the retry contract every SAP AI Core generate / stream caller is expected to use so permanent-vs-transient classification stays identical across the fleet.
+
+```mermaid
+flowchart TD
+    Call[retryable fn, opts] --> Attempt[attempt N: fn attempt]
+    Attempt -->|resolved| Done[return value]
+    Attempt -->|rejected err| Classify[isRetryable err]
+    Classify --> Check1{err.retryable === true}
+    Check1 -->|yes| Yes[retry]
+    Check1 -->|no| Check2{isRetryableError err}
+    Check2 -->|yes rate-limit/xAI capacity| Yes
+    Check2 -->|no| Check3{status in 429/502/503/504}
+    Check3 -->|yes| Yes
+    Check3 -->|no| Check4{code in TRANSIENT_ERROR_CODES}
+    Check4 -->|yes ECONNRESET/EPIPE/...| Yes
+    Check4 -->|no| No[rethrow]
+    Yes --> Budget{attempts < maxAttempts}
+    Budget -->|yes| Backoff[sleep baseMs * 2^N with jitter, capped at maxMs]
+    Backoff --> Attempt
+    Budget -->|no| No
+```
+
+### Public surface
+
+- `RetryableError` interface — `{ readonly retryable: boolean; readonly retryAfterMs?: number }`.
+- `isRetryable(error: unknown): boolean` — classification helper.
+- `DEFAULT_MODEL_RETRY_OPTIONS` — `{ maxAttempts: 3, baseMs: 500, maxMs: 30_000, jitter: true }`. Matches upstream Effect-TS schedule bytewise.
+- `retryable<T>(fn, opts?): Promise<T>` — wraps a model-call producer with the shared policy.
+
+### Scope
+
+Covers three transient buckets per the AGENTS.md error contract:
+
+- Rate limits (HTTP 429, excluding permanent free-tier rate limits — those are classified as fatal by `isRetryableError`).
+- Transient server errors (HTTP 502, 503, 504).
+- Network blips (`ECONNRESET`, `ECONNREFUSED`, `ETIMEDOUT`, `ENOTFOUND`, `EAI_AGAIN`, `EPIPE`, `EAGAIN`, `EBUSY`).
+
+Permanent failures (4xx auth / validation, free-tier rate limits, content-filter rejections) are NOT retried — retrying only burns the deployment quota without changing the outcome. Composable with the SAP AI Core orchestration path: callers wrap their generate / stream producer in `retryable()` and leave downstream backoff loops (`ErrorBackoff` in `src/core/error-backoff.ts`, the streaming retry in `src/core/session/retry.ts`) in place for the finer-grained reconnect semantics.
+
+See [docs/API.md — Shared Model Retry Policy API](API.md#shared-model-retry-policy-api) for the typed surface.
+
+## GitHub Copilot Provider: Null-Safe Response Stream Parser (`src/providers/github-copilot.ts`)
+
+Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream opencode fix #56669). The OpenAI-compatible Responses API that GitHub Copilot proxies has started sending explicit `null` for optional fields (`delta`, `item`, `output`) instead of omitting them. A naive `chunk.delta ?? ''` handles that for scalar strings, but nested property access on a `null` `item` would still throw.
+
+### Guard order in `parseCopilotResponseStream`
+
+1. Top-level untyped-chunk guard: `!chunk || typeof chunk !== 'object' || typeof chunk.type !== 'string'` returns `{ type: 'ignored', reason: 'untyped' }`.
+2. Delta normalisation: `const delta = typeof chunk.delta === 'string' ? chunk.delta : ''` for `response.output_text.delta`, `response.reasoning.delta`, and `response.reasoning_opaque.delta`.
+3. `response.output_item.added` extracts `item` via `chunk.item ?? undefined` before reading `.type` or `.id`.
+4. Any unknown `type` still returns `{ type: 'ignored', reason: chunk.type }`.
+
+### Design notes
+
+- Forward-compatible with any future field that the Responses API may start sending as explicit `null`. The top-level `isTypedStreamEvent`-shaped guard, the `typeof === 'string'` delta coercion, and the nullish-coalescing on nested property access combine to make `null` structurally equivalent to "absent" at every known access point.
+- Mirrors the broader stream-event tolerance pattern established by `src/providers/protocols/stream-events.ts`: decoders prefer `ignored` over `throw` so a forward-rolled upstream server stays usable.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

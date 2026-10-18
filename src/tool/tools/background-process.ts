@@ -149,8 +149,11 @@ Goals:
           // Ignore port detection errors
         });
 
-      // Handle process exit
-      child.on('exit', (code) => {
+      // Handle process exit. Use `close` (fires after stdio pipes drain)
+      // rather than `exit` (fires on termination, before stdio flushes)
+      // so any late port-detection reads see a consistent "stopped" status.
+      // Mirrors opencode fix #56321.
+      child.on('close', (code) => {
         bgProcess.status = code === 0 ? 'stopped' : 'failed';
       });
 
