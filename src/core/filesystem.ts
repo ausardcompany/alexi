@@ -66,7 +66,9 @@ export function isMissingOrDenied(err: unknown): boolean {
  * error (e.g. `EIO`) propagates — those are genuine failures, not
  * expected states.
  */
-export async function statOptional(path: string): Promise<Awaited<ReturnType<typeof fs.stat>> | undefined> {
+export async function statOptional(
+  path: string
+): Promise<Awaited<ReturnType<typeof fs.stat>> | undefined> {
   try {
     return await fs.stat(path);
   } catch (err) {

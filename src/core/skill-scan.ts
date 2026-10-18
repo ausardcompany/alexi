@@ -54,12 +54,7 @@ export const IGNORED_DIRS: ReadonlySet<string> = new Set([
  * glob library elsewhere (e.g. the test harness). Mirrors the array
  * exported by opencode's `util/skill-scan`.
  */
-export const ignore: readonly string[] = [
-  '**/node_modules/**',
-  '**/.git/**',
-  '**/.*',
-  '**/.*/**',
-];
+export const ignore: readonly string[] = ['**/node_modules/**', '**/.git/**', '**/.*', '**/.*/**'];
 
 /**
  * Classified child entry produced by the scanner's per-directory probe.
@@ -77,7 +72,13 @@ interface ScanChild {
  * broken symlink or stat failure yields `'other'` so the entry is
  * ignored without aborting the parent scan.
  */
-async function classify(parent: string, name: string, isFile: boolean, isDir: boolean, isSymlink: boolean): Promise<ScanChild> {
+async function classify(
+  parent: string,
+  name: string,
+  isFile: boolean,
+  isDir: boolean,
+  isSymlink: boolean
+): Promise<ScanChild> {
   const target = path.join(parent, name);
   if (isFile) {
     return { name, path: target, type: 'file' };
@@ -109,9 +110,7 @@ async function classify(parent: string, name: string, isFile: boolean, isDir: bo
  */
 export async function scanSkills(root: string): Promise<string[]> {
   const files: string[] = [];
-  const queue: Array<{ directory: string; depth: number }> = [
-    { directory: root, depth: 0 },
-  ];
+  const queue: Array<{ directory: string; depth: number }> = [{ directory: root, depth: 0 }];
 
   while (queue.length > 0) {
     const item = queue.shift()!;
@@ -124,7 +123,9 @@ export async function scanSkills(root: string): Promise<string[]> {
     const children = await Promise.all(
       entries
         .filter((e) => !e.name.startsWith('.') && !IGNORED_DIRS.has(e.name))
-        .map((e) => classify(item.directory, e.name, e.isFile(), e.isDirectory(), e.isSymbolicLink()))
+        .map((e) =>
+          classify(item.directory, e.name, e.isFile(), e.isDirectory(), e.isSymbolicLink())
+        )
     );
 
     // Short-circuit: a `SKILL.md` file *is* the skill marker; descending
