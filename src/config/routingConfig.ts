@@ -39,6 +39,15 @@ export interface RoutingConfig {
   models: ModelCapability[];
   rules: RoutingRule[];
   preferences: RoutingPreferences;
+  /**
+   * Optional short-name aliases for model ids. Maps a short alias
+   * (e.g. `opus`) to the canonical model id (e.g.
+   * `sap-ai-core/anthropic--claude-4.7-opus`). Resolved by
+   * `src/config/modelAliases.ts::resolveModelAlias` before provider
+   * lookup. Aliases may chain (up to `MAX_ALIAS_DEPTH` levels); cycles
+   * are reported as warnings and the invalid alias is skipped.
+   */
+  modelAliases?: Record<string, string>;
 }
 
 /**
@@ -171,6 +180,7 @@ export function loadRoutingConfig(configPath?: string): RoutingConfig {
           models: config.models,
           rules: config.rules || [],
           preferences: { ...DEFAULT_CONFIG.preferences, ...config.preferences },
+          modelAliases: config.modelAliases,
         };
       }
     } catch (error) {
