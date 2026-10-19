@@ -1,0 +1,66 @@
+# gitleaks configuration
+#
+# Scope: this file documents allowlisted secret-shaped strings that
+# gitleaks and other scanners (TruffleHog, GitHub secret scanning
+# alerts) will otherwise flag inside the Alexi repository. Each entry
+# must reference the audit that first justified it so a reviewer can
+# recover the context without re-deriving.
+#
+# All current allowlist entries are for FIXTURE / TEST material. No
+# real credential is ever allowlisted here. If a real secret ever lands
+# in a tracked file, the fix is rotation + git-filter-repo, not a new
+# allowlist entry.
+#
+# References:
+#   - docs/security/audit-2026-06-22.md  (introduction of the test PEM)
+#   - docs/security/audit-2026-10-12.md  (I3, defers allowlist to this file)
+#   - docs/security/audit-2026-10-19.md  (R-this-run, lands the file)
+
+[extend]
+# Inherit the default gitleaks ruleset
+useDefault = true
+
+[[allowlists]]
+description = """
+Throwaway RSA-2048 keypair and self-signed certificate used by the
+custom-CA fetch tests. Generated for the test only; never used to
+authenticate against any live service. The in-file comment at
+tests/providers/ca.test.ts:410 documents the origin.
+"""
+paths = [
+  '''tests/providers/ca\.test\.ts''',
+]
+regexes = [
+  '''-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----''',
+  '''-----BEGIN CERTIFICATE-----''',
+]
+
+[[allowlists]]
+description = """
+Example / placeholder service key shape. All credential values are
+'***' placeholders. .env.example is intentionally committed so new
+contributors can see the expected shape of AICORE_SERVICE_KEY without
+needing a real tenant.
+"""
+paths = [
+  '''\.env\.example''',
+]
+regexes = [
+  '''"clientsecret"\s*:\s*"\*{3,}"''',
+  '''"clientid"\s*:\s*"\*{3,}"''',
+]
+
+[[allowlists]]
+description = """
+Documentation and historical audit reports under docs/security/ quote
+pattern substrings (e.g. 'clientsecret', 'ghp_', 'xoxb-') in the clear
+when discussing scanner rules and redaction behaviour. These are
+self-referential documentation, not credentials.
+"""
+paths = [
+  '''docs/security/.*\.md''',
+  '''docs/.*\.md''',
+  '''AGENTS\.md''',
+  '''README\.md''',
+  '''\.github/prompts/.*\.md''',
+]
