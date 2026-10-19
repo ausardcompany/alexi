@@ -201,7 +201,7 @@ describe('useKeyboard', () => {
     const onOpenTranscriptUrl = vi.fn();
     const { stdin } = render(
       <TestComponent
-        options={​{
+        options={{
           ...defaultOptions,
           onOpenTranscriptUrl,
         }}
@@ -216,7 +216,7 @@ describe('useKeyboard', () => {
     const onOpenTranscriptUrl = vi.fn();
     const { stdin } = render(
       <TestComponent
-        options={​{
+        options={{
           ...defaultOptions,
           onOpenTranscriptUrl,
         }}
@@ -231,7 +231,7 @@ describe('useKeyboard', () => {
     const onOpenTranscriptUrl = vi.fn();
     const { stdin } = render(
       <TestComponent
-        options={​{
+        options={{
           ...defaultOptions,
           onOpenTranscriptUrl,
         }}
@@ -252,7 +252,7 @@ describe('useKeyboard', () => {
     const onOpenTranscriptUrl = vi.fn();
     const { stdin } = render(
       <TestComponent
-        options={​{
+        options={{
           ...defaultOptions,
           onOpenTranscriptUrl,
         }}
