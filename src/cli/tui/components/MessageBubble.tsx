@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text, useWindowSize } from 'ink';
 
 import type { MessageBubbleProps } from '../types/props.js';
 import { MarkdownRenderer } from './MarkdownRenderer.js';
@@ -35,8 +35,7 @@ export function MessageBubble({
 }: MessageBubbleExtendedProps): React.JSX.Element {
   const { theme } = useTheme();
   const { colors } = theme;
-  const { stdout } = useStdout();
-  const columns = stdout?.columns ?? 80;
+  const { columns } = useWindowSize();
 
   const timeStr = new Date(timestamp).toLocaleTimeString(undefined, {
     hour: '2-digit',

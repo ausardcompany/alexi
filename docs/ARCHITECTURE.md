@@ -4961,6 +4961,28 @@ that need browser automation should install it explicitly.
 5. **Hook Sandboxing**: Hooks run with configurable timeout (default 30s)
 6. **Type Safety**: Strict TypeScript with Zod runtime validation throughout
 
+## TUI Terminal-Size Hook (`useWindowSize`, Ink v8)
+
+Alexi runs on Ink v8 (bumped from v7.1.1 in commit `963f346a chore(deps): bump ink from 7.1.1 to 8.0.0`). Three TUI call sites react to terminal resize events and were migrated to v8's dedicated `useWindowSize` hook in commit `192230a4 fix(ci): migrate TUI to ink v8 useWindowSize hook [autohealing]`:
+
+- `src/cli/tui/App.tsx:57-60` — the module-local `useTerminalSize()` helper is now a one-line wrapper over `useWindowSize()` returning `{ rows, columns }`. The pre-v8 implementation stored the dimensions in `useState`, registered a `stdout.on('resize', ...)` listener in a `useEffect`, and tore it down on unmount; v8's hook subscribes once per Ink root and re-renders every subscriber on resize, so the manual state wiring is gone.
+- `src/cli/tui/components/MarkdownRenderer.tsx:61` — the width-aware marked-terminal renderer uses `useWindowSize().columns` to compute `effectiveWidth = Math.max(40, (maxWidth ?? columns) - 8)`. The `-8` accounts for the Ink padding chain (`paddingX(1) + paddingLeft(2) + paddingX(1) = 6` chars) plus a 2-char safety margin.
+- `src/cli/tui/components/MessageBubble.tsx:38` — the message-bubble component reads `columns` for its layout cap and timestamp alignment.
+
+```typescript
+// src/cli/tui/App.tsx
+import { Box, useApp, useWindowSize } from 'ink';
+
+function useTerminalSize(): { rows: number; columns: number } {
+  const { rows, columns } = useWindowSize();
+  return { rows, columns };
+}
+```
+
+Correctness contract: `useWindowSize` is reactive — a terminal resize mid-session re-renders every subscriber in the same frame. The pre-v8 `useStdout().stdout?.columns ?? 80` reads in `MarkdownRenderer` and `MessageBubble` were NOT reactive (they captured the initial `columns` once and never updated), so operators resizing their terminal while a session was open would see the top-level layout reflow but the markdown bodies and bubbles stay at the old width. The v8 migration is a behavioural fix, not just a dependency bump.
+
+Call-site inventory for future resize-driven features: use `useWindowSize` from `ink` directly; do NOT register a per-component `stdout.on('resize')` listener. The hook is the single source of truth for both `rows` (used in `App.tsx` for viewport sizing) and `columns` (used for all width-aware layout decisions).
+
 ## TUI Transcript Rendering Model (Non-Virtualized)
 
 Alexi's Ink transcript (`src/cli/tui/components/MessageArea.tsx`) is deliberately prop-driven and non-virtualized. Every completed run in `messages` is grouped by `collapseCompletedWork(visibleMessages, { isStreaming })` and rendered directly via `Box` / `Text` / `MessageBubble` / `ToolRow` / `WorkActivity`. There is no row-measuring virtualizer in the render path (`virtua`, `react-window`, and `react-virtualized` are NOT dependencies of Alexi, and none of them is imported by the TUI).

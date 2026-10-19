@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Box, useApp, useStdout } from 'ink';
+import { Box, useApp, useWindowSize } from 'ink';
 
 import { ThemeProvider, useTheme } from './context/ThemeContext.js';
 import { SessionProvider, useSession } from './context/SessionContext.js';
@@ -55,28 +55,8 @@ import type { MessageDisplay } from './components/MessageArea.js';
 // ---------------------------------------------------------------------------
 
 function useTerminalSize(): { rows: number; columns: number } {
-  const { stdout } = useStdout();
-  const [size, setSize] = useState({
-    rows: stdout?.rows ?? 24,
-    columns: stdout?.columns ?? 80,
-  });
-
-  useEffect(() => {
-    if (!stdout) {
-      return;
-    }
-
-    const onResize = (): void => {
-      setSize({ rows: stdout.rows, columns: stdout.columns });
-    };
-
-    stdout.on('resize', onResize);
-    return () => {
-      stdout.off('resize', onResize);
-    };
-  }, [stdout]);
-
-  return size;
+  const { rows, columns } = useWindowSize();
+  return { rows, columns };
 }
 
 export interface AppProps {

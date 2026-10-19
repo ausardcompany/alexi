@@ -2621,6 +2621,8 @@ When adding a new interactive REPL command (like `/rewind` or `/code-review`):
 
 ## Factoring TUI Components
 
+Alexi targets **Ink v8** (`"ink": "^8.0.0"` in `package.json`). When a component needs the current terminal dimensions, import `useWindowSize` from `ink` and read `{ rows, columns }` directly — do NOT use `useStdout` and do NOT register a per-component `stdout.on('resize', ...)` listener. The v8 hook is reactive by contract: it subscribes once per Ink root and re-renders every subscriber on terminal resize. The migration from the v7 `useStdout` pattern landed in commits `963f346a chore(deps): bump ink from 7.1.1 to 8.0.0` and `192230a4 fix(ci): migrate TUI to ink v8 useWindowSize hook [autohealing]` and touched three call sites: `src/cli/tui/App.tsx:57-60` (the module-local `useTerminalSize()` helper), `src/cli/tui/components/MarkdownRenderer.tsx:61`, and `src/cli/tui/components/MessageBubble.tsx:38`. See [ARCHITECTURE.md — TUI Terminal-Size Hook (useWindowSize, Ink v8)](./ARCHITECTURE.md#tui-terminal-size-hook-usewindowsize-ink-v8) for the full contract and the behavioural fix the migration carries.
+
 Effective 1.20.2, TUI components under `src/cli/tui/components/` should follow a two-layer separation:
 
 1. **Pure string / logic helpers** live in `src/cli/tui/utils/*.ts` and never import from `ink` or `react`. Example: `formatBashCommand`, `truncateOutput`, `formatParamsPreview`, `formatDuration`, `guessLanguageFromPath` in `src/cli/tui/utils/formatToolOutput.ts`.
