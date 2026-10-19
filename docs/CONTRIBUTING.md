@@ -1188,6 +1188,18 @@ alias resolution) has exactly one edit site. When adding similar
    skipped, but tests must NOT assert on log output — the warning is
    best-effort visibility, not a public contract.
 
+### Pure formatters + injectable adapters (`permissions` CLI)
+
+Issue #2087 added `alexi permissions list|show|edit` in `src/cli/commands/permissions.ts` and demonstrates a shape worth copying for any new "inspect-and-edit saved state" CLI group (hooks, skills, plan presets, routing-rule overrides). The five invariants:
+
+1. **Pure formatters first.** `formatRuleSummary(rule)`, `describeRulePatterns(rule)`, and `formatRuleDetail(rule)` are standalone exports that take data and return a string — no I/O, no config lookups, no logger calls. Tests diff on exact output and the renderers are reusable from future TUI panels or external dashboards. If a renderer needs to pull additional state (like `getDenialProvenance(ruleId)` inside `formatRuleDetail`), it should only do a single pure lookup and gate rendering on the presence of the hit so the layout stays identical for the no-hit path.
+2. **Core ops accept an injected manager / adapter.** Every operation that touches the global `PermissionManager` (`listRules`, `showRule`, `applyEditFlags`, `editRuleInteractively`) accepts the manager as an optional parameter default-argumented to `getPermissionManager()`. The interactive flow additionally takes an `InteractivePromptAdapter` so tests can inject a deterministic stub (`async () => 'deny'`) instead of driving a real TTY. This is the same shape as [Injectable I/O boundaries (preferred over module mocks)](#injectable-io-boundaries-preferred-over-module-mocks), applied to a Commander subcommand.
+3. **Two mutually-exclusive modes: flag mode and TTY mode.** Non-interactive callers (CI, scripts, agents) drive edits through `applyEditFlags(ruleId, opts)` with validated flags; interactive callers get an `@inquirer/prompts` picker dynamic-imported on first use so headless runs pay zero cost. Flag mode wins when any editable flag is present, UNLESS `--interactive` is explicitly set — that escape hatch lets operators force the TTY picker even when a parent script already set `--decision allow`.
+4. **Refuse to open a prompt outside a TTY.** `process.stdin.isTTY === false` + no flags must exit `1` with a specific stderr message directing the operator to pass flags, not hang on a prompt that cannot be answered. The regression test for this (`'permissions edit <id>' without flags refuses to run outside a TTY`) stubs `process.stdin.isTTY` with `Object.defineProperty(... { configurable: true, value: false })` and restores the original in a `finally` block.
+5. **Mutation goes through one method on the manager.** The CLI never writes to `manager.rules` directly. `PermissionManager.updateRule(ruleId, patch)` is the only mutation path: it merges the patch, forces `id` back to `ruleId` so a stray patch cannot rename the rule, validates the merged shape through `PermissionRuleSchema.parse` (so invalid priorities / decisions throw at the manager boundary instead of silently corrupting state), replaces the slot in-place, and re-sorts the rules so the last-match-wins evaluator stays in sync with the new priority. When adding a similar "inspect-and-edit" surface, keep the Zod-validate-at-boundary + replace-in-place + re-sort pattern.
+
+Reference files: `src/cli/commands/permissions.ts`, `src/permission/index.ts` (`updateRule`, `getRule`), `tests/cli/commands/permissions.test.ts`. See [TESTING.md — Testing the Permissions CLI](TESTING.md#testing-the-permissions-cli-srcclicommandspermissionsts-issue-2087) for the Commander-wiring harness and the test contract pinned by the 20+ case suite.
+
 ### Read-only query modules over persisted state (`src/core/agentUsage.ts`)
 
 The per-agent usage aggregator added in commit `99ca2c5d feat(core): add per-agent usage aggregation query module` is the current reference for a "pure read, no writes" query over Alexi's on-disk state. When adding a similar aggregation (session search histograms, model-usage breakdowns, cost-by-workdir rollups), keep the five invariants that `src/core/agentUsage.ts` holds:
@@ -1713,6 +1725,21 @@ writes into an unbounded `Map<string, PermissionProvenance>`, and
 `clearDenialStore()` is the paired teardown. Tests that seed the store MUST
 call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
 and avoid cross-test leakage.
+
+### Permission edit history (`src/permission/provenance.ts`)
+
+Issue #2085 (commit `3acad684 feat(config): add permission edit history tracking to provenance`) extended `PermissionProvenance` with an append-only audit trail. Every post-creation mutation to the underlying `PermissionRule` MUST flow through `appendEditHistory` — writing to `editHistory` or `editedAt` directly is a contract violation that will drift the two fields out of agreement under concurrent edits.
+
+Contract for any new call site that mutates a rule:
+
+1. **Call `appendEditHistory(provenance, changes, reason?, timestamp?)` — do not push to `editHistory` directly.** The helper is the ONLY path that keeps `editedAt` synchronised with the last entry's `timestamp`. A direct push would leave `editedAt` stale, which is exactly the kind of audit-trail drift reviewers cannot catch by inspection.
+2. **Treat the input as immutable.** The helper returns a NEW `PermissionProvenance` object and does NOT mutate the input (including the previous `editHistory` array — a shared array would let a late append silently retroactively modify a persisted snapshot). Call sites that need to update stored state must replace the record with the returned value, not assume the input was mutated.
+3. **Keep `changes` as a `Partial<PermissionRule>` delta, not a full post-edit rule.** The audit record carries ONLY the field(s) touched in this edit — a rule rename records `{ name: 'new-name' }`, a scope narrow records `{ paths: [...] }`. Logging the full post-edit rule would bloat the audit trail and lose the "which field was touched" signal that reviewers rely on.
+4. **Pass a `reason` only when the operator supplied one.** `reason` is optional free-text; omitting it is fine and the formatter does not render a `reason` suffix. Do NOT synthesise a `reason` from the delta ("renamed from X to Y") — the diff already shows that, and a synthesised reason hides the "no operator rationale was captured" signal.
+5. **Let `timestamp` default to `Date.now()` unless replaying.** The parameter is overridable for tests (deterministic ordering) and for callers that need to carry a replayed timestamp from an external audit log. Production call sites should NOT pass a timestamp — relying on the default keeps the audit trail monotonically non-decreasing without any coordination between call sites.
+6. **Round-trip through `recordDenial` / `getDenialProvenance` preserves the edit history.** When persisting a denial provenance via the denial store, the retrieved record carries the full `editHistory` unchanged. No special handling is needed; the store treats the whole record as opaque.
+
+The paired regression suite is `tests/permission/provenance.test.ts` (247 lines, 16 cases); see [docs/TESTING.md — Testing permission edit history tracking](TESTING.md#testing-permission-edit-history-tracking-srcpermissionprovenancets-issue-2085) for the invariants and the fixture pattern. The `formatProvenanceMessage` suffix contract (`(edited N time(s), last YYYY-...)`, singular/plural boundary, `editedAt` preferred over the history tail) is pinned there as well — a formatter change MUST update both the suite and the contract text.
 
 ### Verification-only regression suites (lock in a contract with tests + inline JSDoc)
 

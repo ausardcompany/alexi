@@ -885,6 +885,187 @@ const report = formatHealthReport(results, /* verbose */ true);
 
 See [PROVIDERS.md — Provider Health Check](PROVIDERS.md#provider-health-check-srcprovidershealthts) for the provider-layer design contract and [ARCHITECTURE.md — Provider Health Check](ARCHITECTURE.md#provider-health-check-srcprovidershealthts) for the end-to-end call flow.
 
+### permissions
+
+Inspect and modify saved permission rules outside the normal interactive ask flow. Introduced to resolve issue #2087. The command group mirrors the SST OpenCode pattern (`list` / `show` / `edit`) and is registered by `src/cli/commands/permissions.ts`; the underlying mutation path lands on the new `PermissionManager.updateRule` method in `src/permission/index.ts`.
+
+```bash
+alexi permissions list [--json]
+alexi permissions show <ruleId> [--json]
+alexi permissions edit <ruleId> [--decision <v>] [--priority <n>] [--description <text>] [--interactive]
+```
+
+#### `permissions list`
+
+List every saved permission rule in last-match-wins priority order.
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--json` | boolean | Emit the full `PermissionRule[]` array as pretty-printed JSON on stdout. Use for `jq` / CI consumption. |
+
+Human-readable output renders one summary line per rule via the exported pure formatter `formatRuleSummary(rule)`:
+
+```text
+=== Permission Rules ===
+
+  [ALLOW] rule-allow-read — Allow Read (priority 10) — actions: read
+  [ASK]   rule-ask-write — (unnamed) (priority 20) — actions: write
+  [DENY]  rule-deny-secrets — Deny Secrets (priority 100) — paths: **/.env
+```
+
+An empty rule set prints `No permission rules configured.` and exits `0`.
+
+#### `permissions show <ruleId>`
+
+Show full details for a specific rule, including the latest denial provenance (when `getDenialProvenance(ruleId)` returns a hit).
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--json` | boolean | Emit `{ rule, provenance }` as pretty-printed JSON. `provenance` is `null` when no denial has been recorded against this rule in the current session. |
+
+Human-readable output:
+
+```text
+Rule: rule-deny-secrets
+  Name:        Deny Secrets
+  Description: Deny access to secrets
+  Decision:    deny
+  Priority:    100
+  Paths:       **/.env
+  Provenance:  Denied by config (reason: matched secret path)
+```
+
+Missing rules exit `1` with `Rule '<id>' not found.` on stderr.
+
+#### `permissions edit <ruleId>`
+
+Modify a saved rule. Two mutually-exclusive modes:
+
+- **Non-interactive flag mode** (default when any editable flag is supplied): drives the edit through the pure `applyEditFlags(ruleId, opts)` helper, suitable for CI, scripts, and headless agent runs.
+- **TTY-interactive mode** (default when no flag is supplied, OR when `--interactive` is passed): opens an `@inquirer/prompts` picker. Dynamic-imported on first use so non-TTY invocations never pay the cost of loading the prompts package.
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--decision <value>` | string | New decision. Must be one of `allow`, `deny`, `ask` (case-insensitive — stored lowercase). |
+| `--priority <n>` | number | New priority. Parsed with `Number()`; rejects non-finite values with `Invalid --priority '<v>' (must be a number).`. |
+| `--description <text>` | string | New description. Treated as a plain string overwrite. |
+| `--interactive` | boolean | Force the interactive editor even when flags are supplied. |
+
+Behaviour:
+
+- The command refuses to open the interactive editor when `process.stdin.isTTY` is false; prints `Error: refusing to run interactive editor without a TTY. Pass --decision / --priority / --description, or run from an interactive terminal.` on stderr and exits `1`.
+- On success, prints `Updated rule '<id>'.` followed by the full `formatRuleDetail(rule)` block (same renderer as `permissions show`).
+- Non-interactive mode exits `1` for unknown rule ids, invalid `--decision` values, non-numeric `--priority`, and the "no fields to update" case (no editable flag supplied AND `--interactive` not set outside a TTY).
+- Interactive mode: each prompt returning `null` is treated as "keep current value" so the user can bail out of a single field without aborting the whole edit. Pressing Ctrl+C through `@inquirer/prompts` resolves to `null` in the default adapter.
+
+Examples:
+
+```bash
+# List every saved rule (human-readable).
+alexi permissions list
+
+# Show one rule as JSON for jq.
+alexi permissions show rule-deny-secrets --json
+
+# Flip a rule from "ask" to "allow" in CI, no TTY.
+alexi permissions edit rule-ask-write --decision allow
+
+# Bump priority and change the description in one call.
+alexi permissions edit rule-allow-read --priority 50 --description "Allow read actions in workdir"
+
+# Force the interactive editor even though a flag is present.
+alexi permissions edit rule-ask-write --decision ask --interactive
+```
+
+#### Programmatic API
+
+Every core operation is exported from `src/cli/commands/permissions.ts` and takes an optional `PermissionManager` so tests can inject a fresh instance without touching the global:
+
+```typescript
+import {
+  listRules,
+  showRule,
+  applyEditFlags,
+  editRuleInteractively,
+  formatRuleSummary,
+  describeRulePatterns,
+  formatRuleDetail,
+  registerPermissionsCommand,
+  type EditOptions,
+  type EditResult,
+  type ListResult,
+  type ShowResult,
+  type InteractivePromptAdapter,
+} from './cli/commands/permissions.js';
+import {
+  getPermissionManager,
+  type PermissionDecision,
+  type PermissionManager,
+  type PermissionRule,
+} from './permission/index.js';
+
+const { rules } = listRules();
+const { rule } = showRule('rule-ask-write');
+
+// Non-interactive edit (CI / agents).
+const result: EditResult = applyEditFlags('rule-ask-write', {
+  decision: 'allow',
+  priority: '50',
+  description: 'Allow write in workdir',
+});
+if (!result.updated) {
+  console.error(result.reason);
+}
+
+// Interactive edit with a stub adapter (tests).
+const stub: InteractivePromptAdapter = {
+  pickDecision: async () => 'deny',
+  askPriority: async () => 55,
+  askDescription: async () => null, // "keep current"
+};
+const updated = await editRuleInteractively('rule-ask-write', stub);
+
+export interface EditOptions {
+  decision?: string;              // 'allow' | 'deny' | 'ask' (case-insensitive)
+  priority?: string | number;     // coerced through Number()
+  description?: string;
+}
+
+export interface EditResult {
+  updated: PermissionRule | null;
+  reason?: string;                // populated when updated === null
+}
+
+export interface InteractivePromptAdapter {
+  pickDecision: (current: PermissionDecision) => Promise<PermissionDecision | null>;
+  askPriority: (current: number) => Promise<number | null>;
+  askDescription: (current: string | undefined) => Promise<string | null>;
+}
+```
+
+#### `PermissionManager` additions
+
+Two new methods on `src/permission/index.ts:PermissionManager`:
+
+```typescript
+/**
+ * Update an existing rule by id. Only the properties present in
+ * `patch` are overwritten; the rule's id is preserved regardless of
+ * whether a different id is supplied in the patch. Returns the
+ * updated rule, or `null` if no rule matched the id.
+ */
+updateRule(ruleId: string, patch: Partial<PermissionRule>): PermissionRule | null;
+
+/**
+ * Get a single rule by id. Returns `undefined` when no rule matches.
+ */
+getRule(ruleId: string): PermissionRule | undefined;
+```
+
+`updateRule` is the only safe mutation path for the `permissions edit` flow. It merges the patch, forces `id` back to `ruleId` so a stray `id` in the patch cannot rename the rule, validates the merged shape through `PermissionRuleSchema.parse` (so invalid priorities / decisions throw at the manager boundary rather than silently corrupting state), replaces the slot in-place, and re-sorts the rules via `this.sortRules(this.rules)` so the last-match-wins evaluator stays in sync with the new priority.
+
+See [ARCHITECTURE.md — Permissions CLI](ARCHITECTURE.md#permissions-cli-srcclicommandspermissionsts) for the end-to-end call flow and [TESTING.md — Testing the Permissions CLI](TESTING.md#testing-the-permissions-cli-srcclicommandspermissionsts-issue-2087) for the pinned test contract.
+
 ### server
 
 Manage the local UNIX socket server that exposes Alexi's slash command surface to remote clients (VS Code extension, JetBrains plugin, test harnesses). Registered by `src/cli/commands/server.ts`. The full wire protocol lives in [`docs/SERVER.md`](SERVER.md).

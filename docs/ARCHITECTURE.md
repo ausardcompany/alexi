@@ -3782,6 +3782,59 @@ interface DoomLoopConfig {
 
 `src/permission/recovery.ts` reconciles pending `askUser()` prompts that were disrupted by an abort / hot-reload / provider re-init. Entries past their deadline resolve as denials with `reason: 'stalled_recovery'`; entries whose paired rule-save aborted are dropped with `reason: 'save_aborted'`. `SessionManager.createSession()` fires the sweep on every session creation via a fire-and-forget dynamic import so unit tests of `sessionManager` do not pull in the recovery module. See [Stalled Permission Approval Recovery](#stalled-permission-approval-recovery) for the sequence diagram and the full contract.
 
+### Permissions CLI (`src/cli/commands/permissions.ts`)
+
+Operators need a way to inspect and amend saved permission rules without replaying the interactive ask flow — for example when CI must flip a long-standing `ask` rule to `allow` before a scheduled job, or when a human needs to look up why a specific denial fired without digging through session logs. Issue #2087 added the `alexi permissions list|show|edit` command group that mirrors the SST OpenCode pattern.
+
+```mermaid
+flowchart TD
+    CLI["alexi permissions &lt;sub&gt;"] --> Dispatch{Subcommand}
+
+    Dispatch -->|list| ListOp[listRules]
+    Dispatch -->|show| ShowOp[showRule]
+    Dispatch -->|edit| EditOp{{Any flag?}}
+
+    ListOp --> Mgr[(PermissionManager<br/>getPermissionManager)]
+    ShowOp --> Mgr
+
+    EditOp -->|yes & not --interactive| Flags[applyEditFlags]
+    EditOp -->|no OR --interactive| TTY{process.stdin.isTTY?}
+
+    TTY -->|false| RefuseTTY[/stderr: refusing to run interactive editor<br/>exit 1/]
+    TTY -->|true| Adapter[buildDefaultAdapter<br/>dynamic-import @inquirer/prompts]
+    Adapter --> Interactive[editRuleInteractively]
+
+    Flags --> Validate{Valid?}
+    Validate -->|no| RejectFlags[/stderr: Invalid --flag<br/>exit 1/]
+    Validate -->|yes| Patch[Partial&lt;PermissionRule&gt;]
+
+    Interactive --> Patch
+
+    Patch --> Update[PermissionManager.updateRule]
+    Update --> Zod{PermissionRuleSchema.parse}
+    Zod -->|throws| ZodErr[/stderr: Error ...<br/>exit 1/]
+    Zod -->|ok| ReplaceSort[Replace slot + sortRules]
+    ReplaceSort --> Rendered[formatRuleDetail]
+    Rendered --> Stdout[/stdout: Updated rule &lt;id&gt;/]
+
+    Mgr --> Rendered
+    Mgr --> ListRender[formatRuleSummary per rule]
+    ListRender --> Stdout
+```
+
+Design invariants pinned by the implementation and the test suite in `tests/cli/commands/permissions.test.ts`:
+
+- **Pure formatters.** `formatRuleSummary`, `describeRulePatterns`, and `formatRuleDetail` are pure functions exported from `src/cli/commands/permissions.ts` so tests can diff on exact output and downstream consumers (future TUI panels, external dashboards) can reuse them without replicating the layout. `formatRuleDetail` reads the latest denial provenance via `getDenialProvenance(ruleId)` and `formatProvenanceMessage(provenance)` when `rule.id` is present; it appends a `Provenance:` line only when there is a hit, so the renderer stays identical for rules that have never been denied.
+- **Core ops accept an injected manager.** `listRules(manager = getPermissionManager())`, `showRule(ruleId, manager = ...)`, `applyEditFlags(ruleId, opts, manager = ...)`, and `editRuleInteractively(ruleId, adapter, manager = ...)` all accept an optional `PermissionManager` default-argumented to the global so production call sites stay terse, while tests can thread a fresh `new PermissionManager(rules)` through and never touch the singleton.
+- **Non-interactive flag mode wins when flags are present.** The `edit` action checks `hasFlags = decision || priority || description` and takes the flag path when `hasFlags && !opts.interactive`. The explicit `--interactive` escape hatch lets operators force the TTY picker even with flags, which is handy when `--decision allow` is set from a parent script but a human wants to review priority / description before committing.
+- **TTY refusal is explicit.** When no flag is supplied and `process.stdin.isTTY` is false (CI, piped stdin, headless), the command prints a specific stderr message directing the operator to pass `--decision / --priority / --description` and exits `1` instead of hanging on a prompt that cannot be answered.
+- **Dynamic-imported prompts.** `buildDefaultAdapter` is `async` and performs `await import('@inquirer/prompts')` on first use. Headless runs, test runs, and `permissions list` / `permissions show` never pay the cost of loading the prompts package.
+- **Adapter is a narrow interface, not a dependency.** `InteractivePromptAdapter` is a three-method surface (`pickDecision`, `askPriority`, `askDescription`) with the convention that returning `null` means "keep current value". Tests inject a deterministic stub (`async () => 'deny'`, `async () => null`) instead of driving a real TTY, so the whole command tree can be exercised in a Vitest node environment without `expect-tty` tricks.
+- **Mutation is centralised in `PermissionManager.updateRule`.** The CLI never writes to `manager.rules` directly. `updateRule(ruleId, patch)` merges the patch, forces `id` back to `ruleId` so a stray patch cannot rename the rule, runs `PermissionRuleSchema.parse(merged)` so invalid decisions / priorities throw at the manager boundary instead of silently corrupting state, replaces the slot in-place, and re-sorts the rules via `this.sortRules(this.rules)` so the last-match-wins evaluator stays in sync with the new priority.
+- **No file I/O in-process.** The `permissions edit` flow mutates the in-memory rule set; persisting the change back to disk is the responsibility of the pre-existing `PermissionManager` save hook, not the CLI command. The CLI's contract ends at the renderer: "updated rule, rendered to stdout".
+
+The command is wired onto the Commander program in `src/cli/commands/index.ts:registerAllCommands` alongside the pre-existing `registerProviderCommand`, following the same lazy-loaded `register<Name>Command(program)` contract (see [CLI Command Lazy-Loading](#cli-command-lazy-loading-issue-1769)).
+
 ## MCP Integration
 
 Model Context Protocol support allows external tool servers to be connected:
