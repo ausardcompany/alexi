@@ -1714,6 +1714,21 @@ writes into an unbounded `Map<string, PermissionProvenance>`, and
 call `clearDenialStore()` in `afterEach` to keep test suites parallel-safe
 and avoid cross-test leakage.
 
+### Permission edit history (`src/permission/provenance.ts`)
+
+Issue #2085 (commit `3acad684 feat(config): add permission edit history tracking to provenance`) extended `PermissionProvenance` with an append-only audit trail. Every post-creation mutation to the underlying `PermissionRule` MUST flow through `appendEditHistory` — writing to `editHistory` or `editedAt` directly is a contract violation that will drift the two fields out of agreement under concurrent edits.
+
+Contract for any new call site that mutates a rule:
+
+1. **Call `appendEditHistory(provenance, changes, reason?, timestamp?)` — do not push to `editHistory` directly.** The helper is the ONLY path that keeps `editedAt` synchronised with the last entry's `timestamp`. A direct push would leave `editedAt` stale, which is exactly the kind of audit-trail drift reviewers cannot catch by inspection.
+2. **Treat the input as immutable.** The helper returns a NEW `PermissionProvenance` object and does NOT mutate the input (including the previous `editHistory` array — a shared array would let a late append silently retroactively modify a persisted snapshot). Call sites that need to update stored state must replace the record with the returned value, not assume the input was mutated.
+3. **Keep `changes` as a `Partial<PermissionRule>` delta, not a full post-edit rule.** The audit record carries ONLY the field(s) touched in this edit — a rule rename records `{ name: 'new-name' }`, a scope narrow records `{ paths: [...] }`. Logging the full post-edit rule would bloat the audit trail and lose the "which field was touched" signal that reviewers rely on.
+4. **Pass a `reason` only when the operator supplied one.** `reason` is optional free-text; omitting it is fine and the formatter does not render a `reason` suffix. Do NOT synthesise a `reason` from the delta ("renamed from X to Y") — the diff already shows that, and a synthesised reason hides the "no operator rationale was captured" signal.
+5. **Let `timestamp` default to `Date.now()` unless replaying.** The parameter is overridable for tests (deterministic ordering) and for callers that need to carry a replayed timestamp from an external audit log. Production call sites should NOT pass a timestamp — relying on the default keeps the audit trail monotonically non-decreasing without any coordination between call sites.
+6. **Round-trip through `recordDenial` / `getDenialProvenance` preserves the edit history.** When persisting a denial provenance via the denial store, the retrieved record carries the full `editHistory` unchanged. No special handling is needed; the store treats the whole record as opaque.
+
+The paired regression suite is `tests/permission/provenance.test.ts` (247 lines, 16 cases); see [docs/TESTING.md — Testing permission edit history tracking](TESTING.md#testing-permission-edit-history-tracking-srcpermissionprovenancets-issue-2085) for the invariants and the fixture pattern. The `formatProvenanceMessage` suffix contract (`(edited N time(s), last YYYY-...)`, singular/plural boundary, `editedAt` preferred over the history tail) is pinned there as well — a formatter change MUST update both the suite and the contract text.
+
 ### Verification-only regression suites (lock in a contract with tests + inline JSDoc)
 
 Some upstream ports and behaviour fixes ship the runtime change in one PR and then a **verification-only** follow-up PR that adds no new behaviour, just a dedicated regression suite plus a JSDoc block on the helper stating the contract inline. This is the standing pattern for issue-tagged "verify coverage" tasks (currently issue #1713 for the `kilo_board_write` recipient-warning path). The rules that make the pattern useful:
