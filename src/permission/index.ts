@@ -678,10 +678,43 @@ export class PermissionManager {
   }
 
   /**
+   * Update an existing rule by id. Only the properties present in
+   * `patch` are overwritten; the rule's id is preserved regardless of
+   * whether a different id is supplied in the patch. Returns the
+   * updated rule, or `null` if no rule matched the id.
+   *
+   * Added for the `alexi permissions edit <ruleId>` CLI flow — gives
+   * operators a programmatic way to flip a rule's decision, priority,
+   * or description without having to delete + re-add it.
+   */
+  updateRule(ruleId: string, patch: Partial<PermissionRule>): PermissionRule | null {
+    const idx = this.rules.findIndex((r) => r.id === ruleId);
+    if (idx < 0) {
+      return null;
+    }
+    const merged: PermissionRule = {
+      ...this.rules[idx],
+      ...patch,
+      id: ruleId,
+    };
+    const validated = PermissionRuleSchema.parse(merged);
+    this.rules[idx] = validated;
+    this.rules = this.sortRules(this.rules);
+    return validated;
+  }
+
+  /**
    * Get all rules
    */
   getRules(): PermissionRule[] {
     return [...this.rules];
+  }
+
+  /**
+   * Get a single rule by id. Returns `undefined` when no rule matches.
+   */
+  getRule(ruleId: string): PermissionRule | undefined {
+    return this.rules.find((r) => r.id === ruleId);
   }
 
   /**
