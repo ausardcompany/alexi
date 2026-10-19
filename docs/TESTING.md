@@ -8880,6 +8880,111 @@ Contract pinned by the suite:
 
 Test isolation: each test unsubscribes its bus listener in a `finally` block so a failing assertion does not leak a subscription into subsequent cases. No global state to reset — a fresh `PermissionManager` per test is enough.
 
+## Testing the Permissions CLI (`src/cli/commands/permissions.ts`, issue #2087)
+
+`tests/cli/commands/permissions.test.ts` (352 lines, 20+ cases) locks in the pure-formatter contract, the core-operation surface, and the end-to-end Commander wiring for the `alexi permissions list|show|edit` command group. The suite is deliberately split into five `describe` blocks so a failing diff on `formatRuleDetail` does not swallow a bug in `applyEditFlags`.
+
+Setup pattern (fresh `PermissionManager` per test, no mutation of the global):
+
+```typescript
+import {
+  PermissionManager,
+  setPermissionManager,
+  recordDenial,
+  clearDenialStore,
+  type PermissionRule,
+} from '../../../src/permission/index.js';
+
+function buildRules(): PermissionRule[] {
+  return [
+    { id: 'rule-allow-read', name: 'Allow Read', description: 'Allow read actions',
+      actions: ['read'], decision: 'allow', priority: 10 },
+    { id: 'rule-deny-secrets', name: 'Deny Secrets', description: 'Deny access to secrets',
+      paths: ['**/.env'], decision: 'deny', priority: 100 },
+    { id: 'rule-ask-write', actions: ['write'], decision: 'ask', priority: 20 },
+  ];
+}
+
+function installManager(): PermissionManager {
+  const manager = new PermissionManager(buildRules());
+  setPermissionManager(manager);
+  return manager;
+}
+
+beforeEach(() => {
+  clearDenialStore();
+  installManager();
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  clearDenialStore();
+});
+```
+
+Commander wiring harness (uses `exitOverride()` so a non-zero exit does not kill the Vitest worker, and spies on `process.stdout.write` / `process.stderr.write` so the test can assert on exact rendered output):
+
+```typescript
+async function runPermissionsCommand(argv: string[]): Promise<Captured> {
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk) => {
+    stdoutChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+    return true;
+  }) as never);
+  const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk) => {
+    stderrChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+    return true;
+  }) as never);
+
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+
+  const program = new Command();
+  program.exitOverride();
+  registerPermissionsCommand(program);
+
+  try {
+    await program.parseAsync(argv, { from: 'user' });
+  } catch {
+    // Commander throws on exitOverride; assertions below are authoritative.
+  }
+
+  const captured = { stdout: stdoutChunks.join(''), stderr: stderrChunks.join(''),
+                     exitCode: process.exitCode };
+  process.exitCode = previousExitCode;
+  outSpy.mockRestore();
+  errSpy.mockRestore();
+  return captured;
+}
+```
+
+Contract pinned by the suite:
+
+1. **`formatRuleSummary` / `describeRulePatterns`.** Decision is uppercased (`[ALLOW]`), id, name, and priority appear on a single line; missing `id` falls back to `<no-id>`, missing `name` to `(unnamed)`. `describeRulePatterns` includes `tools: …`, `actions: …`, `paths: …`, `commands: …`, and `hosts: …` only for populated fields.
+2. **`formatRuleDetail`.** Renders every populated field block with a fixed column alignment (`Decision:    deny`, `Priority:    100`, `Paths:       **/.env`). Provenance is appended only when `recordDenial(ruleId, {...})` has been called and `getDenialProvenance(ruleId)` returns a hit — the test exercises both branches so a renderer change cannot silently drop provenance.
+3. **`listRules` / `showRule`.** `listRules()` returns every rule in the manager's sorted order; the test asserts on the exact id sequence (`rule-allow-read`, `rule-ask-write`, `rule-deny-secrets`) so a change in `sortRules()` surfaces here. `showRule('does-not-exist')` returns `{ rule: undefined }`.
+4. **`applyEditFlags` validation branches.** Six cases pinned: `--decision allow` updates the decision; `--priority '42'` coerces the string to a number; invalid `--decision 'bogus'` returns `{ updated: null, reason: /Invalid --decision/ }`; non-numeric `--priority 'nope'` returns `{ updated: null, reason: /Invalid --priority/ }`; empty opts returns `reason === 'no fields to update'`; unknown rule id returns `reason: /not found/`.
+5. **`editRuleInteractively` adapter contract.** Three cases: adapter supplies non-null values → fields are updated; adapter returns `null` for every prompt → every field is preserved (the "keep current value" contract); unknown rule id → `null` returned without touching the manager.
+6. **CLI wiring.** Seven cases hit the Commander path: `permissions list` prints the header and every rule id; `permissions list --json` emits a parsable JSON array; `permissions show <id>` renders details and provenance; `permissions show <missing>` prints to stderr with `exit=1`; `permissions edit <id> --decision allow` prints `Updated rule '<id>'.`; `permissions edit <id> --decision bogus` rejects on stderr with `exit=1`; `permissions edit <id>` without flags refuses to run outside a TTY by stubbing `process.stdin.isTTY = false` and asserting on `/refusing to run interactive editor/`.
+
+The non-TTY case is particularly important for CI: it exercises the exact code path that would hang indefinitely if the refusal check regressed. The test guards against regression by:
+
+```typescript
+it('`permissions edit <id>` without flags refuses to run outside a TTY', async () => {
+  const originalIsTTY = process.stdin.isTTY;
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+  try {
+    const result = await runPermissionsCommand(['permissions', 'edit', 'rule-ask-write']);
+    expect(result.stderr).toMatch(/refusing to run interactive editor/);
+    expect(result.exitCode).toBe(1);
+  } finally {
+    Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: originalIsTTY });
+  }
+});
+```
+
+Test isolation: `clearDenialStore()` is called in both `beforeEach` and `afterEach` so recorded denials from one test cannot leak provenance into another. `setPermissionManager(new PermissionManager(buildRules()))` on every `beforeEach` guarantees a predictable, mutation-free rule set at the start of each case. No real `@inquirer/prompts` import is ever executed because the suite only exercises the flag path and the stub-adapter path — the dynamic import in `buildDefaultAdapter` is deliberately not reached, keeping the test suite fast and node-only (no TTY, no `jsdom`).
+
 ## Testing the Snapshot-Repository Lifecycle
 
 `tests/core/snapshot-lifecycle.test.ts` (81 lines, 3 cases) covers the "already gone" hardening on top of the existing snapshot-persistence tests. Each test creates a temp `$HOME` (`fs.mkdtemp`) and tears it down in `afterEach` so parallel test runs are safe:
