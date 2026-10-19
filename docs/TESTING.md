@@ -30,6 +30,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
   - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
   - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
+- [Testing permission edit history tracking (`src/permission/provenance.ts`, issue #2085)](#testing-permission-edit-history-tracking-srcpermissionprovenancets-issue-2085)
 - [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Best Practices](#best-practices)
@@ -7672,6 +7673,68 @@ Key patterns for this class of test:
    implicit via missing package, `() => true` via `vi.doMock`). A migration
    contract is only really pinned when the negative case fires under both
    conditions.
+
+## Testing permission edit history tracking (`src/permission/provenance.ts`, issue #2085)
+
+`tests/permission/provenance.test.ts` (247 lines, 16 cases) pins the audit contract introduced in commit `3acad684 feat(config): add permission edit history tracking to provenance` (resolves issue #2085). The suite exercises `appendEditHistory`, `formatProvenanceMessage`, and the `recordDenial` / `getDenialProvenance` round-trip directly against the real implementation — no mocks are necessary because the provenance module is a pure data record with a single process-local `Map<string, PermissionProvenance>` denial store.
+
+### Contract points asserted
+
+The three `describe` blocks pin the invariants in parallel: the mutation API, the formatter, and the denial store.
+
+1. **First edit sets `editedAt` and seeds `editHistory` with one entry.** `appendEditHistory(base, { name: 'edit-tool-renamed' }, 'typo fix', 1_000_000)` on a provenance with no prior history must produce `editedAt: 1_000_000`, `editHistory.length === 1`, and an entry equal to `{ timestamp: 1_000_000, changes: { name: 'edit-tool-renamed' }, reason: 'typo fix' }` with no extraneous fields.
+2. **Edits accumulate in insertion order.** Three successive calls with timestamps `10`, `20`, `30` must produce an `editHistory` whose `timestamp` array is `[10, 20, 30]` and whose `editedAt` is `30`. The third call omits the `reason` parameter; the stored record must NOT carry a `reason` key at all (`expect(step3.editHistory?.[2]).not.toHaveProperty('reason')`) — assert on key absence, not `reason === undefined`, so a future refactor that defaults the field to `undefined` fails the assertion.
+3. **Input provenance is NOT mutated.** The reference pattern is a `JSON.parse(JSON.stringify(base))` snapshot taken before the call and compared with `expect(base).toEqual(snapshot)` after. Also assert `after !== base` on object identity so a future "mutate in place and return the same reference" regression fails.
+4. **Previous `editHistory` array is NOT mutated.** Appending to `step1` to produce `step2` must leave `step1.editHistory` at length 1 and `step1.editHistory !== step2.editHistory` by reference. This is the load-bearing invariant for "treat provenance records as immutable snapshots" — a shared mutable array would let a late append silently retroactively modify a persisted snapshot.
+5. **`timestamp` defaults to `Date.now()`.** Pin with `vi.useFakeTimers()` + `vi.setSystemTime(new Date('2026-10-19T12:00:00Z'))`, then call `appendEditHistory(base, { name: 'x' })` with no explicit timestamp. Both `updated.editedAt` and `updated.editHistory?.[0].timestamp` must equal `Date.parse('2026-10-19T12:00:00Z')`.
+6. **Timestamps are monotonically non-decreasing when callers use `Date.now()`.** Advance the fake clock by 1 s between three successive calls and assert each entry's timestamp is `>=` the previous. `acc.editedAt` must equal the last entry's timestamp. The suite uses `>=` rather than `>` so a sub-millisecond test machine does not false-fail — the contract is "non-decreasing", not "strictly increasing".
+7. **Formatter omits the edit suffix on un-edited provenance (backwards compatible).** `formatProvenanceMessage({ decision: 'allow', ruleSource: 'config', matchedPattern: 'read:*' })` must render exactly `'Auto-approved by config (matched read:*)'` with no trailing suffix. Also pin the `editHistory: []` branch — an empty array is treated identically to an absent array, so the common un-edited path renders exactly as before.
+8. **Formatter uses singular `time` for a single edit, plural `times` otherwise.** Pin both: a single edit at `2026-10-19T12:00:00Z` renders `(edited 1 time, last 2026-10-19T12:00:00.000Z)`; three edits at `09:00` / `10:00` / `11:00` render `(edited 3 times, last 2026-10-19T11:00:00.000Z)`.
+9. **Formatter augments all three decisions.** Pin the suffix on `allow`, `deny` (with and without `ruleId` / `reason`), and `ask` — the suffix is independent of decision kind.
+10. **Formatter prefers `editedAt` over the history tail when the two disagree.** Hand-construct a provenance with `editedAt` set to a later timestamp than any `editHistory[*].timestamp` (simulates a replayed audit event from an external log). The rendered suffix must use `editedAt`, not the tail. This pins the `latest = p.editedAt ?? history[history.length - 1].timestamp` fallback order in `buildEditSuffix`.
+11. **Denial store round-trips the edit history unchanged.** `recordDenial('call-7', edited)` followed by `getDenialProvenance('call-7')` must return a value `toEqual(edited)` with `editHistory` length preserved. The `beforeEach` block calls `clearDenialStore()` to keep the suite parallel-safe (see `docs/CONTRIBUTING.md#process-local-stores-require-explicit-teardown`).
+
+### Fixture pattern
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  appendEditHistory,
+  clearDenialStore,
+  formatProvenanceMessage,
+  getDenialProvenance,
+  recordDenial,
+  type PermissionProvenance,
+} from '../../src/permission/provenance.js';
+import type { PermissionRule } from '../../src/permission/index.js';
+
+describe('PermissionProvenance edit history (issue #2085)', () => {
+  afterEach(() => {
+    clearDenialStore();
+    vi.useRealTimers();
+  });
+
+  it('does not mutate the previous editHistory array', () => {
+    const base: PermissionProvenance = { decision: 'allow', ruleSource: 'config' };
+    const step1 = appendEditHistory(base, { name: 'a' }, undefined, 1);
+    const snapshot = JSON.parse(JSON.stringify(step1)) as PermissionProvenance;
+    const step2 = appendEditHistory(step1, { name: 'b' }, undefined, 2);
+
+    expect(step1).toEqual(snapshot);
+    expect(step1.editHistory).toHaveLength(1);
+    expect(step2.editHistory).toHaveLength(2);
+    expect(step1.editHistory).not.toBe(step2.editHistory);
+  });
+});
+```
+
+### Pitfalls
+
+1. **Do NOT call `clearDenialStore()` in `beforeAll` only.** The denial store is process-local and parallel-shared across tests in the same worker. The `afterEach` hook (or a `beforeEach` in the denial-store `describe` block) is the only guarantee that one case's `recordDenial` does not leak into another case's `getDenialProvenance` result.
+2. **Do NOT assert on the formatter's full string with `.toContain`.** The suite uses `.toBe(...)` with the exact rendered line so a regression that adds a stray space, flips the `1 time` / `1 times` boundary, or reorders the suffix fragments fails loudly. Substring matches hide those regressions.
+3. **Reason omission must be checked with `.not.toHaveProperty('reason')`.** `expect(record.reason).toBeUndefined()` passes BOTH when the key is absent and when it is explicitly `undefined`; the serialised wire shape (JSON) will drop an explicit `undefined` so the two are indistinguishable downstream, but inside the test suite the stricter key-absence check is what pins the `reason ? { ... } : { ... }` conditional in `appendEditHistory`.
+4. **Use `vi.useFakeTimers()` + `vi.setSystemTime` for the `Date.now()` default path, not `vi.spyOn(Date, 'now')`.** The code reads `Date.now()` once per call; a `vi.spyOn` would also need `.mockRestore()` in `afterEach`. `vi.useRealTimers()` is already in the `afterEach` hook so the fake-timers path cleans up automatically.
+5. **Pass explicit timestamps for the "preserves order" assertion.** The implementation calls `Date.now()` once per call and the fake clock does not advance automatically between synchronous calls, so three successive `appendEditHistory(base, changes)` calls under `vi.setSystemTime('2026-10-19T12:00:00Z')` would all record the same timestamp. The suite advances the clock by 1 s between calls with `vi.setSystemTime(new Date('2026-10-19T12:00:01Z'))` to produce a strictly ordered sequence.
 
 ## Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)
 

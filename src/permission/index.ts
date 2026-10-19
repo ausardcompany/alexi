@@ -34,7 +34,9 @@ export {
   getDenialProvenance,
   formatProvenanceMessage,
   clearDenialStore,
+  appendEditHistory,
   type PermissionProvenance,
+  type PermissionEditRecord,
 } from './provenance.js';
 
 // Glob characters that flag a tool entry as a pattern rather than a literal name.
