@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Text, useStdout } from 'ink';
+import { Text, useWindowSize } from 'ink';
 import { Marked } from 'marked';
 import { markedTerminal } from 'marked-terminal';
 import { highlight } from 'cli-highlight';
@@ -58,8 +58,7 @@ export function MarkdownRenderer({
   isPartial,
   maxWidth,
 }: MarkdownRendererProps): React.JSX.Element {
-  const { stdout } = useStdout();
-  const columns = stdout?.columns ?? 80;
+  const { columns } = useWindowSize();
   // Full padding chain: paddingX(1)=2 + paddingLeft(2)=2 + paddingX(1)=2 = 6 chars
   // Plus 2 chars safety margin = 8
   const effectiveWidth = maxWidth ?? Math.max(40, columns - 8);
