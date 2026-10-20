@@ -35,6 +35,15 @@ export interface UseKeyboardOptions {
    * the hook stays stateless w.r.t. transcript content.
    */
   onOpenTranscriptUrl?: (index: number) => void;
+  /**
+   * Called with the 1-based agent index (1..9) when Ctrl+{1-9} is pressed.
+   *
+   * Hooked up by `App.tsx` to jump the active agent to the Nth configured
+   * agent. The handler itself owns the "no agent at this index" transient
+   * error behaviour so the hook stays stateless w.r.t. the configured
+   * agent list.
+   */
+  onJumpToAgent?: (index: number) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +63,14 @@ const SHIFTED_DIGITS = '!@#$%^&*(';
 // ---------------------------------------------------------------------------
 
 export function useKeyboard(options: UseKeyboardOptions): void {
-  const { onExit, onClear, onNewSession, commands = [], onOpenTranscriptUrl } = options;
+  const {
+    onExit,
+    onClear,
+    onNewSession,
+    commands = [],
+    onOpenTranscriptUrl,
+    onJumpToAgent,
+  } = options;
 
   const { cycleAgent } = useSession();
   const { state: keybindState, activateLeader, deactivateLeader } = useKeybind();
@@ -96,6 +112,22 @@ export function useKeyboard(options: UseKeyboardOptions): void {
         onOpenTranscriptUrl(Number.parseInt(input, 10));
         return;
       }
+    }
+
+    // Ctrl+{1-9} — jump directly to the Nth configured agent (1-indexed).
+    // Out-of-bounds indices (e.g. Ctrl+9 with 3 agents configured) are
+    // surfaced to the handler, which owns the transient-error / no-op
+    // behaviour. Terminals report Ctrl+digit as `input === '<digit>'`
+    // with `key.ctrl === true`.
+    if (
+      onJumpToAgent !== undefined &&
+      key.ctrl &&
+      input.length === 1 &&
+      input >= '1' &&
+      input <= '9'
+    ) {
+      onJumpToAgent(Number.parseInt(input, 10));
+      return;
     }
 
     // Ctrl+X — activate leader mode
