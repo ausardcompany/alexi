@@ -237,7 +237,69 @@ export const TaskTool = {
       allowedTools: options.allowedTools,
     };
   },
+
+  /**
+   * Refresh a parent session's permission ruleset with the child's derived
+   * rules. Ports upstream kilocode `KiloTask.refresh` (which replaced the
+   * previous `KiloTask.merge` entry point for clarity): the semantics are
+   * a semantic refresh, not a blind concatenation — rules whose identity
+   * matches a child entry are replaced in-place.
+   *
+   * In Alexi, two rules collide when they target the same tool/path/command
+   * combination with the same decision; otherwise the child rule is
+   * appended. Callers do not typically need to invoke this directly —
+   * `buildSubagentConfig` + `deriveSubagentSessionPermission` already
+   * produces the subagent-ready ruleset — but it is exposed so external
+   * delegators (plugins, custom harnesses) can combine parent and child
+   * rules without reinventing the merge semantics.
+   */
+  refresh(parent: readonly PermissionRule[], child: readonly PermissionRule[]): PermissionRule[] {
+    const result: PermissionRule[] = [...parent];
+    for (const incoming of child) {
+      const idx = result.findIndex((existing) => sameRuleIdentity(existing, incoming));
+      if (idx >= 0) {
+        result[idx] = incoming;
+      } else {
+        result.push(incoming);
+      }
+    }
+    return result;
+  },
+
+  /**
+   * @deprecated Use {@link TaskTool.refresh} instead. Retained as a thin
+   * alias so external callers that still reach for `merge` keep compiling
+   * during the upstream rename transition.
+   */
+  merge(parent: readonly PermissionRule[], child: readonly PermissionRule[]): PermissionRule[] {
+    return TaskTool.refresh(parent, child);
+  },
 };
+
+/**
+ * Rule-identity comparison used by {@link TaskTool.refresh}. Two rules are
+ * considered the same when they match on the same tools, paths, commands,
+ * hosts, and actions. Decision and priority are intentionally excluded —
+ * swapping a `deny` for an `allow` on the same scope should replace the
+ * old rule rather than duplicate it.
+ */
+function sameRuleIdentity(a: PermissionRule, b: PermissionRule): boolean {
+  const sameArr = (x?: readonly string[], y?: readonly string[]) => {
+    const xs = [...(x ?? [])].sort();
+    const ys = [...(y ?? [])].sort();
+    if (xs.length !== ys.length) {
+      return false;
+    }
+    return xs.every((v, i) => v === ys[i]);
+  };
+  return (
+    sameArr(a.tools, b.tools) &&
+    sameArr(a.paths, b.paths) &&
+    sameArr(a.commands, b.commands) &&
+    sameArr(a.hosts, b.hosts) &&
+    sameArr(a.actions, b.actions)
+  );
+}
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 

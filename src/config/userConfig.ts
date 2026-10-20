@@ -1031,6 +1031,46 @@ export function setConfigContextTools(enabled: boolean): void {
 }
 
 /**
+ * Read the `experimental.todo` flag. When `true`, the structured
+ * `todowrite` tool is exposed to agents. Default is `true` for Alexi
+ * (todowrite has been stable in this project for several releases); set
+ * to `false` to hide the tool from the registry for workflows that
+ * prefer free-form notes.
+ *
+ * Ports upstream opencode `experimental.todo` flag (re-introduction of
+ * the todowrite tool behind a feature gate). Stored as
+ * `experimental.todo` inside the top-level `experimental` object of
+ * `~/.alexi/config.json`.
+ */
+export function getConfigExperimentalTodo(): boolean {
+  const config = loadFullConfig();
+  const experimental = config.experimental;
+  if (!experimental || typeof experimental !== 'object' || Array.isArray(experimental)) {
+    return true;
+  }
+  const value = (experimental as Record<string, unknown>).todo;
+  if (typeof value !== 'boolean') {
+    return true;
+  }
+  return value;
+}
+
+/**
+ * Persist the `experimental.todo` flag.
+ */
+export function setConfigExperimentalTodo(enabled: boolean): void {
+  const config = loadFullConfig();
+  const existing =
+    config.experimental &&
+    typeof config.experimental === 'object' &&
+    !Array.isArray(config.experimental)
+      ? (config.experimental as Record<string, unknown>)
+      : {};
+  config.experimental = { ...existing, todo: enabled };
+  saveFullConfig(config);
+}
+
+/**
  * Experimental feature flag: enable the task-scoped shared agent board.
  *
  * Ports upstream kilocode `experimental.sharedAgentBoard` (2026-08 sync,

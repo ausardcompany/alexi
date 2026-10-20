@@ -530,3 +530,38 @@ export const WakeupFired = defineEvent(
     timestamp: z.number(),
   })
 );
+
+// ============ SessionLegacy ============
+//
+// Ports upstream opencode v2.1 `SessionLegacy.event()` upgrade point for
+// stored event payloads whose shape has since been renamed. Every
+// persistence path that reads a stored event payload MUST route it
+// through `SessionLegacy.event(type, data)` before handing it to a Zod
+// decoder, so legacy payloads land here in exactly one place.
+//
+// Alexi does not currently persist events to disk (the in-memory bus is
+// synchronous), but any future durable-event store — including the
+// `~/.alexi/sessions/*.json` session rows that already round-trip
+// through disk — should funnel their event payloads through this helper
+// so a shape-rename is a one-line edit in the switch below instead of a
+// scavenger hunt across session loaders.
+export namespace SessionLegacy {
+  /**
+   * Upgrade a stored event payload to the current Zod schema's shape.
+   *
+   * Call this BEFORE invoking `schema.parse(data)` so a payload written
+   * in an older shape (e.g. before a field was renamed) is normalised
+   * into whatever the current definition expects. Returns the payload
+   * unchanged when no upgrade is required.
+   *
+   * Add new upgrades as new `case` branches on `type`. The function is
+   * intentionally a pass-through today — the plumbing is in place so
+   * payload renames are a one-line change, matching upstream opencode's
+   * `packages/schema/src/session-legacy.ts`.
+   */
+  export function event(_type: string, data: unknown): unknown {
+    // Pass-through today; future shape renames land as case branches here.
+    return data;
+  }
+}
+

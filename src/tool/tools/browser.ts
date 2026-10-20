@@ -201,6 +201,33 @@ Note: Requires puppeteer to be installed (npm install puppeteer)`,
       }
       return 'browser-session';
     },
+    // Ports upstream kilocode `browser_open` always-allow + metadata rules.
+    // When the operation involves a URL, surface the origin as both the
+    // asked-for pattern AND as an `always` candidate so the permission
+    // dialog can offer "always allow this origin" (persisted across
+    // sessions). The `rules` field in `metadata` is what the permission
+    // dock renders when it needs to show scoped patterns alongside the
+    // broader `navigate:*` fallback.
+    getPermissionMetadata: (params) => {
+      if (!params.url) {
+        return undefined;
+      }
+      let origin: string;
+      try {
+        origin = new URL(params.url).origin;
+      } catch {
+        return undefined;
+      }
+      return {
+        patterns: [`navigate:${origin}`],
+        always: [`navigate:${origin}`],
+        metadata: {
+          operation: params.action,
+          url: params.url,
+          rules: [`navigate:${origin}`, 'navigate:*'],
+        },
+      };
+    },
   },
 
   async execute(params, _context): Promise<ToolResult<BrowserResult>> {
