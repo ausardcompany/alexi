@@ -564,4 +564,3 @@ export namespace SessionLegacy {
     return data;
   }
 }
-

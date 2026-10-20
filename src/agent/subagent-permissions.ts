@@ -219,9 +219,7 @@ export function deriveSubagentSessionPermission(
     if (editAllowlistBaselines.has(rule)) {
       return false;
     }
-    return (
-      rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'))
-    );
+    return rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'));
   });
 
   // Build default denies for task and todowrite if not permitted
