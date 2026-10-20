@@ -1282,6 +1282,34 @@ Windows Terminal often deliver the digit `'1'` with `key.shift === true`.
 Omitting either path means the keybind silently fails on half the user
 base.
 
+**`Ctrl+1..9` direct agent selection reuses the same three-layer split
+(commit `aff532d3`).** The `onJumpToAgent?: (index: number) => void`
+option on `useKeyboard` is a drop-in sibling of `onOpenTranscriptUrl`.
+Two differences worth copying when you add a similar `Ctrl+<digit>`
+binding:
+
+- **Single reporting path.** Unlike `Shift+<digit>`, every supported
+  terminal reports `Ctrl+<digit>` as `input === '<digit>'` with
+  `key.ctrl === true`. The hook therefore does NOT need a two-path
+  decoder — a single guard
+  (`key.ctrl && input.length === 1 && input >= '1' && input <= '9'`)
+  covers every OS / terminal / multiplexer combination.
+- **Mock `useInput` instead of writing to `stdin`.** The test file
+  `tests/cli/tui/useKeyboard.ctrlDigit.test.tsx` shims
+  `vi.mock('ink', ...)` to capture the `useInput` handler and invokes
+  it synchronously with crafted `(input, key)` pairs. Raw `stdin.write`
+  under `ink-testing-library` cannot reliably reproduce the `key.ctrl`
+  flag across CI runners — different runners decode control bytes
+  differently. Copy the `capturedHandler` + `ctrl(input)` helper pattern
+  for any `Ctrl+<key>` test that needs the modifier state visible.
+
+The "handler owns UX" rule still applies: `handleJumpToAgent` in
+`App.tsx:323-336` is the only place that reads the `AGENTS` constant,
+calls `setAgent`, and emits the out-of-range system message
+(`Only ${AGENTS.length} agents configured`). Resist the temptation to
+pull the agent list into the hook — a future dynamic-agents refactor
+should not require touching `useKeyboard`.
+
 ### Normalizing serialized-empty-string quirks (`normalizeMovePath` style)
 
 Upstream ports frequently need to guard against fields that survive JSON

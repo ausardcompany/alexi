@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Box, useApp, useWindowSize } from 'ink';
 
 import { ThemeProvider, useTheme } from './context/ThemeContext.js';
-import { SessionProvider, useSession } from './context/SessionContext.js';
+import { SessionProvider, useSession, AGENTS } from './context/SessionContext.js';
 import { ChatProvider, useChat } from './context/ChatContext.js';
 import { KeybindProvider, useKeybind } from './context/KeybindContext.js';
 import { DialogProvider, useDialog } from './context/DialogContext.js';
@@ -199,7 +199,7 @@ function DialogHost(): React.JSX.Element | null {
 function AppLayout(): React.JSX.Element {
   const { exit } = useApp();
   const { rows } = useTerminalSize();
-  const { model, agent, sessionId, tokenCount, cost } = useSession();
+  const { model, agent, sessionId, tokenCount, cost, setAgent } = useSession();
   const { theme } = useTheme();
   const { state: keybindState } = useKeybind();
   const { isOpen: dialogIsOpen } = useDialog();
@@ -320,6 +320,21 @@ function AppLayout(): React.JSX.Element {
     [messages, addSystemMessage]
   );
 
+  // Ctrl+{1-9} — jump directly to the Nth configured agent (1-indexed).
+  // Out-of-bounds indices surface a transient system message describing
+  // how many agents are configured; the active agent is unchanged.
+  const handleJumpToAgent = useCallback(
+    (index: number): void => {
+      const target = AGENTS[index - 1];
+      if (target === undefined) {
+        addSystemMessage(`Only ${AGENTS.length} agents configured`);
+        return;
+      }
+      setAgent(target);
+    },
+    [addSystemMessage, setAgent]
+  );
+
   useKeyboard({
     onExit: exit,
     onClear: () => setMessages([]),
@@ -329,6 +344,7 @@ function AppLayout(): React.JSX.Element {
     isInputActive: !keybindState.leaderActive,
     commands,
     onOpenTranscriptUrl: handleOpenTranscriptUrl,
+    onJumpToAgent: handleJumpToAgent,
   });
 
   const handleSubmit = useCallback(

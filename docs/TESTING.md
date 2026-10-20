@@ -3535,6 +3535,86 @@ Hook test invariants:
 
 **Why no end-to-end test for `openUrl`.** The browser-launch call is deliberately out of scope for these two suites. `openUrl` has its own test file (`tests/core/open.test.ts`) that validates the scheme allow-list and the per-platform launcher; the quick-open handler in `App.tsx` only composes `extractUrlsFromMessages` and `openUrl`, both of which are independently covered. Mocking `child_process.spawn` from a TUI render harness would couple the test to launcher behaviour that is already pinned elsewhere.
 
+### Testing the `Ctrl+{1-9}` agent-selection binding
+
+The direct agent-selection keybind (commit `aff532d3`) is covered by `tests/cli/tui/useKeyboard.ctrlDigit.test.tsx` (246 lines, 9 cases). The suite is deliberately a hook-level test — it never asserts on the frame contents and does not need the surrounding `App` tree — because the hook already owns the full decoding contract (digit guard, `key.ctrl` guard, early return) and the handler owns the state mutation. Keeping the two tiers separate means a future `AGENTS`-list refactor (dynamic length, user-configurable names) breaks only the handler-side test (in `App.test.tsx`), not the keybind test here.
+
+**Why we capture `useInput` instead of writing to `stdin`.** `Ctrl+<digit>` is reported by every supported terminal as `input === '<digit>'` with `key.ctrl === true`, but raw `stdin.write(...)` under `ink-testing-library` cannot reliably reproduce the `key.ctrl` flag across OS / terminal combinations in CI — different runners decode control bytes differently. The test module shims `vi.mock('ink', ...)` to capture the `useInput` handler and invokes it synchronously with crafted `(input, key)` pairs:
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import React from 'react';
+import { render } from 'ink-testing-library';
+
+let capturedHandler:
+  | ((input: string, key: Record<string, boolean | undefined>) => void)
+  | null = null;
+
+vi.mock('ink', async () => {
+  const actual = await vi.importActual<typeof import('ink')>('ink');
+  return {
+    ...actual,
+    useInput: (
+      handler: (input: string, key: Record<string, boolean | undefined>) => void
+    ): void => {
+      capturedHandler = handler;
+    },
+  };
+});
+
+// Context mocks (SessionContext, KeybindContext, DialogContext, SidebarContext,
+// PageContext, SubagentContext, ChatContext) are declared BEFORE importing
+// useKeyboard — vitest hoists vi.mock() but explicit ordering keeps it
+// obvious which contexts the hook depends on.
+
+function ctrl(_input: string): Record<string, boolean | undefined> {
+  return { ctrl: true, shift: false, tab: false, escape: false, meta: false };
+}
+```
+
+The `TestComponent` wrapper calls `useKeyboard(options)` inside an Ink render tree so `useInput` registration fires; after `render(...)` returns, `capturedHandler` holds the live keypress handler and every test invokes it directly:
+
+```typescript
+it('invokes onJumpToAgent with 1 on Ctrl+1', () => {
+  const onJumpToAgent = vi.fn();
+  render(<TestComponent options={{ ...defaultOptions, onJumpToAgent }} />);
+  expect(capturedHandler).not.toBeNull();
+  capturedHandler!('1', ctrl('1'));
+  expect(onJumpToAgent).toHaveBeenCalledTimes(1);
+  expect(onJumpToAgent).toHaveBeenCalledWith(1);
+});
+
+it('maps every Ctrl+{1..9} to the correct 1-based index', () => {
+  const onJumpToAgent = vi.fn();
+  render(<TestComponent options={{ ...defaultOptions, onJumpToAgent }} />);
+  for (let i = 1; i <= 9; i++) {
+    capturedHandler!(String(i), ctrl(String(i)));
+  }
+  expect(onJumpToAgent).toHaveBeenCalledTimes(9);
+  for (let i = 0; i < 9; i++) {
+    expect(onJumpToAgent).toHaveBeenNthCalledWith(i + 1, i + 1);
+  }
+});
+```
+
+Case matrix:
+
+| Invariant | Case |
+|-----------|------|
+| `Ctrl+1` → index 1 | `capturedHandler!('1', ctrl('1'))`, assert `toHaveBeenCalledWith(1)`. |
+| `Ctrl+9` → index 9 | `capturedHandler!('9', ctrl('9'))`, assert `toHaveBeenCalledWith(9)`. |
+| Full table `1..9` | Loop `1..9`, assert nine calls with indices 1..9 in order. |
+| `Ctrl+0` → no-op | `0` is not in the `1..9` guard range, handler is not called. |
+| Plain digit (no Ctrl) → no-op | `{ ctrl: false, ... }` on `'1'` leaves `onJumpToAgent` untouched. |
+| `onJumpToAgent` absent → silent no-op | Omit the option; `capturedHandler!('1', ctrl('1'))` does not throw. |
+| Non-interference with `Ctrl+K` | `capturedHandler!('k', ctrl('k'))` fires the command palette (`mockOpen`) and does NOT call `onJumpToAgent`. |
+| `Tab` cycles forward | `tab()` key fires `mockCycleAgent(true)`. |
+| `Shift+Tab` cycles backward | `tab({ shift: true })` fires `mockCycleAgent(false)`. |
+
+The `Tab` / `Shift+Tab` cases are kept in the same file so the full agent-navigation keybind family lives under one test module — a future refactor that moves the cycle logic will show up in the same suite and either break both or neither case.
+
+**Why no end-to-end test for `setAgent`.** The `SessionContext.setAgent` call is covered by `tests/cli/tui/SessionContext.test.tsx`. The keybind test here only validates the hook → handler contract (the correct 1-based index arrives), not the state mutation; coupling the two would duplicate the context test and make the keybind test depend on `SessionProvider` internals that are not part of its contract.
+
 ### Testing Per-Task Model Selection
 
 The `experimental.task_model_selection` flag gates the `task`, `agent_manager`, and `agent_manager_models` tools. Tests that exercise resolution paths should snapshot the flag, mutate it, and restore afterwards so per-test state does not leak. The recommended pattern:

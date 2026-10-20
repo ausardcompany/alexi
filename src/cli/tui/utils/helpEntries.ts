@@ -14,6 +14,12 @@ export function getHelpEntries(): HelpEntry[] {
       category: 'navigation',
       condition: null,
     },
+    {
+      key: 'Ctrl+1..9',
+      description: 'Jump to agent 1-9',
+      category: 'navigation',
+      condition: null,
+    },
     { key: 'PgUp', description: 'Scroll messages up', category: 'navigation', condition: null },
     { key: 'PgDn', description: 'Scroll messages down', category: 'navigation', condition: null },
     { key: 'Ctrl+B', description: 'Toggle sidebar', category: 'navigation', condition: null },
