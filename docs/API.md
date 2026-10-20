@@ -1705,6 +1705,36 @@ Error UX: `Shift+<N>` on a transcript with no URLs emits `No URLs in transcript 
 
 See `docs/ARCHITECTURE.md#tui-transcript-url-quick-open-shift19` for the composition, and the **TUI Transcript URL Quick-Open (Shift+1..9)** API section below for the public helpers.
 
+### Direct Agent Selection (`Ctrl+1..9`)
+
+In the Ink TUI, `Ctrl+1` through `Ctrl+9` directly set the active agent to the Nth entry in the `AGENTS` list exported by `src/cli/tui/context/SessionContext.tsx`. The default list is `['code', 'debug', 'plan', 'explore', 'orchestrator']`, so `Ctrl+1` jumps to `code`, `Ctrl+5` to `orchestrator`, and `Ctrl+6..9` emit a transient system message `Only 5 agents configured` and leave the active agent unchanged.
+
+The direct-jump binding complements the pre-existing `Tab` / `Shift+Tab` cycle, which still works for walking the list one agent at a time:
+
+| Keybind | Effect |
+|---------|--------|
+| `Tab` | Cycle to next agent (wraps around at the end) |
+| `Shift+Tab` | Cycle to previous agent (wraps around at the start) |
+| `Ctrl+1..9` | Jump directly to the Nth agent (1-indexed) |
+| `leader+a` | Open the full agent selector dialog |
+
+Unlike `Shift+<digit>`, the `Ctrl+<digit>` encoding is consistent across every supported OS / terminal combination (Linux terminals, macOS Terminal.app / iTerm2 / WezTerm / Ghostty, Windows Terminal, tmux / screen) — the hook sees `input === '<digit>'` with `key.ctrl === true` on every path. `Ctrl+0` is intentionally unbound (not a valid 1-based agent slot).
+
+The handler option exported by `useKeyboard` is strictly optional:
+
+```typescript
+export interface UseKeyboardOptions {
+  // ... existing options
+  /**
+   * Called with the 1-based agent index (1..9) when Ctrl+{1-9} is pressed.
+   * Index-out-of-range handling is owned by the caller.
+   */
+  onJumpToAgent?: (index: number) => void;
+}
+```
+
+When `onJumpToAgent` is undefined the hook silently no-ops on `Ctrl+<digit>` — callers can wire it only when the surrounding component has access to a session agent setter. See `docs/ARCHITECTURE.md#tui-direct-agent-selection-ctrl1-9` for the composition.
+
 ### File mentions (`@` references)
 
 Since v1.22.4, `@`-file mentions in user messages, custom command templates, and any other input that flows through `parseFileMentions()` support **three forms** (`src/utils/file-mention.ts:parseFileMentions`):

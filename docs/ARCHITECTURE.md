@@ -5382,6 +5382,93 @@ The entry is unconditional (`condition: null`), so the help overlay (`?`, `Ctrl+
 
 The transcript URL quick-open path is independent of the OSC-8 output linkifier (`src/cli/tui/utils/linkify.ts`). The linkifier wraps URLs in tool-output rows with terminal-level hyperlink escapes so a mouse-click opens the URL in supporting terminals; the quick-open binding operates on the full transcript (assistant messages, not tool outputs) and does not require OSC-8 support. On a non-OSC-8 terminal where `linkify()` degrades to plain text, `Shift+1..9` still works unchanged — it is a keyboard binding, not a terminal capability.
 
+## TUI Direct Agent Selection (`Ctrl+{1-9}`)
+
+Since commit `aff532d3 feat(cli): add Ctrl+1..9 agent selection shortcuts to TUI` the Ink TUI exposes `Ctrl+1` through `Ctrl+9` as a direct-jump keybind that sets the active agent to the Nth entry in the `AGENTS` list exported by `src/cli/tui/context/SessionContext.tsx`. The pre-existing `Tab` / `Shift+Tab` cycle still works, but requires N-1 presses to reach the Nth agent; the direct-jump binding is one keystroke regardless of position and gives the TUI muscle-memory parity with the `Shift+1..9` transcript URL quick-open on the opposite modifier.
+
+```mermaid
+flowchart LR
+    KeyPress[Ctrl+N keypress]
+    Hook[useKeyboard<br/>src/cli/tui/hooks/useKeyboard.ts]
+    App[handleJumpToAgent<br/>src/cli/tui/App.tsx]
+    Agents[AGENTS array<br/>src/cli/tui/context/SessionContext.tsx]
+    SetAgent[setAgent<br/>SessionContext]
+    System[addSystemMessage<br/>out-of-range hint]
+
+    KeyPress --> Hook
+    Hook -->|1-based index| App
+    App --> Agents
+    Agents -->|index in range| SetAgent
+    App -->|index out of range| System
+```
+
+### Keybind decoding (`src/cli/tui/hooks/useKeyboard.ts:117-131`)
+
+The hook accepts an optional `onJumpToAgent?: (index: number) => void` option and dispatches on it exactly when:
+
+- `onJumpToAgent` is defined (handler is wired).
+- `key.ctrl === true` — the modifier is held.
+- `input.length === 1 && input >= '1' && input <= '9'` — the key is a single ASCII digit in `1..9`.
+
+Terminals consistently report `Ctrl+<digit>` as `input === '<digit>'` with `key.ctrl === true` on every OS / terminal combination we support (Linux terminals, macOS Terminal.app / iTerm2 / WezTerm / Ghostty, Windows Terminal, tmux / screen multiplexers), so unlike `Shift+<digit>` the hook does not need a two-path decoder. On a match the handler is invoked with `Number.parseInt(input, 10)` and the handler returns early so no downstream keybind sees the same event. The digit guard is placed BEFORE the fall-through chain for `Ctrl+K` / `Ctrl+L` / `Ctrl+J` / `Ctrl+B` / `Ctrl+S` / `Ctrl+X` / `Ctrl+C` / `Ctrl+D`; those bindings remain reachable because the guard filters only `Ctrl+<digit>` input.
+
+`Ctrl+0` is intentionally not bound — `0` is not a valid 1-based agent slot. Leaving it unbound preserves the key for future "clear agent override" or "jump to orchestrator" semantics without having to break the stable 1..9 mapping.
+
+### Handler composition (`src/cli/tui/App.tsx:323-336`)
+
+The `AppLayout` component owns the live `AGENTS` constant (imported from `SessionContext`) and the `setAgent` setter from `useSession()`. It composes a `useCallback` handler and passes it into `useKeyboard` through the new option:
+
+```tsx
+import { SessionProvider, useSession, AGENTS } from './context/SessionContext.js';
+
+const { model, agent, sessionId, tokenCount, cost, setAgent } = useSession();
+
+const handleJumpToAgent = useCallback(
+  (index: number): void => {
+    const target = AGENTS[index - 1];
+    if (target === undefined) {
+      addSystemMessage(`Only ${AGENTS.length} agents configured`);
+      return;
+    }
+    setAgent(target);
+  },
+  [addSystemMessage, setAgent]
+);
+```
+
+Two observable outcomes. Both are strictly non-crashing:
+
+| Case | User-facing effect |
+|------|--------------------|
+| Agent at `index` resolves | `setAgent(target)` updates `SessionContext.agent`. The status bar, prompt header, and agent-aware routing hints reflect the change on the next render. No transcript message. |
+| Index exceeds `AGENTS.length` (e.g. `Ctrl+9` with 5 agents configured) | System message `Only 5 agents configured` appears inline; `agent` is unchanged. |
+
+The agent list is currently a module-level constant (`AGENTS: AgentName[] = ['code', 'debug', 'plan', 'explore', 'orchestrator']`). The handler reads it on every press rather than snapshotting it in a ref so a future dynamic-agents refactor (where the list could grow from a user config load) requires no change to `App.tsx` — the keybind picks up the new entries automatically.
+
+### Help overlay integration (`src/cli/tui/utils/helpEntries.ts:17-22`)
+
+`getHelpEntries()` adds one unconditional entry:
+
+```typescript
+{
+  key: 'Ctrl+1..9',
+  description: 'Jump to agent 1-9',
+  category: 'navigation',
+  condition: null,
+}
+```
+
+It sits alongside `Tab` (cycle forward), `Shift+Tab` (cycle backward), `PgUp` / `PgDn`, `Ctrl+B` (toggle sidebar), and `Ctrl+J` (toggle page) in the `navigation` category. The entry is `condition: null`, so it appears whenever the TUI is running regardless of session state.
+
+### Relationship to `Shift+{1-9}` transcript URL quick-open
+
+The two bindings share a design: a 1-based digit index decoded from a modified digit keypress, dispatched to a `useCallback` handler, with an "index out of range" fall-through that emits a transient system message rather than crashing. They never collide:
+
+- `Shift+<digit>` is reported as either the shifted-punctuation glyph (`!@#$%^&*(` on US QWERTY) or `<digit>` with `key.shift === true` and `key.ctrl === false`. Guard: `!key.ctrl && !key.meta`.
+- `Ctrl+<digit>` is reported as `<digit>` with `key.ctrl === true`. Guard: `key.ctrl && input in '1'..'9'`.
+
+The `Ctrl` branch is checked after the `Shift` branch in `useKeyboard`, but the `key.ctrl === true` and `!key.ctrl` guards are mutually exclusive, so the ordering is semantic (grouping agent-navigation bindings together) rather than a precedence requirement.
+
 ## Session Retry with Bounded Exponential Backoff
 
 `src/core/session/retry.ts` (introduced in 1.20.2, ports opencode `c789868`) provides `withRetry(fn, shouldRetry, opts)` — a classifier-agnostic retry helper used across session-level operations that fault transiently against SAP AI Core. Defaults are tuned for interactive chat:
