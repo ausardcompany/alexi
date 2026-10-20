@@ -12582,3 +12582,127 @@ The underlying `checkProviderHealth` / `checkAllProviderHealth` / `listConfigure
 3. **Assert on `attemptedProbe` AND on `connectivityMock` call count.** Tests that assert both pin the dual contract — `attemptedProbe: false` means "we skipped the probe" AND `expect(connectivityMock).not.toHaveBeenCalled()` means the module did not call `checkConnectivity`. Either assertion alone can be defeated by a refactor.
 4. **Isolate `process.exitCode` across runs.** The CLI harness saves `previousExitCode` before each case and restores it after; without this, a failing provider in one case would leak `process.exitCode = 1` into unrelated cases and make them look broken.
 5. **Pin the exact error strings only where they matter.** The health module's error strings are a UX contract (operators read them). Tests use `toMatch(/AICORE_SERVICE_KEY/)` for broad invariants and `toContain('ECONNREFUSED')` for propagated upstream reasons, so cosmetic rewording does not break the suite but a semantic change does.
+
+
+## Testing the Permission Allowlist (`src/permission/allowlist.ts`, 2026-10-20 sync)
+
+Introduced in the 2026-10-20 upstream sync. `PermissionAllowlist` is pure and dependency-free, so tests exercise it directly without a `PermissionManager` fixture.
+
+### Minimum coverage
+
+Every change to the allowlist semantics must regression-pin:
+
+1. **A single catch-all deny is NOT an allowlist baseline.** `exceptions('edit', [{ tools: ['edit'], paths: ['*'], decision: 'deny' }])` → `false`. A true blanket deny stays as a ceiling on subagents.
+2. **A catch-all deny followed by a path-specific allow IS an allowlist baseline.** `exceptions('edit', [deny-star, allow-src])` → `true`. The subsequent `src/**` allow narrows the baseline.
+3. **A path-specific deny does not count as a baseline exception.** `exceptions('edit', [deny-star, deny-src])` → `false`. Both rules are denies; the second does not re-enable anything.
+4. **A wildcard tool entry (`['*']`) matches an edit probe.** `catchAll('edit', [{ tools: ['*'], paths: ['*'], decision: 'deny' }])` returns the rule. Missing `tools` likewise matches every probe.
+5. **A non-catch-all path hides a rule from the `*` probe.** `catchAll('edit', [{ tools: ['edit'], paths: ['src/**'], decision: 'deny' }])` → `undefined`. Only rules with absent / empty / `['*']` paths are returned.
+6. **`catchAll` returns the LAST matching rule.** `catchAll('edit', [deny-star-A, deny-star-B])` returns `deny-star-B`. Order is load-bearing.
+
+### Subagent-permission integration tests (`tests/agent/subagent-permissions.test.ts`)
+
+The companion integration tests must assert:
+
+1. A parent session with a `[deny *, allow src/**]` allowlist baseline for `edit` produces a subagent ruleset that does NOT contain the baseline rule.
+2. The parent's path-specific `allow src/**` rule is still dropped (approvals do not propagate).
+3. A parent with a TRUE blanket `[deny *]` for `edit` DOES forward the deny as a ceiling on the subagent — the baseline detection must only fire when a narrowing rule exists.
+4. All five edit-family names (`edit`, `write`, `multiedit`, `apply_patch`, `patch`) are inspected individually — adding a new edit-family name to `EDIT_PERMISSION_NAMES` must be covered by a new test case.
+
+### Pure-function test pattern
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { PermissionAllowlist } from '../../src/permission/allowlist.js';
+import type { PermissionRule } from '../../src/permission/index.js';
+
+describe('PermissionAllowlist.exceptions (2026-10-20 sync)', () => {
+  const denyStarEdit: PermissionRule = {
+    id: 'edit-baseline',
+    tools: ['edit'],
+    paths: ['*'],
+    decision: 'deny',
+    priority: 100,
+  };
+  const allowSrcEdit: PermissionRule = {
+    id: 'edit-src',
+    tools: ['edit'],
+    paths: ['src/**'],
+    decision: 'allow',
+    priority: 200,
+  };
+
+  it('returns false for a bare catch-all deny (true blanket ban)', () => {
+    expect(PermissionAllowlist.exceptions('edit', [denyStarEdit])).toBe(false);
+  });
+
+  it('returns true when the catch-all deny is narrowed by a later allow', () => {
+    expect(PermissionAllowlist.exceptions('edit', [denyStarEdit, allowSrcEdit])).toBe(true);
+  });
+});
+```
+
+The allowlist tests must NOT reach for a global `PermissionManager` — the helpers are deliberately pure, and injecting a manager would couple the regression suite to unrelated state. Fixtures are plain `PermissionRule` arrays constructed inline.
+
+## Testing the `experimental.todo` flag (`src/config/userConfig.ts`, 2026-10-20 sync)
+
+The `experimental.todo` getter / setter writes `~/.alexi/config.json`. Tests that exercise it must redirect the config path to a temp directory to stay parallel-safe:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+
+describe('experimental.todo', () => {
+  let tmpHome: string;
+
+  beforeEach(async () => {
+    tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), 'alexi-test-'));
+    vi.stubEnv('HOME', tmpHome);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(tmpHome, { recursive: true, force: true });
+  });
+
+  // ...
+});
+```
+
+### Minimum coverage
+
+1. **Default is `true` when `~/.alexi/config.json` is absent.** `getConfigExperimentalTodo()` → `true`.
+2. **Default is `true` when `experimental` is missing from the config.** A config with `{ model: '...' }` and no `experimental` object → `true`.
+3. **Default is `true` when `experimental.todo` is a non-boolean (string, null, number, array).** The reader must tolerate corrupt types and fall back to `true` — a flipped value should never implicitly disable the tool.
+4. **Writes persist via `saveFullConfig`.** `setConfigExperimentalTodo(false)` followed by `getConfigExperimentalTodo()` → `false`.
+5. **Setter preserves sibling `experimental.*` keys.** Pre-populating `experimental.contextTools: true` and then calling `setConfigExperimentalTodo(false)` must leave `experimental.contextTools: true` intact.
+
+## Testing the SessionLegacy upgrade point (`src/bus/index.ts`, 2026-10-20 sync)
+
+`SessionLegacy.event()` is a pass-through today. Tests must pin the pass-through contract so a future shape-rename regression surfaces immediately:
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { SessionLegacy } from '../../src/bus/index.js';
+
+describe('SessionLegacy.event', () => {
+  it('returns scalar payloads unchanged', () => {
+    expect(SessionLegacy.event('message.received', 42)).toBe(42);
+    expect(SessionLegacy.event('message.received', 'x')).toBe('x');
+  });
+
+  it('returns object payloads by identity (no clone)', () => {
+    const payload = { role: 'user', content: 'hi' };
+    expect(SessionLegacy.event('message.received', payload)).toBe(payload);
+  });
+
+  it('ignores the type argument today (pass-through)', () => {
+    const payload = { foo: 'bar' };
+    expect(SessionLegacy.event('unknown.event', payload)).toBe(payload);
+    expect(SessionLegacy.event('', payload)).toBe(payload);
+  });
+});
+```
+
+When a future shape rename adds a `case` branch, the matching test must assert on both the renamed shape AND the pass-through for every other type — the "ignores the type argument" test above becomes "ignores every type except the newly handled one".

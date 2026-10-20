@@ -9323,3 +9323,188 @@ Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream openc
 - The parser is forward-compatible with any future field that the Responses API may start sending as explicit `null`: the top-level `isTypedStreamEvent`-shaped guard, the `typeof === 'string'` delta coercion, and the nullish-coalescing on nested property access combine to make `null` structurally equivalent to "absent" at every known access point.
 - Mirrors the broader stream-event tolerance pattern established by `src/providers/protocols/stream-events.ts` (see [Stream Event Classification](#stream-event-classification-srcprovidersprotocolsstream-eventsts)): decoders prefer `ignored` over `throw` so a forward-rolled upstream server stays usable.
 
+## Permission Allowlist Baseline Detection (`src/permission/allowlist.ts`)
+
+Introduced in the 2026-10-20 upstream sync (commit `d0937dd7`, ports upstream kilocode `packages/opencode/src/kilocode/permission/allowlist.ts`). Distinguishes a **true blanket deny** (`[{ tools: ['edit'], paths: ['*'], decision: 'deny' }]` — the agent may never edit anything) from an **allowlist baseline** (`[{ tools: ['edit'], paths: ['*'], decision: 'deny' }, { tools: ['edit'], paths: ['src/**'], decision: 'allow' }]` — the agent may only edit paths under `src/**`, and everything else is forbidden).
+
+### Why this matters
+
+`Permission.evaluate('edit', '*', rules)` only ever examines rules with a `*` catch-all path and returns the LAST matching one. For the allowlist baseline that is the leading deny — the later `src/**` allow has a specific path, so it is invisible to a `('edit', '*')` probe. Code that uses the catch-all probe to decide "is edit globally denied?" sees `deny` in BOTH shapes and would incorrectly flatten the allowlist into a true ban. This was the correctness bug that caused subagents spawned from plan/orchestrator agents to lose edit/write capabilities entirely: the parent's `*` deny baseline (which the parent's own allowlist overrode) was being projected onto the subagent as a hard ceiling.
+
+### API
+
+```typescript
+import { PermissionAllowlist } from '../permission/allowlist.js';
+
+// Last rule matching ('<permission>', '*') semantics, if any.
+PermissionAllowlist.catchAll(permission: string, rules: PermissionRule[]): PermissionRule | undefined;
+
+// true when the catch-all deny is only an allowlist baseline (narrowed by
+// later path-specific allow/ask rules), not a true blanket ban.
+PermissionAllowlist.exceptions(permission: string, rules: PermissionRule[]): boolean;
+```
+
+A rule matches a `permission` probe when its `tools` field is absent, includes the literal tool name, or includes a `*` wildcard. A rule has a catch-all `paths` when the field is absent, empty, or exactly `['*']`.
+
+### Integration with subagent permission derivation
+
+`src/agent/subagent-permissions.ts` iterates the edit-family permission names `['edit', 'write', 'multiedit', 'apply_patch', 'patch']`, calls `PermissionAllowlist.exceptions(name, parent.permission)` for each, and when true tracks the catch-all baseline rule in an `editAllowlistBaselines: Set<PermissionRule>`. That set is subtracted from `sessionDeniesAndExternal` before the subagent's permission ruleset is derived, so the baseline deny is NOT forwarded as a hard ceiling. Path-specific allow rules from the parent are still dropped (approvals never propagate across the parent/subagent boundary), so the subagent fails closed on any path outside the parent's narrowed allow-list — operators who want the subagent to edit the same narrowed paths must pass `allowed_tools` on the `task` call explicitly.
+
+```typescript
+// src/agent/subagent-permissions.ts
+const EDIT_PERMISSION_NAMES = ['edit', 'write', 'multiedit', 'apply_patch', 'patch'] as const;
+
+const editAllowlistBaselines = new Set<PermissionRule>();
+for (const name of EDIT_PERMISSION_NAMES) {
+  if (PermissionAllowlist.exceptions(name, input.parentSessionPermission)) {
+    const baseline = PermissionAllowlist.catchAll(name, input.parentSessionPermission);
+    if (baseline) {
+      editAllowlistBaselines.add(baseline);
+    }
+  }
+}
+const sessionDeniesAndExternal = input.parentSessionPermission.filter((rule) => {
+  if (editAllowlistBaselines.has(rule)) {
+    return false;
+  }
+  return rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'));
+});
+```
+
+### Decision flow
+
+```mermaid
+flowchart TD
+  A["Parent session permission rules"] --> B{"Any edit-family rule<br/>has catch-all deny +<br/>path-specific exception?"}
+  B -- "No" --> C["Forward deny rules verbatim<br/>(true blanket deny stays as a<br/>ceiling on the subagent)"]
+  B -- "Yes" --> D["Track baseline deny<br/>in editAllowlistBaselines Set"]
+  D --> E["Filter sessionDeniesAndExternal:<br/>drop baseline, keep other denies"]
+  C --> F["Compose subagent ruleset:<br/>filtered parent denies +<br/>parent agent restrictions +<br/>default denies +<br/>allowed_tools narrowing"]
+  E --> F
+  F --> G["Subagent session permission"]
+```
+
+### Correctness contract
+
+- Only edit-family permissions are inspected; a `shell` or `bash` catch-all deny propagates verbatim regardless of later path exceptions, because non-edit tools do not use the baseline-plus-narrow pattern in practice.
+- The baseline detection runs on the parent SESSION's rules, not on the parent AGENT's rules — plan-mode and other hardening restrictions baked into the agent definition stay as hard ceilings.
+- Allowlist baselines are reused unchanged for custom (non-native) delegators: the native-vs-custom edit-scoping branch handled earlier in `deriveSubagentSessionPermission` operates on agent-level denies, not on session-level ones.
+
+## TUI Terminal-Size Hook Ink v8 Migration
+
+Updated in the 2026-10-20 dependency sync (merge PR #2076, commit `963f346a chore(deps): bump ink from 7.1.1 to 8.0.0` + autohealing commit `192230a4 fix(ci): migrate TUI to ink v8 useWindowSize hook [autohealing]`). The three TUI call sites that react to terminal resize events were migrated from Ink v7's `useStdout()` + manual listener pattern to Ink v8's dedicated `useWindowSize` hook. See the pre-existing [TUI Terminal-Size Hook (`useWindowSize`, Ink v8)](#tui-terminal-size-hook-usewindowsize-ink-v8) section for the full contract — the migration is a one-line change at each call site but is a behavioural fix (resize events now reflow markdown bodies and bubbles, not just the top-level layout).
+
+## SessionLegacy Event Upgrade Point (`src/bus/index.ts`)
+
+Introduced in the 2026-10-20 upstream sync (commit `d0937dd7`, ports upstream opencode v2.1 `packages/schema/src/session-legacy.ts`). Adds a single pass-through hook that every future durable event-store load path must call before handing a stored payload to its Zod decoder.
+
+### Shape
+
+```typescript
+export namespace SessionLegacy {
+  export function event(_type: string, data: unknown): unknown {
+    // Pass-through today; future shape renames land as case branches here.
+    return data;
+  }
+}
+```
+
+### Why it exists today
+
+Alexi does not persist events to disk — the in-memory bus is synchronous and events are consumed within a single turn. But any future durable event store (including the `~/.alexi/sessions/*.json` session rows that already round-trip through disk) must route stored payloads through this helper so a shape rename is a one-line `case` branch in `SessionLegacy.event` instead of a scavenger hunt across session loaders. Call sites should look like `const upgraded = SessionLegacy.event(type, stored); const value = schema.parse(upgraded);` so the upgrade point sits BEFORE the Zod decoder.
+
+## Metadata-Aware Tool Permission Prompts (`PermissionAskMetadata`)
+
+Introduced in the 2026-10-20 upstream sync (commit `d0937dd7`, ports upstream kilocode `browser_open` metadata-aware permission prompts). Tool definitions can now expose structured metadata to the permission dock so an interactive ask prompt can render specific permission patterns, an "always allow" affordance, and freeform operation context.
+
+### `ToolDefinition.permission.getPermissionMetadata`
+
+```typescript
+export interface PermissionAskMetadata {
+  /** The specific permission patterns being requested for this call. */
+  patterns?: string[];
+  /** Patterns the user may elect to always-allow for future calls. */
+  always?: string[];
+  /** Freeform structured context rendered in the permission dialog. */
+  metadata?: Record<string, unknown>;
+}
+
+export interface ToolDefinition<TParams extends z.ZodType, TResult> {
+  // ...
+  permission?: {
+    action: PermissionAction;
+    getResource: (params: z.infer<TParams>, context?: ToolContext) => string;
+    getPermissionMetadata?: (
+      params: z.infer<TParams>,
+      context?: ToolContext
+    ) => PermissionAskMetadata | undefined;
+  };
+  // ...
+}
+```
+
+Returning `undefined` preserves the pre-existing resource-only ask behaviour; the field is purely additive and permission managers that are not metadata-aware ignore it. `patterns` describes the specific scopes being requested (e.g. `navigate:https://example.com`); `always` lists scopes the user may elect to always-allow (persisted against the user config so later sessions skip the prompt); `metadata` carries structured context the dialog can render to help the user decide.
+
+### First consumer: `browser` tool
+
+```typescript
+// src/tool/tools/browser.ts
+permission: {
+  action: 'network',
+  getResource: (params) => {
+    if (params.url) {
+      try {
+        return new URL(params.url).hostname;
+      } catch {
+        return params.url;
+      }
+    }
+    return 'browser-session';
+  },
+  getPermissionMetadata: (params) => {
+    if (!params.url) {
+      return undefined;
+    }
+    let origin: string;
+    try {
+      origin = new URL(params.url).origin;
+    } catch {
+      return undefined;
+    }
+    return {
+      patterns: [`navigate:${origin}`],
+      always: [`navigate:${origin}`],
+      metadata: {
+        operation: params.action,
+        url: params.url,
+        rules: [`navigate:${origin}`, 'navigate:*'],
+      },
+    };
+  },
+},
+```
+
+Non-URL browser actions (`close`, `scroll`, `screenshot`) return `undefined` and fall back to the resource-only prompt. The dock renders `rules: [navigate:<origin>, navigate:*]` so the user sees both the scoped and broad fallbacks side by side.
+
+## Permission Edit History Diagram
+
+The [`PermissionProvenance` edit history tracking](#) introduced in commit `3acad684` records an append-only audit trail of post-creation edits to a `PermissionRule`. The flow a provenance snapshot takes through `appendEditHistory` is:
+
+```mermaid
+sequenceDiagram
+  participant Op as Operator
+  participant Editor as alexi permissions edit
+  participant Mgr as PermissionManager
+  participant Prov as appendEditHistory
+  participant Store as denialStore
+
+  Op->>Editor: edit <ruleId> --priority 5
+  Editor->>Mgr: updateRule(ruleId, { priority: 5 })
+  Mgr->>Mgr: validate merged shape (Zod)
+  Mgr->>Mgr: re-sort rules by priority
+  Editor->>Prov: appendEditHistory(prov, { priority: 5 }, reason, ts)
+  Prov-->>Editor: new PermissionProvenance with editHistory appended
+  Editor->>Store: recordDenial(toolCallId, updated)
+  Note over Prov,Store: editHistory is append-only, editedAt mirrors<br/>editHistory[editHistory.length - 1].timestamp
+```
+

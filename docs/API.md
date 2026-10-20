@@ -9108,3 +9108,151 @@ Guard order (first match wins):
 
 Any unknown `type` field still returns `{ type: 'ignored', reason: chunk.type }` so a forward-rolled server cannot crash the decoder.
 
+
+## Permission Allowlist API (`src/permission/allowlist.ts`)
+
+Introduced in the 2026-10-20 upstream sync. Exports the `PermissionAllowlist` namespace that lets callers distinguish a true blanket deny from an allowlist baseline. See [docs/ARCHITECTURE.md — Permission Allowlist Baseline Detection](ARCHITECTURE.md#permission-allowlist-baseline-detection-srcpermissionallowlistts) for the full rationale.
+
+```typescript
+import { PermissionAllowlist } from '../permission/allowlist.js';
+import type { PermissionRule } from '../permission/index.js';
+
+const rules: PermissionRule[] = [
+  { id: 'edit-baseline', tools: ['edit'], paths: ['*'], decision: 'deny', priority: 100 },
+  { id: 'edit-src', tools: ['edit'], paths: ['src/**'], decision: 'allow', priority: 200 },
+];
+
+PermissionAllowlist.catchAll('edit', rules);
+// => the leading deny rule (last catch-all for 'edit' probe).
+
+PermissionAllowlist.exceptions('edit', rules);
+// => true: the deny is only a baseline because 'edit-src' narrows it with
+//    a path-specific allow. Call sites must NOT treat the baseline as a
+//    hard ceiling when this returns true.
+```
+
+### Behavioural contract
+
+- `catchAll(permission, rules)` returns the LAST rule that would match a `('<permission>', '*')` probe (tool match + absent/`['*']` paths), or `undefined` when no catch-all exists.
+- `exceptions(permission, rules)` returns `true` only when BOTH (a) the catch-all is a `deny` and (b) at least one later rule narrows that deny with a path-specific allow or ask. A deny with no subsequent narrowing returns `false` (it is a true blanket deny).
+- A rule's `tools` field matches a probe when it is absent, when it contains the literal permission name, or when it contains a `*` wildcard.
+- A rule's `paths` field is a catch-all when it is absent, empty, or exactly `['*']`.
+
+## PermissionAskMetadata
+
+Introduced in the 2026-10-20 upstream sync (`src/tool/index.ts`). Tool definitions can expose structured metadata to the permission dock so the ask prompt can render specific permission patterns, an "always allow" affordance, and freeform operation context.
+
+```typescript
+/**
+ * Structured metadata attached to a permission ask.
+ */
+export interface PermissionAskMetadata {
+  /** The specific permission patterns being requested for this call. */
+  patterns?: string[];
+  /** Patterns the user may elect to always-allow for future calls. */
+  always?: string[];
+  /** Freeform structured context rendered in the permission dialog. */
+  metadata?: Record<string, unknown>;
+}
+```
+
+The `permission` block on `ToolDefinition` gains an optional `getPermissionMetadata(params, context?)` factory:
+
+```typescript
+export interface ToolDefinition<TParams extends z.ZodType, TResult> {
+  name: string;
+  description: string;
+  parameters: TParams;
+  permission?: {
+    action: PermissionAction;
+    getResource: (params: z.infer<TParams>, context?: ToolContext) => string;
+    getPermissionMetadata?: (
+      params: z.infer<TParams>,
+      context?: ToolContext
+    ) => PermissionAskMetadata | undefined;
+  };
+  execute: (params: z.infer<TParams>, context: ToolContext) => Promise<ToolResult<TResult>>;
+}
+```
+
+Returning `undefined` from `getPermissionMetadata` preserves the resource-only ask behaviour; permission managers that are not metadata-aware ignore the field.
+
+### Reference consumer: `browser` tool
+
+```typescript
+permission: {
+  action: 'network',
+  getResource: (params) =>
+    params.url ? new URL(params.url).hostname : 'browser-session',
+  getPermissionMetadata: (params) => {
+    if (!params.url) {
+      return undefined;
+    }
+    const origin = new URL(params.url).origin;
+    return {
+      patterns: [`navigate:${origin}`],
+      always: [`navigate:${origin}`],
+      metadata: {
+        operation: params.action,
+        url: params.url,
+        rules: [`navigate:${origin}`, 'navigate:*'],
+      },
+    };
+  },
+},
+```
+
+## SessionLegacy API (`src/bus/index.ts`)
+
+Introduced in the 2026-10-20 upstream sync. Single pass-through hook that every future durable event-store load path must call before handing a stored payload to its Zod decoder.
+
+```typescript
+import { SessionLegacy } from '../bus/index.js';
+import { MessageReceived } from '../bus/index.js';
+
+// Reading a stored event payload from a hypothetical durable store:
+const upgraded = SessionLegacy.event(storedType, storedPayload);
+const parsed = MessageReceived.schema.parse(upgraded);
+```
+
+The function is intentionally a pass-through today — Alexi does not currently persist events to disk. Add new shape-rename upgrades as `case` branches on `type` in the function body; the single call site ensures a shape rename stays a one-line change.
+
+## Experimental Todowrite Flag API (`src/config/userConfig.ts`)
+
+Introduced in the 2026-10-20 upstream sync. Two new accessors for the `experimental.todo` flag:
+
+```typescript
+import {
+  getConfigExperimentalTodo,
+  setConfigExperimentalTodo,
+} from '../config/userConfig.js';
+
+// Read with safe default:
+getConfigExperimentalTodo(); // => true unless explicitly disabled
+
+// Persist (writes ~/.alexi/config.json experimental.todo):
+setConfigExperimentalTodo(false);
+```
+
+The reader tolerates a missing/non-object `experimental` block and a non-boolean `todo` value — both fall back to the `true` default. See [docs/CONFIGURATION.md — Experimental Todowrite Flag](CONFIGURATION.md#experimental-todowrite-flag-experimentaltodo) for the on-disk shape and the rationale for the `true` default.
+
+## TaskTool Public Surface (`src/tool/tools/task.ts`)
+
+Updated in the 2026-10-20 upstream sync. The `TaskTool` namespace export gains two new entries:
+
+```typescript
+// src/tool/tools/task.ts
+export const TaskTool = {
+  usageDescription:
+    'Subagents launched with this tool are internal to the current session and create no worktrees or interactive sessions. ' +
+    'To start visible Agent Manager sessions, use `agent_manager` only when the user explicitly asks.',
+
+  refresh(parent: readonly PermissionRule[], child: readonly PermissionRule[]): PermissionRule[],
+  /** @deprecated Use `refresh` instead; thin alias retained for the rename transition. */
+  merge(parent: readonly PermissionRule[], child: readonly PermissionRule[]): PermissionRule[],
+
+  // (pre-existing: nestedTask, validate, buildSubagentConfig)
+};
+```
+
+`usageDescription` disambiguates the `task` tool from `agent_manager` in the model's prompt. `refresh(parent, child)` merges a parent session's permission ruleset with a child subagent's derived rules — rules whose identity matches (same `tools`, `paths`, `commands`, `hosts`, `actions`, sorted) are replaced in-place; otherwise the child rule is appended. `decision` and `priority` are intentionally excluded from identity comparison so swapping a `deny` for an `allow` on the same scope replaces rather than duplicates.

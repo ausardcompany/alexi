@@ -3071,3 +3071,73 @@ Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream openc
 - [Testing Guide](TESTING.md) -- Testing configuration and environment setup
 - [Automation](AUTOMATION.md) -- CI/CD workflows and automation
 - [Changelog](../CHANGELOG.md) -- Version history in Keep a Changelog format. The 1.22.0 → 1.22.6 cycle is a sequence of daily-sync patch releases; the only configuration-surface addition in this window is the new `rulesPath` field in project (`<workdir>/.alexi/config.json`) and global (`~/.alexi/config.json`) config, which extends prompt-assembly rule discovery beyond the historical `<workdir>/.alexi/rules/*.md` scan (see [Instruction Files](#instruction-files) and commit `874caa58` `feat(config): expand rules file discovery to support custom paths`). The 1.22.6 `apply_patch` CRLF line-ending preservation fix (commit `3adb7ec8`) is a tool-behaviour change with no user-facing configuration surface — the tool auto-detects the target file's dominant style and does not accept an override. 1.22.7 shipped the `experimental.task_model_selection` flag documented above. 1.22.8 (2026-09-01) is a tool-schema hardening release — the `agent_manager` `config` field now tolerates JSON-encoded strings from over-encoding providers, and the `apply_patch` result payload is constructed defensively so `undefined` fields never leak into downstream permission metadata; neither introduces a new user-facing configuration surface. Previous configuration-surface additions were `ALEXI_EXPERIMENTAL_MCP_APPS`, `mcpToolDisplay` / `mcp_tool_display`, and the `InstanceWatcher` per-instance scoping described inline above, all shipped in 1.21.4.
+
+
+## Experimental Todowrite Flag (`experimental.todo`)
+
+Introduced in the 2026-10-20 upstream sync. Controls whether the structured `todowrite` tool is exposed to agents.
+
+### Shape
+
+Stored inside the top-level `experimental` object of `~/.alexi/config.json`:
+
+```json
+{
+  "experimental": {
+    "todo": true
+  }
+}
+```
+
+### Behaviour
+
+- Default: `true` (todowrite has been stable in Alexi for several releases).
+- `false`: the tool is hidden from the registry and the agent description surface. Useful for workflows that prefer free-form notes.
+- A missing / non-object `experimental` block, or a non-boolean `todo` value, both resolve to the default `true` so a corrupt config does not accidentally disable the tool.
+
+### Programmatic access
+
+```typescript
+import {
+  getConfigExperimentalTodo,
+  setConfigExperimentalTodo,
+} from '../config/userConfig.js';
+
+getConfigExperimentalTodo(); // => true | false
+setConfigExperimentalTodo(false);
+```
+
+The setter preserves any sibling `experimental.*` keys when writing — it reads the existing object, spreads it, overrides `todo`, and persists the merged result. Ports upstream opencode `experimental.todo` (re-introduction of the todowrite tool behind a feature gate).
+
+## Allowlist baselines vs blanket deny
+
+Introduced in the 2026-10-20 upstream sync (`src/permission/allowlist.ts`). A permission policy can be written two different ways that *look* the same at a glance but mean very different things:
+
+- **Blanket deny.** A single catch-all deny for a tool means the agent may never use that tool, full stop:
+
+  ```json
+  {
+    "permission": [
+      { "id": "no-edit", "tools": ["edit"], "paths": ["*"], "decision": "deny", "priority": 100 }
+    ]
+  }
+  ```
+
+- **Allowlist baseline.** A catch-all deny followed by a path-specific allow is an opt-in allowlist, not a true ban. The leading deny is a *baseline* that forbids everything the subsequent rules do not explicitly re-enable:
+
+  ```json
+  {
+    "permission": [
+      { "id": "edit-baseline", "tools": ["edit"], "paths": ["*"], "decision": "deny", "priority": 100 },
+      { "id": "edit-src", "tools": ["edit"], "paths": ["src/**"], "decision": "allow", "priority": 200 }
+    ]
+  }
+  ```
+
+### Subagent propagation
+
+Subagents spawned via the `task` tool inherit parent RESTRICTIONS but not APPROVALS. Before 2026-10-20 the inheritance logic treated the leading `*` deny as a hard ceiling and projected it onto the subagent even when the parent's own ruleset narrowed it with a path-specific allow — the subagent lost edit capabilities entirely. The current logic detects the pattern via `PermissionAllowlist.exceptions(permission, rules)` for every edit-family name (`edit`, `write`, `multiedit`, `apply_patch`, `patch`) and filters the baseline deny out of the forwarded ruleset, so a subagent spawned from a plan/orchestrator agent keeps the edit surface the parent itself has.
+
+The subagent still fails closed on paths outside the parent's narrowed allow-list — path-specific allow rules from the parent are not forwarded (approvals never propagate across the boundary), so operators who want the subagent to edit the same narrowed paths must pass `allowed_tools` on the `task` call explicitly.
+
+See [docs/ARCHITECTURE.md — Permission Allowlist Baseline Detection](ARCHITECTURE.md#permission-allowlist-baseline-detection-srcpermissionallowlistts) for the API and the subagent-permission derivation integration.
