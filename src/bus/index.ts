@@ -545,22 +545,24 @@ export const WakeupFired = defineEvent(
 // through disk — should funnel their event payloads through this helper
 // so a shape-rename is a one-line edit in the switch below instead of a
 // scavenger hunt across session loaders.
-export namespace SessionLegacy {
-  /**
-   * Upgrade a stored event payload to the current Zod schema's shape.
-   *
-   * Call this BEFORE invoking `schema.parse(data)` so a payload written
-   * in an older shape (e.g. before a field was renamed) is normalised
-   * into whatever the current definition expects. Returns the payload
-   * unchanged when no upgrade is required.
-   *
-   * Add new upgrades as new `case` branches on `type`. The function is
-   * intentionally a pass-through today — the plumbing is in place so
-   * payload renames are a one-line change, matching upstream opencode's
-   * `packages/schema/src/session-legacy.ts`.
-   */
-  export function event(_type: string, data: unknown): unknown {
-    // Pass-through today; future shape renames land as case branches here.
-    return data;
-  }
+/**
+ * Upgrade a stored event payload to the current Zod schema's shape.
+ *
+ * Call this BEFORE invoking `schema.parse(data)` so a payload written
+ * in an older shape (e.g. before a field was renamed) is normalised
+ * into whatever the current definition expects. Returns the payload
+ * unchanged when no upgrade is required.
+ *
+ * Add new upgrades as new `case` branches on `type`. The function is
+ * intentionally a pass-through today — the plumbing is in place so
+ * payload renames are a one-line change, matching upstream opencode's
+ * `packages/schema/src/session-legacy.ts`.
+ */
+function sessionLegacyEvent(_type: string, data: unknown): unknown {
+  // Pass-through today; future shape renames land as case branches here.
+  return data;
 }
+
+export const SessionLegacy = {
+  event: sessionLegacyEvent,
+};

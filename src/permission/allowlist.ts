@@ -41,55 +41,58 @@
 
 import type { PermissionRule } from './index.js';
 
-export namespace PermissionAllowlist {
-  /**
-   * Return the last rule in `rules` that targets `permission`'s catch-all
-   * (any path). In Alexi, that is any rule whose `tools` either omits the
-   * list (matches all tools), contains the exact `permission`, or contains
-   * a `*` wildcard tool entry, AND whose `paths` is either absent or is
-   * a bare `['*']` catch-all.
-   *
-   * Mirrors upstream `Permission.evaluate(permission, '*', rules)` semantics
-   * for the "the rule applies to EVERY path" probe.
-   */
-  export function catchAll(permission: string, rules: PermissionRule[]) {
-    let last: PermissionRule | undefined;
-    for (const rule of rules) {
-      if (!ruleMatchesTool(rule, permission)) {
-        continue;
-      }
-      if (!ruleIsCatchAllPath(rule)) {
-        continue;
-      }
-      last = rule;
+/**
+ * Return the last rule in `rules` that targets `permission`'s catch-all
+ * (any path). In Alexi, that is any rule whose `tools` either omits the
+ * list (matches all tools), contains the exact `permission`, or contains
+ * a `*` wildcard tool entry, AND whose `paths` is either absent or is
+ * a bare `['*']` catch-all.
+ *
+ * Mirrors upstream `Permission.evaluate(permission, '*', rules)` semantics
+ * for the "the rule applies to EVERY path" probe.
+ */
+function catchAll(permission: string, rules: PermissionRule[]) {
+  let last: PermissionRule | undefined;
+  for (const rule of rules) {
+    if (!ruleMatchesTool(rule, permission)) {
+      continue;
     }
-    return last;
+    if (!ruleIsCatchAllPath(rule)) {
+      continue;
+    }
+    last = rule;
   }
+  return last;
+}
 
-  /**
-   * `true` when `permission`'s catch-all rule is a `deny` **and** at least
-   * one later rule narrows that deny with a path-specific allow / ask —
-   * i.e. the catch-all is only a baseline for an allowlist, not a true
-   * blanket deny. Call sites that would otherwise treat the baseline as a
-   * hard ceiling must consult this helper first.
-   */
-  export function exceptions(permission: string, rules: PermissionRule[]): boolean {
-    const rule = catchAll(permission, rules);
-    if (!rule || rule.decision !== 'deny') {
+/**
+ * `true` when `permission`'s catch-all rule is a `deny` **and** at least
+ * one later rule narrows that deny with a path-specific allow / ask —
+ * i.e. the catch-all is only a baseline for an allowlist, not a true
+ * blanket deny. Call sites that would otherwise treat the baseline as a
+ * hard ceiling must consult this helper first.
+ */
+function exceptions(permission: string, rules: PermissionRule[]): boolean {
+  const rule = catchAll(permission, rules);
+  if (!rule || rule.decision !== 'deny') {
+    return false;
+  }
+  const index = rules.lastIndexOf(rule);
+  return rules.slice(index + 1).some((next) => {
+    if (!ruleMatchesTool(next, permission)) {
       return false;
     }
-    const index = rules.lastIndexOf(rule);
-    return rules.slice(index + 1).some((next) => {
-      if (!ruleMatchesTool(next, permission)) {
-        return false;
-      }
-      if (ruleIsCatchAllPath(next)) {
-        return false;
-      }
-      return next.decision !== 'deny';
-    });
-  }
+    if (ruleIsCatchAllPath(next)) {
+      return false;
+    }
+    return next.decision !== 'deny';
+  });
 }
+
+export const PermissionAllowlist = {
+  catchAll,
+  exceptions,
+};
 
 /**
  * A rule matches `permission` when its `tools` field is absent (matches all),
