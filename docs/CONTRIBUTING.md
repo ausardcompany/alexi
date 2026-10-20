@@ -424,6 +424,23 @@ Key rules enforced:
 - `@typescript-eslint/no-unused-vars: error`
 - `@typescript-eslint/no-namespace: error` -- New code must NOT use TypeScript `namespace` blocks. The only sanctioned exception is upstream-kilocode compat modules under `src/kilocode/**` and `src/core/session/recall-message-index.ts`, which re-export the upstream `namespace X { ... }` API shape so cross-repo diffs stay reviewable. Those files carry a line-scoped `// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape` immediately above the `export namespace` keyword. Do not apply a file-scoped disable — the suppression must remain line-scoped so the rule still fires on unrelated additions.
 
+### Namespace → const object aggregate (migrating upstream shapes without the lint exception)
+
+Modules that port a `namespace X { export function a() {...}; export function b() {...}; }` shape from upstream (opencode / kilocode) have two options under the `@typescript-eslint/no-namespace: error` rule above:
+
+1. **Keep the `namespace` form** — only allowed when the file is one of the sanctioned exceptions (`src/kilocode/**` or `src/core/session/recall-message-index.ts`) AND carries a line-scoped `// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape` immediately above the `export namespace` keyword. A file-scoped disable is NOT accepted; the suppression must remain line-scoped so the rule still fires on unrelated additions.
+2. **Migrate to the const-object aggregate shape** — preferred for everything else, including `src/bus/**` and `src/permission/**` which are Alexi-native modules that happen to port upstream helpers. The pattern:
+   - Replace each `export function fn(...): T { body }` inside the namespace with a top-level `function fn(...): T { body }` outside the namespace. Preserve the docblock on the top-level function.
+   - Append a single `export const X = { fn, other };` aggregate at the end of the module (or where the original `export namespace X {` keyword used to be). This is the only `export` of the public name.
+   - Do NOT change call sites in `src/` or `tests/` — `X.fn(args)` continues to resolve correctly because `X` is now a plain object literal whose property values are the top-level function references. A pure call-shape-preserving refactor is covered by the existing green test run; no new tests are required unless the module did not have call-site coverage before.
+   - Keep the module's narrative docblock (the "why this matters" header that explained the namespace's purpose) above the first top-level function or at the top of the module — do NOT lose it in the move.
+
+Reference examples (commit `5caa28c3`, 2026-10-20, both single-pass refactors with zero behavioural change):
+- `src/bus/index.ts` — `SessionLegacy` migrated from `export namespace SessionLegacy { export function event(_type, data) {...} }` to `function sessionLegacyEvent(_type, data) {...}` plus `export const SessionLegacy = { event: sessionLegacyEvent };`. The internal function name intentionally differs from the exported method so the top-level identifier remains unambiguous in stack traces (`sessionLegacyEvent` vs. the generic `event`), while the public call surface `SessionLegacy.event(type, data)` is preserved for every caller in the persistence paths.
+- `src/permission/allowlist.ts` — `PermissionAllowlist` migrated from `export namespace PermissionAllowlist { export function catchAll(...){} export function exceptions(...){} }` to two top-level functions `catchAll` and `exceptions` plus `export const PermissionAllowlist = { catchAll, exceptions };`. The internal `ruleMatchesTool` / `ruleIsCatchAllPath` helpers below the aggregate are untouched. The correctness invariant documented in the module header (a parent's allowlist-baseline `*` deny must NOT project onto subagents as a hard ceiling) is unchanged.
+
+Choose option (2) by default. Option (1) exists ONLY for files whose shape must stay byte-aligned with an upstream module so cross-repo diffs stay reviewable, and even in those files the suppression must be line-scoped.
+
 ### Zod v4 record signature
 
 The project uses Zod v4. The single-argument `z.record(z.unknown())` form is deprecated in v4; always write the explicit key/value form `z.record(z.string(), z.unknown())` (or the appropriate key schema) so the code type-checks and lints cleanly:
