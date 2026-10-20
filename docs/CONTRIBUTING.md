@@ -424,6 +424,23 @@ Key rules enforced:
 - `@typescript-eslint/no-unused-vars: error`
 - `@typescript-eslint/no-namespace: error` -- New code must NOT use TypeScript `namespace` blocks. The only sanctioned exception is upstream-kilocode compat modules under `src/kilocode/**` and `src/core/session/recall-message-index.ts`, which re-export the upstream `namespace X { ... }` API shape so cross-repo diffs stay reviewable. Those files carry a line-scoped `// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape` immediately above the `export namespace` keyword. Do not apply a file-scoped disable — the suppression must remain line-scoped so the rule still fires on unrelated additions.
 
+### Namespace → const object aggregate (migrating upstream shapes without the lint exception)
+
+Modules that port a `namespace X { export function a() {...}; export function b() {...}; }` shape from upstream (opencode / kilocode) have two options under the `@typescript-eslint/no-namespace: error` rule above:
+
+1. **Keep the `namespace` form** — only allowed when the file is one of the sanctioned exceptions (`src/kilocode/**` or `src/core/session/recall-message-index.ts`) AND carries a line-scoped `// eslint-disable-next-line @typescript-eslint/no-namespace -- mirrors upstream kilocode API shape` immediately above the `export namespace` keyword. A file-scoped disable is NOT accepted; the suppression must remain line-scoped so the rule still fires on unrelated additions.
+2. **Migrate to the const-object aggregate shape** — preferred for everything else, including `src/bus/**` and `src/permission/**` which are Alexi-native modules that happen to port upstream helpers. The pattern:
+   - Replace each `export function fn(...): T { body }` inside the namespace with a top-level `function fn(...): T { body }` outside the namespace. Preserve the docblock on the top-level function.
+   - Append a single `export const X = { fn, other };` aggregate at the end of the module (or where the original `export namespace X {` keyword used to be). This is the only `export` of the public name.
+   - Do NOT change call sites in `src/` or `tests/` — `X.fn(args)` continues to resolve correctly because `X` is now a plain object literal whose property values are the top-level function references. A pure call-shape-preserving refactor is covered by the existing green test run; no new tests are required unless the module did not have call-site coverage before.
+   - Keep the module's narrative docblock (the "why this matters" header that explained the namespace's purpose) above the first top-level function or at the top of the module — do NOT lose it in the move.
+
+Reference examples (commit `5caa28c3`, 2026-10-20, both single-pass refactors with zero behavioural change):
+- `src/bus/index.ts` — `SessionLegacy` migrated from `export namespace SessionLegacy { export function event(_type, data) {...} }` to `function sessionLegacyEvent(_type, data) {...}` plus `export const SessionLegacy = { event: sessionLegacyEvent };`. The internal function name intentionally differs from the exported method so the top-level identifier remains unambiguous in stack traces (`sessionLegacyEvent` vs. the generic `event`), while the public call surface `SessionLegacy.event(type, data)` is preserved for every caller in the persistence paths.
+- `src/permission/allowlist.ts` — `PermissionAllowlist` migrated from `export namespace PermissionAllowlist { export function catchAll(...){} export function exceptions(...){} }` to two top-level functions `catchAll` and `exceptions` plus `export const PermissionAllowlist = { catchAll, exceptions };`. The internal `ruleMatchesTool` / `ruleIsCatchAllPath` helpers below the aggregate are untouched. The correctness invariant documented in the module header (a parent's allowlist-baseline `*` deny must NOT project onto subagents as a hard ceiling) is unchanged.
+
+Choose option (2) by default. Option (1) exists ONLY for files whose shape must stay byte-aligned with an upstream module so cross-repo diffs stay reviewable, and even in those files the suppression must be line-scoped.
+
 ### Zod v4 record signature
 
 The project uses Zod v4. The single-argument `z.record(z.unknown())` form is deprecated in v4; always write the explicit key/value form `z.record(z.string(), z.unknown())` (or the appropriate key schema) so the code type-checks and lints cleanly:
@@ -4161,6 +4178,66 @@ Updated in the 2026-10-18 upstream sync (`1.22.50`, ports upstream opencode fix 
 - **Keep the top-level untyped-chunk guard.** A `null` chunk, a non-object chunk, or a chunk whose `type` is not a string must return `{ type: 'ignored', reason: 'untyped' }` rather than throwing on the `switch` lookup. This is the first line of defence against a malformed stream event.
 - **Coerce `delta` via `typeof === 'string'`.** Both omitted and explicit-`null` deltas should land in the same empty-string bucket. Using `chunk.delta ?? ''` is NOT equivalent — `0` or `false` deltas (unlikely but possible on forward-rolled servers) would survive, whereas the parser specifically wants to accept only string deltas.
 - **Unknown `type` values stay in the `ignored` bucket.** The default-case path returns `{ type: 'ignored', reason: chunk.type }` so forward-rolled servers that add new event types do not crash the decoder. Removing this default is a reliability regression.
+
+
+## Permission Allowlist Baseline (`src/permission/allowlist.ts`)
+
+Introduced in the 2026-10-20 upstream sync (ports upstream kilocode `packages/opencode/src/kilocode/permission/allowlist.ts`). The module distinguishes a true blanket deny from an allowlist baseline so subagents are not projected a hard ceiling from a parent's narrowed allowlist. See [docs/CONFIGURATION.md — Allowlist baselines vs blanket deny](CONFIGURATION.md#allowlist-baselines-vs-blanket-deny) and [docs/ARCHITECTURE.md — Permission Allowlist Baseline Detection](ARCHITECTURE.md#permission-allowlist-baseline-detection-srcpermissionallowlistts) for the user-facing contract.
+
+### Port-maintenance invariants
+
+- **`EDIT_PERMISSION_NAMES` is the single source of truth.** The list `['edit', 'write', 'multiedit', 'apply_patch', 'patch']` lives in `src/agent/subagent-permissions.ts` as a module-local `const` and is the only call site that enumerates edit-family names for the baseline check. Adding a new edit tool means adding it here AND adding a regression test in `tests/agent/subagent-permissions.test.ts` that exercises the baseline path for the new name. Do NOT duplicate the list elsewhere.
+- **The namespace export is intentional.** `PermissionAllowlist` uses `export namespace` to mirror upstream kilocode's shape so a direct port lands cleanly. Do NOT refactor to a plain object or a class — call sites write `PermissionAllowlist.catchAll(...)` and tests import the namespace by name.
+- **`catchAll` returns `undefined`, not `null`.** The upstream signature returns `PermissionRule | undefined`; downstream code relies on the strict `undefined` sentinel in `if (rule && rule.decision === 'deny')` guards. A `null` return would still satisfy TypeScript but would break the `?.` chain idiom used in `exceptions`.
+- **`exceptions` is read-only.** The helper never mutates `rules`. The companion filter in `subagent-permissions.ts` uses the tracked baseline rule by identity (`===`) inside a `Set<PermissionRule>` lookup, so returning a cloned baseline from `catchAll` would break the identity filter.
+- **`PermissionAllowlist.exceptions` is only consulted for edit-family names.** Non-edit tools (`bash`, `shell`, `fetch`) do not use the baseline-plus-narrow pattern in practice; forwarding their catch-all denies as hard ceilings is the correct behaviour. Extending the baseline detection to a new tool family is a semantic change that requires its own ADR.
+- **Only parent SESSION rules are inspected.** The baseline detection runs on `input.parentSessionPermission`, not on the parent AGENT's rules — plan-mode and other hardening restrictions baked into the agent definition stay as hard ceilings. Do NOT widen the input to include agent-level rules; that would let a subagent escape plan-mode read-only ceilings.
+
+### Testing invariants
+
+See [docs/TESTING.md — Testing the Permission Allowlist](TESTING.md#testing-the-permission-allowlist-srcpermissionallowlistts-2026-10-20-sync) for the six-point minimum coverage. The module is pure and dependency-free, so tests must NOT reach for a global `PermissionManager` — construct `PermissionRule` arrays inline.
+
+## Metadata-aware permission asks (`PermissionAskMetadata`)
+
+Introduced in the 2026-10-20 upstream sync. The `permission.getPermissionMetadata` factory on `ToolDefinition` is OPTIONAL — permission managers that are not metadata-aware must keep working when a tool returns `undefined`. See [docs/API.md — PermissionAskMetadata](API.md#permissionaskmetadata) for the shape.
+
+### Port-maintenance invariants
+
+- **`getPermissionMetadata` must handle every input shape `getResource` already handles.** A URL that `getResource` returns verbatim because `new URL(params.url)` threw must NOT crash `getPermissionMetadata` — the `browser` tool wraps the URL parse in its own `try` and returns `undefined` on parse failure so the resource-only path keeps working.
+- **`metadata.rules` is a convention, not a contract.** The permission dock looks for `metadata.rules?: string[]` when rendering scoped-vs-broad pattern lists, but `metadata` itself is a freeform `Record<string, unknown>`. New consumer tools can add fields that the dock does not currently render; the dock must ignore unknown keys gracefully.
+- **`always` ⊂ `patterns` is a soft invariant.** The dock surfaces `patterns` as "what is being asked" and `always` as "what the user can always-allow". It is permitted for `always` to be a strict subset of `patterns` or to list broader scopes (e.g. `patterns: ['navigate:https://x.y/path']`, `always: ['navigate:https://x.y']`), but the two arrays SHOULD be semantically compatible — do not surface an `always` scope the user has no way to understand from the current `patterns`.
+
+## Ink v8 window-size hook
+
+See [docs/CONTRIBUTING.md — Ink v8 window-size hook](#) (section already present as "Ink v8 `useWindowSize` hook" per the pre-existing docs — see line 2624 of this file). The 2026-10-20 sync is the point at which Ink v8 lands on master: before accepting a TUI change that reads terminal dimensions, confirm it uses `useWindowSize` from `ink` and NOT `useStdout().stdout?.columns` or `process.stdout.columns`. The regression surface is the "resize mid-session does not reflow markdown bodies" bug — v7's `useStdout()` reads were not reactive and captured the initial `columns` once.
+
+## SessionLegacy pass-through (`src/bus/index.ts`)
+
+Introduced in the 2026-10-20 upstream sync. `SessionLegacy.event()` is a pass-through today; Alexi does not persist events to disk. The port-maintenance contract is:
+
+- **One upgrade point per shape rename.** When a future Zod schema rename lands, the fix is a single `case` branch in `SessionLegacy.event` — not a scavenger hunt across session loaders. All stored-event decoders MUST route payloads through this helper before calling `schema.parse`.
+- **The pass-through is intentional today.** Do NOT remove the function or inline it at a hypothetical call site — the plumbing is the point.
+- **Add a regression test for every new upgrade.** See [docs/TESTING.md — Testing the SessionLegacy upgrade point](TESTING.md#testing-the-sessionlegacy-upgrade-point-srcbusindexts-2026-10-20-sync) for the pass-through contract test. A new `case` branch must come with a matching "old shape upgrades to new shape" test AND the pass-through contract test for every untouched type.
+
+## Experimental todowrite flag (`experimental.todo`)
+
+Introduced in the 2026-10-20 upstream sync (ports upstream opencode `experimental.todo`). Config accessors `getConfigExperimentalTodo` / `setConfigExperimentalTodo` on `src/config/userConfig.ts`.
+
+### Port-maintenance invariants
+
+- **Default is `true` on Alexi.** The todowrite tool has been stable in this project for several releases, so a missing/corrupt flag resolves to "exposed". Do NOT change the default without a BREAKING-change CHANGELOG entry.
+- **The reader tolerates non-boolean values.** A string, null, number, or array in the stored `experimental.todo` slot MUST fall back to the default. This matches the pattern already used by `getConfigExperimentalContextTools` / `getConfigSharedAgentBoard` — see those accessors as reference implementations.
+- **The setter preserves sibling `experimental.*` keys.** `setConfigExperimentalTodo(false)` must NOT clobber `experimental.contextTools` or any other sibling. The code uses the explicit `const existing = ...; config.experimental = { ...existing, todo: enabled }` idiom; keep it.
+- **The flag is checked at tool-registry construction time, not per-call.** When a new consumer needs to react to a mid-session flag flip, add the gate inside the registry's `list()` filter instead of inside the tool's `execute` so the TUI's rendered schemas stay in sync.
+
+## `TaskTool` public surface rename (`refresh` + `usageDescription`)
+
+Updated in the 2026-10-20 upstream sync (ports upstream kilocode `KiloTask.refresh` + `KiloTask.usageDescription`).
+
+- **`TaskTool.merge` is a `@deprecated` thin alias.** Keep it until downstream callers have migrated; a straight removal breaks consumers that still reach for the previous name. The alias is a one-line forward to `TaskTool.refresh` and costs nothing to maintain.
+- **Rule identity in `refresh` compares on `tools / paths / commands / hosts / actions`, not on `decision / priority`.** Swapping a `deny` for an `allow` on the same scope must replace rather than duplicate. If you add a new scope-defining field to `PermissionRule`, extend `sameRuleIdentity` in the same commit.
+- **`usageDescription` is inlined at the top of the `task` tool's `description`.** The model sees it even without reading `usageDescription` directly; both locations must stay in sync. The upstream kilocode layout keeps the two separate so a parent registry can render `usageDescription` without duplicating the full `description`.
+
 
 ## License
 

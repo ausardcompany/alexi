@@ -26,7 +26,21 @@
  */
 
 import type { PermissionRule } from '../permission/index.js';
+import { PermissionAllowlist } from '../permission/allowlist.js';
 import type { Agent } from './index.js';
+
+/**
+ * Edit-family permissions that an allowlist baseline on the parent session
+ * can describe. If the parent writes `{ tools: ['edit'], paths: ['*'],
+ * decision: 'deny' }` followed by `{ tools: ['edit'], paths: ['src/**'],
+ * decision: 'allow' }`, the catch-all is only a baseline — we must NOT
+ * project it onto spawned subagents as a hard ceiling, otherwise the
+ * subagent loses edit entirely even though the parent can edit `src/**`.
+ *
+ * Ports upstream kilocode `packages/opencode/src/kilocode/tool/task.ts`
+ * fix (companion to `src/permission/allowlist.ts`).
+ */
+const EDIT_PERMISSION_NAMES = ['edit', 'write', 'multiedit', 'apply_patch', 'patch'] as const;
 
 /**
  * Input to {@link deriveSubagentSessionPermission}.
@@ -184,9 +198,29 @@ export function deriveSubagentSessionPermission(
   // (Deliberately drop allow / ask rules so parent approvals are NOT
   // inherited by the subagent — that would let a subagent silently
   // reuse a `write` grant the parent negotiated interactively.)
-  const sessionDeniesAndExternal = input.parentSessionPermission.filter(
-    (rule) => rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'))
-  );
+  //
+  // Additionally, when an edit-family permission's catch-all deny is only
+  // an ALLOWLIST BASELINE on the parent session (i.e. a later rule
+  // narrows it with a path-specific allow), we must NOT propagate the
+  // baseline as a hard ceiling to the subagent — otherwise the subagent
+  // loses edit entirely even though the parent can edit the narrowed
+  // paths. See `src/permission/allowlist.ts` for the semantics and
+  // upstream kilocode commit that introduced this fix.
+  const editAllowlistBaselines = new Set<PermissionRule>();
+  for (const name of EDIT_PERMISSION_NAMES) {
+    if (PermissionAllowlist.exceptions(name, input.parentSessionPermission)) {
+      const baseline = PermissionAllowlist.catchAll(name, input.parentSessionPermission);
+      if (baseline) {
+        editAllowlistBaselines.add(baseline);
+      }
+    }
+  }
+  const sessionDeniesAndExternal = input.parentSessionPermission.filter((rule) => {
+    if (editAllowlistBaselines.has(rule)) {
+      return false;
+    }
+    return rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'));
+  });
 
   // Build default denies for task and todowrite if not permitted
   const defaultDenies: PermissionRule[] = [];

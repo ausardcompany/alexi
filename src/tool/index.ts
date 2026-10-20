@@ -103,9 +103,41 @@ export interface ToolDefinition<TParams extends z.ZodType, TResult> {
     action: PermissionAction;
     // getResource can optionally receive context to resolve relative paths
     getResource: (params: z.infer<TParams>, context?: ToolContext) => string;
+    /**
+     * Optional helper returning extra permission metadata used by the
+     * interactive permission dock. Ports upstream kilocode `browser_open`
+     * (and sibling tools) which expose:
+     *   - `patterns`: specific permission patterns being asked for (e.g.
+     *     `navigate:https://example.com`),
+     *   - `always`: patterns the user can elect to always-allow (persisted
+     *     against the user config so subsequent sessions skip the prompt),
+     *   - `metadata`: structured operation context the dialog can render
+     *     to help the user decide.
+     * Returning `undefined` preserves the previous behaviour (resource-only
+     * ask). This field is purely additive — permission managers that are
+     * not metadata-aware ignore it.
+     */
+    getPermissionMetadata?: (
+      params: z.infer<TParams>,
+      context?: ToolContext
+    ) => PermissionAskMetadata | undefined;
   };
   // Execution function
   execute: (params: z.infer<TParams>, context: ToolContext) => Promise<ToolResult<TResult>>;
+}
+
+/**
+ * Structured metadata attached to a permission ask. The permission UI uses
+ * this to render a richer prompt and to surface an "always allow this
+ * origin / scope" affordance.
+ */
+export interface PermissionAskMetadata {
+  /** The specific permission patterns being requested for this call. */
+  patterns?: string[];
+  /** Patterns the user may elect to always-allow for future calls. */
+  always?: string[];
+  /** Freeform structured context rendered in the permission dialog. */
+  metadata?: Record<string, unknown>;
 }
 
 // Tool instance with utilities
