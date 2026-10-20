@@ -128,6 +128,7 @@ export function deriveSubagentSessionPermission(
   // subagents. Native (built-in) delegators keep the previous behaviour
   // because their edit restrictions are part of the hardening contract
   // (e.g. plan-mode read-only ceiling). Ports kilocode `0c8849c18`.
+  // Integration test: tests/agent/subagent-permissions-integration.test.ts
   const parentIsCustom = input.parentAgent?.native === false;
   const EDIT_TOOL_NAMES = new Set(['write', 'edit', 'multiedit', 'apply_patch', 'patch']);
 
