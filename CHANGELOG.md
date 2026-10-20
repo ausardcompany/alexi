@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Prettier auto-fix pass on `src/agent/subagent-permissions.ts` and `src/bus/index.ts` (`src/agent/subagent-permissions.ts` +1 / -3 lines, `src/bus/index.ts` -1 line, net `2 files changed, 1 insertion(+), 4 deletions(-)`)** (commit `93d477c0 style(ci): auto-fix lint/format issues [alexi-bot]`). Formatter-only cleanup produced by the `ci-auto-fix.yml` workflow after the 2026-10-20 upstream sync. In `src/agent/subagent-permissions.ts` the deny / `external_directory` predicate inside `deriveSubagentSessionPermission` was collapsed from a three-line wrapped-return to a single line now that the expression fits inside Prettier's 100-column ceiling (`return rule.decision === 'deny' || (rule.tools && rule.tools.includes('external_directory'));`). In `src/bus/index.ts` the trailing blank line after the `SessionLegacy` namespace close was removed. No runtime behaviour change, no test change, no public-API change — included in the changelog only to keep the audit trail against commit `93d477c0`.
+
 ### Added
 
 - **`alexi permissions` command group with `list` / `show` / `edit` subcommands (`src/cli/commands/permissions.ts` +428 lines (new), `src/cli/commands/index.ts` +3 lines, `src/permission/index.ts` +33 lines, `tests/cli/commands/permissions.test.ts` +352 lines (new), net `4 files changed, 816 insertions(+)`)** (commit `ed3544cf feat(cli): add interactive permissions list/show/edit commands`, resolves issue #2087). New top-level `alexi permissions` command group that lets operators list, inspect, and modify saved permission rules outside the normal interactive ask flow. The three subcommands mirror the SST OpenCode pattern:
