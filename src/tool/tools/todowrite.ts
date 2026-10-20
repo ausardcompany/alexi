@@ -2,8 +2,10 @@
  * TodoWrite Tool - Manage task lists
  */
 
+import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { defineTool, type ToolResult } from '../index.js';
+import { defineTool, type ToolContext, type ToolResult } from '../index.js';
+import { formatError, logger } from '../../utils/logger.js';
 
 const TodoSchema = z.object({
   content: z.string().describe('Brief description of the task'),
@@ -68,7 +70,28 @@ Incremental update guidance:
 
   parameters: TodoWriteParamsSchema,
 
-  async execute(params, _context): Promise<ToolResult<TodoWriteResult>> {
+  async execute(params, context): Promise<ToolResult<TodoWriteResult>> {
+    // Promote any todos carrying a `schedule` field into the durable
+    // task scheduler. This is best-effort: promotion failures are logged
+    // but do not abort the todowrite call, so the todo list still updates
+    // when the scheduler (or workspace) is unavailable.
+    for (const todo of params.todos) {
+      if (!todo.schedule) {
+        continue;
+      }
+      if (!todo.workspaceId) {
+        // Auto-populate workspaceId from the tool context so agents do
+        // not have to thread it through every call. Falls back to the
+        // literal 'default' workspace when no context identifier exists.
+        todo.workspaceId = resolveWorkspaceId(context);
+      }
+      try {
+        await promoteTodoToScheduledTask(todo);
+      } catch (err) {
+        logger.warn(`todowrite: failed to promote todo "${todo.content}": ${formatError(err)}`);
+      }
+    }
+
     // Update the global todo list
     currentTodos = params.todos;
 
@@ -109,6 +132,61 @@ export function onTodosChange(callback: (todos: Todo[]) => void): () => void {
     const idx = todoListeners.indexOf(callback);
     if (idx >= 0) todoListeners.splice(idx, 1);
   };
+}
+
+/**
+ * Resolve the workspaceId to assign to a scheduled todo. Prefers the
+ * explicit `sessionId` on the tool context (treated here as the
+ * workspace scope for scheduler isolation), then the workdir path, and
+ * finally the literal `'default'` so promotion never fails on a
+ * missing identifier.
+ */
+function resolveWorkspaceId(context: ToolContext | undefined): string {
+  if (context?.sessionId) {
+    return context.sessionId;
+  }
+  if (context?.workdir) {
+    return context.workdir;
+  }
+  return 'default';
+}
+
+/**
+ * Promote a todo with a `schedule` string into a durable `ScheduledTask`
+ * on the process-wide task scheduler. The todo MUST already have both a
+ * `schedule` and a `workspaceId`; callers that do not set `workspaceId`
+ * should rely on {@link resolveWorkspaceId} first.
+ *
+ * The target workspace is registered on-demand so a todo with
+ * `schedule: "in 5 minutes"` from a fresh workspace does not throw with
+ * "not registered". Approval is NOT auto-granted — the task will stay
+ * pending until `requestTaskApproval()` is called for the workspace,
+ * which keeps the scheduler's explicit opt-in contract intact.
+ */
+export async function promoteTodoToScheduledTask(todo: Todo): Promise<void> {
+  if (!todo.schedule) {
+    throw new Error('Todo must have schedule to promote');
+  }
+  if (!todo.workspaceId) {
+    throw new Error('Todo must have workspaceId to promote');
+  }
+
+  // Lazy import so the todowrite tool does not drag the scheduler module
+  // (and its singleton) into every bundle that includes the tool.
+  const { getTaskScheduler } = await import('../../core/task-scheduler.js');
+  const scheduler = getTaskScheduler();
+  scheduler.registerWorkspace(todo.workspaceId);
+
+  scheduler.scheduleTask({
+    id: nanoid(),
+    content: todo.content,
+    status: 'pending',
+    priority: todo.priority,
+    schedule: todo.schedule,
+    workspaceId: todo.workspaceId,
+    nextRun: 0,
+    approved: false,
+  });
 }
 
 export function clearTodos(): void {
