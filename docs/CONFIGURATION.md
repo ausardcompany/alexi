@@ -3141,3 +3141,53 @@ Subagents spawned via the `task` tool inherit parent RESTRICTIONS but not APPROV
 The subagent still fails closed on paths outside the parent's narrowed allow-list — path-specific allow rules from the parent are not forwarded (approvals never propagate across the boundary), so operators who want the subagent to edit the same narrowed paths must pass `allowed_tools` on the `task` call explicitly.
 
 See [docs/ARCHITECTURE.md — Permission Allowlist Baseline Detection](ARCHITECTURE.md#permission-allowlist-baseline-detection-srcpermissionallowlistts) for the API and the subagent-permission derivation integration.
+
+## `ALEXI_DISABLE_FREE_MODELS` filter
+
+Introduced in the 2026-10-21 upstream sync (ports upstream opencode commit `aadd4d8` — `OPENCODE_DISABLE_FREE_MODELS`). Hides "free" or unlicensed models from the catalog surfaces that operators and the router consult.
+
+### Enabling
+
+```bash
+# Any of the following enables the filter (case-insensitive, trimmed).
+ALEXI_DISABLE_FREE_MODELS=1 alexi i
+ALEXI_DISABLE_FREE_MODELS=true alexi i
+ALEXI_DISABLE_FREE_MODELS=' TRUE ' alexi i
+
+# Any other value (0, false, empty, non-string, missing) leaves it OFF.
+```
+
+### Which models are filtered
+
+A catalog entry is considered "free" when EITHER:
+
+- `metadata.free === true` on the catalog entry (as declared in `OrchestrationModelMetadata.free`), OR
+- the model id starts with `free/` (prefix match on the raw id).
+
+### Scope of the filter
+
+| Surface                       | Honours filter |
+|-------------------------------|----------------|
+| `getAvailableModels()`        | yes            |
+| `getLiveModels()` (via static merge path) | yes (filtered through `getAvailableModels()`) |
+| `getCatalogEntries()`         | **no** — returns the full list |
+| `isAvailableModel(id)`        | **no** — permission / allowlist boundary is unchanged |
+| TUI model picker              | yes (via `getAvailableModels()`) |
+| `alexi models` command        | yes (via `getAvailableModels()`) |
+| Router validation             | yes (via `getAvailableModels()`) |
+
+The filter is strictly additive: operators get a smaller picker and a smaller `models` list, but code paths that need to validate against the hard catalog boundary (permission allowlists, provider sanity checks) continue to see every entry.
+
+### Typical SAP AI Core deployment
+
+For a typical enterprise SAP AI Core catalog, the filter is a no-op: SAP deployments are, by definition, not free, so neither the `metadata.free` flag nor the `free/` id prefix matches. The filter exists for parity with the upstream opencode behaviour and for operators who overlay their own catalog with free-tier entries sourced from a secondary provider.
+
+### Programmatic access
+
+```typescript
+import { filterFreeModels } from '../providers/modelCatalog.js';
+
+const picker = filterFreeModels(entries);
+```
+
+Call sites that compose their own catalog slice (custom TUI panel, scripting, agent-manager integrations) can opt in by calling `filterFreeModels` directly. See [docs/PROVIDERS.md — Hiding free models](PROVIDERS.md#hiding-free-models-alexi_disable_free_models) for the provider-layer treatment.

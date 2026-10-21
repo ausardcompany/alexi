@@ -4239,6 +4239,52 @@ Updated in the 2026-10-20 upstream sync (ports upstream kilocode `KiloTask.refre
 - **`usageDescription` is inlined at the top of the `task` tool's `description`.** The model sees it even without reading `usageDescription` directly; both locations must stay in sync. The upstream kilocode layout keeps the two separate so a parent registry can render `usageDescription` without duplicating the full `description`.
 
 
+## `RateLimitError` field normalisation (`retryAfterMs`, `resetAt`, `provider`)
+
+Updated in the 2026-10-21 upstream sync (ports upstream commits `80b8762` and `a9fa57b`). The constructor normalises three new optional fields. Port-maintenance invariants:
+
+- **Seconds wins over ms.** When both `retryAfterSeconds` and `retryAfterMs` are provided, the seconds field wins — it is the canonical HTTP `Retry-After` header shape. The ms-to-seconds flooring path runs only when the seconds field is unset or invalid. Do NOT reorder these branches without a corresponding test change.
+- **Guards reject bad values silently.** NaN `Date`, non-finite / negative numbers, non-string / empty-string provider — all are dropped on construction so a bad adapter cannot pollute downstream logs or telemetry. The guards are intentionally cheap and well-tested; keep them.
+- **Dependency direction.** The error class lives in `src/core/errors.ts` and MUST stay independent of `src/providers/**`. Provider-specific subclasses (`FreeTierRateLimitError`, `ProviderRateLimitError`) match this shape structurally; a new field here needs a corresponding structural pin on those subclasses so `isRateLimitError` detection remains code-identity-free.
+- **Add a regression test.** See [docs/TESTING.md — Testing `RateLimitError.retryAfterMs` / `resetAt` / `provider`](TESTING.md#testing-ratelimiterrorretryafterms--resetat--provider-srccoreerrorsts-2026-10-21-sync) for the five pinning cases.
+
+## Instruction-set diffing (`src/core/instructions.ts`)
+
+Introduced in the 2026-10-21 upstream sync (ports upstream commit `15adc3d`). Port-maintenance invariants:
+
+- **Pure function.** Both inputs are consumed by value and the output arrays are freshly allocated. Do NOT introduce internal state (e.g. a cache of previous snapshots) — call sites own their own `previous` reference so the module stays composable.
+- **Stable ordering.** `added` and `updated` follow insertion order of `current`; `removed` follows insertion order of `previous`. Changing this ordering breaks test fixtures and diff logs; add an ordering regression test alongside any refactor that touches the loop structure.
+- **Duplicate ids tolerated.** The documented behaviour is "later entry wins" per `Map` semantics. Do NOT escalate to a thrown error — upstream callers rely on the tolerant behaviour.
+- **`isEmptyDiff` fast path.** Keep it O(1) — a per-partition `.length === 0` check. Do NOT fold additional validation into it.
+
+## Session title generation (`src/core/session/title.ts`)
+
+Introduced in the 2026-10-21 upstream sync (ports upstream commits `d2812d1` and `5c52626`). Port-maintenance invariants:
+
+- **Decoupled from `src/providers/`.** The module takes a `TitleModel` adapter; it does not import the providers layer. Keep it that way — adding a provider import collapses the test-mockability and the non-SAP reuse argument.
+- **Default call shape is fixed.** `maxTokens: 32` and `temperature: 0.2` are the on-the-wire contract. Changing them is a user-visible cost / stability change; coordinate with a CHANGELOG entry.
+- **`TITLE_PROMPT` is intentionally terse.** The prompt forbids "chat / conversation / session" filler nouns. If you need to add a new rule, add it to the existing bullet list; do not expand the preamble.
+- **`selectTitleVariant` sorts missing cost metadata last.** The `?? Infinity` is intentional — it keeps variants with known cheap costs preferred over untagged ones. Pin it in a test if you reshape the sort.
+- **Deferred-attempt gating lives elsewhere.** `src/kilocode/session/title.ts` owns the "do we even call generate right now?" decision. Keep the WHAT/WHICH decisions in `src/core/session/title.ts` separate from the WHEN decision.
+
+## MCP MIME-type allowlist (`src/mcp/client.ts`)
+
+Updated in the 2026-10-21 upstream sync (ports upstream commit `94bc566`). Port-maintenance invariants:
+
+- **The allowlist is the single source of truth.** `SUPPORTED_IMAGE_MIME` is private; use `isSupportedImageMime` from any new call site rather than inlining the four MIME strings. Keeping the list centralised makes expansion (e.g. adding `image/avif` when the provider supports it) a one-line change.
+- **Filter at the format boundary.** `formatContentPart` is the chokepoint — do NOT add equivalent filtering inside each MCP client call. One bad part in a multi-part response must not poison the whole response.
+- **Resource widening is defensive.** The `resource` shape widened to `{ uri?: string; mimeType?: string; text?: string }`. Access the new fields via `p.resource?.mimeType` / `p.resource?.text` so older MCP clients that still pass `{ uri }` continue to work unchanged.
+- **Placeholder shape is user-facing.** `[omitted unsupported image: <mime>]` and `[omitted unsupported resource: <mime> (<uri>)]` are rendered to the model — a format change ripples into both the model's responses AND test fixtures. If you change them, update the TESTING.md table in the same commit.
+
+## `ALEXI_DISABLE_FREE_MODELS` filter
+
+Introduced in the 2026-10-21 upstream sync (ports upstream opencode commit `aadd4d8`). Port-maintenance invariants:
+
+- **Filter is additive.** `getCatalogEntries()` and `isAvailableModel(id)` MUST NOT apply the filter — permission / allowlist code paths need the hard catalog boundary unchanged. Only user-facing surfaces (`getAvailableModels()`, picker, `alexi models`, router validation) honour the filter.
+- **Case-insensitive, whitespace-trimmed parse.** The accepted values are `1` and `true` (case-insensitive, trimmed). Any other value, including empty string, non-string, missing — leaves the filter OFF. If you add a new "enabled" value (e.g. `yes`), coordinate with a CHANGELOG entry; the parse is small enough that drift between code and docs is easy.
+- **`filterFreeModels` is a type-parameter helper.** It operates on any `{ id: string; metadata?: { free?: boolean } }` shape so TUI / scripting consumers can call it on their own catalog slice. Keep the signature wide; do NOT narrow it to `CatalogEntry` only.
+- **Env-var reads happen on each call.** Tests can flip the flag mid-run without reloading the module. Reading `process.env.ALEXI_DISABLE_FREE_MODELS` inside `isFreeModelsDisabled()` is intentional; do NOT cache it at module-load time.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).

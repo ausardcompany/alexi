@@ -9595,3 +9595,147 @@ sequenceDiagram
   Note over Prov,Store: editHistory is append-only, editedAt mirrors<br/>editHistory[editHistory.length - 1].timestamp
 ```
 
+## Instruction-Set Diffing (`src/core/instructions.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d` — send only changed entries in instruction updates). The module exposes a pure `diffInstructions(previous, current): InstructionDiff` function so call sites that previously re-emitted the whole system/instruction block (MCP tool-list updates, skill registry refreshes, reference-doc attachments) can forward only the delta.
+
+### Why it matters on SAP AI Core
+
+Every turn's instruction update is billed as input tokens AND is throttled against the deployment's token-per-minute quota. Resending the entire instruction set on each message:
+
+- Wastes input tokens on identical MCP tool descriptions, skill registry entries, and reference docs.
+- Pollutes the model's attention budget with content it has already seen.
+- Causes spurious re-injection of the same block on the model side, which some providers surface as "cache miss" charges.
+
+Diffing the previous and current snapshots and forwarding only the `added` / `updated` / `removed` partitions keeps the per-turn update tight.
+
+### Shape
+
+```typescript
+export interface InstructionEntry {
+  id: string;       // stable across turns; a UUID per turn defeats the module
+  content: string;  // the body the model should see for this id
+}
+
+export interface InstructionDiff {
+  added: InstructionEntry[];   // in current, not in previous
+  removed: string[];           // in previous, not in current (ids only)
+  updated: InstructionEntry[]; // in both, content changed
+}
+
+export function diffInstructions(
+  previous: readonly InstructionEntry[],
+  current: readonly InstructionEntry[]
+): InstructionDiff;
+
+export function isEmptyDiff(diff: InstructionDiff): boolean;
+```
+
+### Design notes
+
+- **Pure function.** Both inputs are consumed by value and the output arrays are freshly allocated. `diffInstructions` is a drop-in building block that call sites can combine with their own cache without needing to reason about shared state.
+- **Stable ordering.** `added` and `updated` follow insertion order of `current`; `removed` follows insertion order of `previous`. The ordering is stable across runs, which makes test fixtures and diff logs easy to reason about.
+- **Duplicate ids tolerated.** A duplicate `id` in either input is NOT treated as an error — the later entry wins in the lookup map, mirroring `new Map([[a,1],[a,2]]).get(a) === 2`. Callers that need strict-mode behaviour should deduplicate upstream.
+- **`isEmptyDiff` fast path.** When the previous and current snapshots are identical, the caller can skip the "send instruction update" step entirely rather than send three empty arrays over the wire.
+- **No stored state.** The module does not maintain its own `previous` cache — each caller owns the snapshot it diffs against. This keeps the module composable (one instance per call site, independent lifecycles) and avoids global mutable state in `src/core/`.
+
+### Diff decision flow
+
+```mermaid
+flowchart TD
+  A[call site: new instruction set assembled] --> B{isEmptyDiff of<br/>diffInstructions prev, curr?}
+  B -->|yes| C[skip provider round-trip<br/>no tokens spent]
+  B -->|no| D[forward added updated removed to provider]
+  D --> E[update cached snapshot = curr]
+  C --> E
+```
+
+## Session Title Generation (`src/core/session/title.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` — tighten session title prompt — and `5c52626` — generate titles at the lowest model variant). The module owns the two decisions that drive per-session title cost on SAP AI Core: WHAT prompt to send to the title model, and WHICH model variant to pick.
+
+### Why decouple it from `src/providers/`
+
+The title generator is deliberately independent of the providers layer. The caller passes a `TitleModel` adapter that knows how to invoke the target provider. This lets:
+
+- Unit tests mock the generator with a stub model and no provider imports.
+- Non-SAP providers (future proxy adapters, local LLMs) reuse the same prompt and variant-selection logic.
+- Deferred-attempt gating (debouncing title generation across many quick turns) live separately in `src/kilocode/session/title.ts` without crowding the WHAT/WHICH decisions.
+
+### Shape
+
+```typescript
+export const TITLE_PROMPT: string; // 3–7 word titles, no markdown, no filler nouns
+
+export interface TitleModelVariant {
+  id: string;
+  cost?: { input?: number }; // per-million-token input cost; cheapest wins
+}
+
+export interface TitleModel {
+  id: string;
+  variants?: readonly TitleModelVariant[];
+  generate: (opts: TitleGenerateOptions) => Promise<string>;
+}
+
+export interface TitleGenerateOptions {
+  system: string;
+  prompt: string;
+  maxTokens: number;   // 32 by default
+  temperature: number; // 0.2 by default
+}
+
+export function selectTitleVariant(model: TitleModel): TitleModel | TitleModelVariant;
+export function extractFirstUserText(messages: readonly TitleMessage[]): string;
+export function generateTitle(
+  messages: readonly TitleMessage[],
+  model: TitleModel
+): Promise<string>;
+```
+
+### Design notes
+
+- **Tightened `TITLE_PROMPT`.** The prompt is intentionally terse: titles are 3–7 words, no quotes, no trailing punctuation, no markdown. Filler nouns like "chat", "conversation", and "session" are explicitly forbidden. The reduced system prompt also reduces per-call input tokens.
+- **Cheapest variant wins.** `selectTitleVariant` sorts variants by `cost.input` ascending and returns the first entry. Variants with missing cost metadata sort last (`Infinity`), so a well-known cheap variant is always preferred over an untagged one. When no variants are declared the function returns the model itself — the caller is already on the smallest known shape.
+- **First-user-message only.** `extractFirstUserText` ensures the title model sees only the user's actual request, not the whole transcript. The whole transcript blows the input budget on long sessions AND skews the title toward later tangents.
+- **Max 32 tokens, temperature 0.2.** `generateTitle` passes these to every provider so the title is bounded in length and deterministic enough to re-use between retries.
+- **Variants delegate to the parent model.** `TitleModelVariant` does not carry its own `generate` function; `generateTitle` falls back to the parent model when the selected variant lacks a generator, so the only thing variant selection changes is the `id` quoted to the provider.
+
+## MCP MIME-Type Allowlist (`src/mcp/client.ts`)
+
+Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566` — keep unsupported MCP media out of tool attachments). SAP AI Core (and the orchestration service in particular) rejects arbitrary media types with a 400/422 before the request even reaches the model, so unsupported media in MCP tool outputs must be filtered at `formatContentPart` time instead of letting the provider explode mid-stream.
+
+### Allowlist
+
+```typescript
+const SUPPORTED_IMAGE_MIME = new Set<string>([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+export function isSupportedImageMime(mimeType: string | undefined): boolean;
+```
+
+The predicate is exported so other MCP code paths that compose multi-part tool results can gate on the same list — the allowlist exists once, not duplicated per call site.
+
+### `formatContentPart` behaviour
+
+| Part type | MIME | Rendered as |
+|-----------|------|-------------|
+| `text`    | n/a  | `part.text` verbatim |
+| `image`   | in allowlist | `[image: <mime>, <bytes> bytes omitted]` |
+| `image`   | NOT in allowlist | `[omitted unsupported image: <mime>]` |
+| `resource` | `text/*` with `resource.text` body | the text body verbatim |
+| `resource` | non-text, NOT in image allowlist | `[omitted unsupported resource: <mime> (<uri>)]` |
+| `resource` | otherwise | `[resource: <uri>]` |
+| anything else | n/a | `JSON.stringify(part)` |
+
+### Design notes
+
+- **Filter at the boundary.** The filter runs when MCP tool output is formatted for the model, not inside each MCP client call, so one bad resource in a multi-part response does not poison the whole response.
+- **Inline text resources.** `text/*` resources with a non-empty `resource.text` body are inlined verbatim rather than rendered as opaque `[resource: <uri>]` placeholders. The content is already available in the tool response, so round-tripping through the URI buys nothing.
+- **Widened resource shape.** The internal `resource` shape widens from `{ uri?: string }` to `{ uri?: string; mimeType?: string; text?: string }` to accept the richer upstream MCP shape without breaking older callers.
+- **No silent drop.** Unsupported media still render a placeholder with the MIME and (where available) the URI so the model can describe what was filtered out — the placeholder keeps the response coherent for the user even though the raw bytes are gone.
+

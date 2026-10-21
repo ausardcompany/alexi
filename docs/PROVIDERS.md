@@ -4602,6 +4602,90 @@ Updated in the 2026-10-18 upstream sync (commit `49c6ee06`, ports upstream openc
 - Forward-compatible with any future field that the Responses API may start sending as explicit `null`. The top-level `isTypedStreamEvent`-shaped guard, the `typeof === 'string'` delta coercion, and the nullish-coalescing on nested property access combine to make `null` structurally equivalent to "absent" at every known access point.
 - Mirrors the broader stream-event tolerance pattern established by `src/providers/protocols/stream-events.ts`: decoders prefer `ignored` over `throw` so a forward-rolled upstream server stays usable.
 
+## Rate-limit metadata (`retryAfterMs`, `resetAt`, `provider`)
+
+Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `80b8762` and `a9fa57b`). The canonical `RateLimitError` surface in `src/core/errors.ts` carries three new optional fields that provider adapters can populate without lossy conversion.
+
+### Field contract
+
+| Field                 | Type   | Normalised into                                | Notes                                                                 |
+|-----------------------|--------|------------------------------------------------|-----------------------------------------------------------------------|
+| `retryAfterSeconds`   | number | `retryAfterSeconds` (canonical)                | Preferred shape. Honours the HTTP `Retry-After` header spec.          |
+| `retryAfterMs`        | number | `retryAfterSeconds = Math.floor(ms / 1000)`    | Convenience for proxy adapters that already have the wait in ms.      |
+| `resetAt`             | Date   | `resetAt` (direct, if non-`NaN`)               | Absolute wall-clock reset. `getRetryAfterMs` honours this over backoff. |
+| `provider`            | string | `provider` (direct, non-empty)                 | Provider identifier for diagnostics / telemetry (e.g. `sap-ai-core`).  |
+
+When both `retryAfterSeconds` and `retryAfterMs` are provided, the seconds field wins (it is the canonical HTTP header shape). Invalid values (NaN `Date`, non-numeric or negative waits, empty-string provider) are silently dropped so a bad adapter cannot pollute downstream telemetry.
+
+### SAP AI Core adapter example
+
+```typescript
+import { RateLimitError } from '../core/errors.js';
+
+// SAP AI Core returns `Retry-After` as integer seconds.
+throw new RateLimitError('rate limit exceeded for anthropic--claude-4-sonnet', {
+  modelName: 'anthropic--claude-4-sonnet',
+  retryAfterSeconds: Number(response.headers['retry-after']),
+  provider: 'sap-ai-core',
+  cause: response,
+});
+```
+
+### Proxy adapter example (ms-granularity wait)
+
+```typescript
+import { RateLimitError } from '../core/errors.js';
+
+// Upstream proxy forwards a parsed retry window as `retry_after_ms`.
+throw new RateLimitError('rate limit exceeded', {
+  modelName: upstream.model,
+  retryAfterMs: upstream.retry_after_ms,
+  resetAt: upstream.reset_at ? new Date(upstream.reset_at) : undefined,
+  provider: 'sap-proxy-adapter',
+  cause: upstream,
+});
+```
+
+Downstream, `retryWithRateLimit` and `computeRateLimitDelay` continue to prefer the server-provided window (whether sourced from `retryAfterSeconds`, `retryAfterMs`, or `resetAt`) over the default exponential schedule, capped at `maxDelayMs`. See [docs/API.md — RateLimitErrorOptions](API.md#ratelimiterroroptions) for the TypeScript surface.
+
+## Hiding free models (`ALEXI_DISABLE_FREE_MODELS`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream opencode commit `aadd4d8` — `OPENCODE_DISABLE_FREE_MODELS`). Operators can hide "free" or unlicensed models from the catalog by setting an environment variable at CLI launch.
+
+### Enabling
+
+```bash
+# Case-insensitive, whitespace-trimmed. Both work:
+ALEXI_DISABLE_FREE_MODELS=1 alexi i
+ALEXI_DISABLE_FREE_MODELS=true alexi i
+```
+
+Any other value (missing, `0`, `false`, empty string, non-string) leaves the filter OFF.
+
+### Filtered attributes
+
+A catalog entry is considered "free" when EITHER of the following is true:
+
+- `metadata.free === true` on the catalog entry (`OrchestrationModelMetadata.free`).
+- The model id starts with `free/` (prefix match).
+
+### Scope
+
+- `getAvailableModels()` honours the filter (so the model picker, router validation, and the `models` CLI command all respect the operator preference).
+- `getCatalogEntries()` and `isAvailableModel(id)` do NOT apply the filter — permission / allowlist code paths that need to validate against the hard catalog boundary are not affected.
+- For a typical SAP AI Core enterprise catalog, the filter is a no-op: SAP deployments are, by definition, not free, so neither criterion matches.
+
+### Programmatic surface
+
+```typescript
+// src/providers/modelCatalog.ts
+export function filterFreeModels<T extends { id: string; metadata?: { free?: boolean } }>(
+  models: readonly T[]
+): readonly T[];
+```
+
+Call sites that want to apply the filter to their own slice of the catalog (e.g. a custom TUI picker) can call `filterFreeModels` directly. See [docs/CONFIGURATION.md — `ALEXI_DISABLE_FREE_MODELS` filter](CONFIGURATION.md#alexi_disable_free_models-filter) for operator guidance.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

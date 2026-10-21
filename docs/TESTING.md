@@ -12786,3 +12786,299 @@ describe('SessionLegacy.event', () => {
 ```
 
 When a future shape rename adds a `case` branch, the matching test must assert on both the renamed shape AND the pass-through for every other type — the "ignores the type argument" test above becomes "ignores every type except the newly handled one".
+
+## Testing `diffInstructions` (`src/core/instructions.ts`, 2026-10-21 sync)
+
+`diffInstructions` is a pure function with three partitions; pin each partition independently plus the `isEmptyDiff` fast path.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { diffInstructions, isEmptyDiff } from '../../src/core/instructions.js';
+
+describe('diffInstructions', () => {
+  it('returns an empty diff for identical snapshots', () => {
+    const snap = [{ id: 'a', content: '1' }];
+    const diff = diffInstructions(snap, snap);
+    expect(diff.added).toHaveLength(0);
+    expect(diff.updated).toHaveLength(0);
+    expect(diff.removed).toHaveLength(0);
+    expect(isEmptyDiff(diff)).toBe(true);
+  });
+
+  it('detects added, removed, and updated entries', () => {
+    const previous = [
+      { id: 'a', content: '1' },
+      { id: 'b', content: '2' },
+    ];
+    const current = [
+      { id: 'b', content: '2-updated' },
+      { id: 'c', content: '3' },
+    ];
+    const diff = diffInstructions(previous, current);
+    expect(diff.added).toEqual([{ id: 'c', content: '3' }]);
+    expect(diff.updated).toEqual([{ id: 'b', content: '2-updated' }]);
+    expect(diff.removed).toEqual(['a']);
+  });
+
+  it('tolerates duplicate ids (later entry wins)', () => {
+    const previous = [{ id: 'a', content: 'x' }];
+    const current = [
+      { id: 'a', content: 'first' },
+      { id: 'a', content: 'second' },
+    ];
+    const diff = diffInstructions(previous, current);
+    // 'second' wins per map semantics; the entry is treated as an update.
+    expect(diff.updated).toEqual([{ id: 'a', content: 'second' }]);
+    expect(diff.added).toHaveLength(0);
+    expect(diff.removed).toHaveLength(0);
+  });
+
+  it('preserves insertion order', () => {
+    const current = [
+      { id: 'z', content: '26' },
+      { id: 'a', content: '1' },
+    ];
+    const diff = diffInstructions([], current);
+    expect(diff.added.map((e) => e.id)).toEqual(['z', 'a']);
+  });
+});
+```
+
+Pin at minimum: (1) identical-snapshot empty-diff fast path, (2) three-partition split (added / updated / removed), (3) duplicate-id tolerance, (4) stable insertion order. The function is pure — tests do not need to tear down any state.
+
+## Testing `generateTitle` and `selectTitleVariant` (`src/core/session/title.ts`, 2026-10-21 sync)
+
+The title generator is deliberately decoupled from the providers layer — tests should pass a stub `TitleModel` with a `generate` that records its call args, so the test fixture is a single object literal.
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import {
+  TITLE_PROMPT,
+  extractFirstUserText,
+  generateTitle,
+  selectTitleVariant,
+} from '../../src/core/session/title.js';
+
+describe('selectTitleVariant', () => {
+  it('returns the cheapest variant when cost metadata is present', () => {
+    const chosen = selectTitleVariant({
+      id: 'parent',
+      generate: async () => '',
+      variants: [
+        { id: 'expensive', cost: { input: 10 } },
+        { id: 'cheap', cost: { input: 1 } },
+        { id: 'medium', cost: { input: 3 } },
+      ],
+    });
+    expect(chosen.id).toBe('cheap');
+  });
+
+  it('returns the model itself when no variants are declared', () => {
+    const model = { id: 'solo', generate: async () => '' };
+    expect(selectTitleVariant(model)).toBe(model);
+  });
+});
+
+describe('extractFirstUserText', () => {
+  it('returns the first non-empty user message', () => {
+    expect(
+      extractFirstUserText([
+        { role: 'system', content: 'you are helpful' },
+        { role: 'user', content: '' },
+        { role: 'user', content: 'actual request' },
+        { role: 'assistant', content: 'ignored' },
+      ])
+    ).toBe('actual request');
+  });
+
+  it('returns an empty string when no user message is present', () => {
+    expect(extractFirstUserText([{ role: 'system', content: 'x' }])).toBe('');
+  });
+});
+
+describe('generateTitle', () => {
+  it('calls the model with TITLE_PROMPT, maxTokens 32, temperature 0.2', async () => {
+    const generate = vi.fn(async () => 'Fix TypeScript Errors');
+    const title = await generateTitle(
+      [{ role: 'user', content: 'please fix all the type errors in src/' }],
+      { id: 'parent', generate }
+    );
+    expect(title).toBe('Fix TypeScript Errors');
+    expect(generate).toHaveBeenCalledWith({
+      system: TITLE_PROMPT,
+      prompt: 'please fix all the type errors in src/',
+      maxTokens: 32,
+      temperature: 0.2,
+    });
+  });
+});
+```
+
+Pin at minimum: (1) cheapest-variant selection, (2) no-variant fallback to the parent model, (3) first-user-message extraction, (4) end-to-end call args to `generate` including the exact `TITLE_PROMPT` string, `maxTokens: 32`, and `temperature: 0.2`.
+
+## Testing `isSupportedImageMime` and `formatContentPart` (`src/mcp/client.ts`, 2026-10-21 sync)
+
+The MCP MIME filter is a two-level contract: the predicate decides what is accepted, and `formatContentPart` must honour the predicate for both `image` and `resource` parts. Tests should pin both levels.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { isSupportedImageMime, formatContentPart } from '../../src/mcp/client.js';
+
+describe('isSupportedImageMime', () => {
+  it.each(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])(
+    'accepts %s',
+    (mime) => {
+      expect(isSupportedImageMime(mime)).toBe(true);
+    }
+  );
+
+  it.each(['image/bmp', 'image/tiff', 'image/svg+xml', 'application/pdf', '', undefined])(
+    'rejects %s',
+    (mime) => {
+      expect(isSupportedImageMime(mime as string | undefined)).toBe(false);
+    }
+  );
+});
+
+describe('formatContentPart', () => {
+  it('passes text verbatim', () => {
+    expect(formatContentPart({ type: 'text', text: 'hello' })).toBe('hello');
+  });
+
+  it('renders supported images with the byte estimate', () => {
+    const data = Buffer.alloc(300).toString('base64'); // 400 b64 chars -> 300 bytes
+    expect(formatContentPart({ type: 'image', mimeType: 'image/png', data })).toContain(
+      '[image: image/png,'
+    );
+  });
+
+  it('omits unsupported images with a placeholder', () => {
+    expect(
+      formatContentPart({ type: 'image', mimeType: 'image/bmp', data: 'xxx' })
+    ).toBe('[omitted unsupported image: image/bmp]');
+  });
+
+  it('inlines text/* resources when a body is provided', () => {
+    expect(
+      formatContentPart({
+        type: 'resource',
+        resource: { uri: 'file:///a.md', mimeType: 'text/markdown', text: '# hi' },
+      })
+    ).toBe('# hi');
+  });
+
+  it('omits unsupported non-text resources with the mime + uri', () => {
+    expect(
+      formatContentPart({
+        type: 'resource',
+        resource: { uri: 'file:///a.pdf', mimeType: 'application/pdf' },
+      })
+    ).toBe('[omitted unsupported resource: application/pdf (file:///a.pdf)]');
+  });
+
+  it('falls back to [resource: <uri>] when no mimeType is present', () => {
+    expect(
+      formatContentPart({ type: 'resource', resource: { uri: 'file:///a.bin' } })
+    ).toBe('[resource: file:///a.bin]');
+  });
+});
+```
+
+Pin at minimum: (1) the full allowlist (png / jpeg / gif / webp accepted, everything else rejected), (2) `undefined` MIME rejected, (3) all six `formatContentPart` branches from the table in [docs/API.md — MCP Content-Part Format API](API.md#mcp-content-part-format-api-srcmcpclientts).
+
+## Testing `RateLimitError.retryAfterMs` / `resetAt` / `provider` (`src/core/errors.ts`, 2026-10-21 sync)
+
+Normalisation rules are enforced in the constructor; test each guard independently.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { RateLimitError } from '../../src/core/errors.js';
+
+describe('RateLimitError field normalisation', () => {
+  it('prefers retryAfterSeconds when both seconds and ms are provided', () => {
+    const err = new RateLimitError('rl', { retryAfterSeconds: 10, retryAfterMs: 999 });
+    expect(err.retryAfterSeconds).toBe(10);
+  });
+
+  it('converts retryAfterMs into retryAfterSeconds when seconds is unset', () => {
+    const err = new RateLimitError('rl', { retryAfterMs: 2500 });
+    expect(err.retryAfterSeconds).toBe(2); // floored
+  });
+
+  it('ignores negative or non-finite retryAfterMs', () => {
+    expect(new RateLimitError('rl', { retryAfterMs: -1 }).retryAfterSeconds).toBeUndefined();
+    expect(
+      new RateLimitError('rl', { retryAfterMs: Number.NaN }).retryAfterSeconds
+    ).toBeUndefined();
+  });
+
+  it('accepts a non-NaN Date for resetAt', () => {
+    const d = new Date(Date.now() + 60_000);
+    expect(new RateLimitError('rl', { resetAt: d }).resetAt).toBe(d);
+    expect(
+      new RateLimitError('rl', { resetAt: new Date('invalid') }).resetAt
+    ).toBeUndefined();
+  });
+
+  it('accepts a non-empty provider string', () => {
+    expect(new RateLimitError('rl', { provider: 'sap-ai-core' }).provider).toBe('sap-ai-core');
+    expect(new RateLimitError('rl', { provider: '' }).provider).toBeUndefined();
+  });
+});
+```
+
+Pin at minimum: (1) seconds-wins-over-ms precedence, (2) ms-to-seconds flooring, (3) invalid ms silently dropped, (4) non-`NaN` Date for `resetAt`, (5) non-empty string for `provider`.
+
+## Testing `filterFreeModels` and `ALEXI_DISABLE_FREE_MODELS` (`src/providers/modelCatalog.ts`, 2026-10-21 sync)
+
+The filter is driven by a process-level environment variable; tests must stash and restore `process.env.ALEXI_DISABLE_FREE_MODELS` to stay parallel-safe under Vitest workers.
+
+```typescript
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { filterFreeModels } from '../../src/providers/modelCatalog.js';
+
+describe('filterFreeModels', () => {
+  const original = process.env.ALEXI_DISABLE_FREE_MODELS;
+  beforeEach(() => {
+    delete process.env.ALEXI_DISABLE_FREE_MODELS;
+  });
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.ALEXI_DISABLE_FREE_MODELS;
+    } else {
+      process.env.ALEXI_DISABLE_FREE_MODELS = original;
+    }
+  });
+
+  const models = [
+    { id: 'anthropic--claude-4-sonnet', metadata: { free: false } },
+    { id: 'free/foo', metadata: { free: false } },
+    { id: 'bar', metadata: { free: true } },
+    { id: 'baz' },
+  ];
+
+  it('is a no-op when the env var is unset', () => {
+    expect(filterFreeModels(models)).toHaveLength(4);
+  });
+
+  it('strips free-prefixed ids AND metadata.free=true when enabled', () => {
+    process.env.ALEXI_DISABLE_FREE_MODELS = '1';
+    const kept = filterFreeModels(models).map((m) => m.id);
+    expect(kept).toEqual(['anthropic--claude-4-sonnet', 'baz']);
+  });
+
+  it('is case-insensitive and whitespace-tolerant', () => {
+    process.env.ALEXI_DISABLE_FREE_MODELS = ' TRUE ';
+    expect(filterFreeModels(models)).toHaveLength(2);
+  });
+
+  it('leaves the filter off for 0 / false / empty', () => {
+    for (const value of ['0', 'false', '', 'off']) {
+      process.env.ALEXI_DISABLE_FREE_MODELS = value;
+      expect(filterFreeModels(models)).toHaveLength(4);
+    }
+  });
+});
+```
+
+Pin at minimum: (1) default no-op, (2) `1` / `true` enables the filter and strips BOTH `free/` prefix AND `metadata.free === true`, (3) case-insensitive whitespace-tolerant parse, (4) non-truthy values leave the filter off. Always stash and restore the env var so parallel workers do not race.
