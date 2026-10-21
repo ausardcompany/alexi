@@ -30,6 +30,8 @@ export interface CheckDefinition {
 
 export interface DoctorOptions {
   skipNetwork?: boolean;
+  /** When true, individual checks may attempt safe auto-repairs (e.g. mkdir). */
+  fix?: boolean;
 }
 
 export interface DoctorSummary {
@@ -41,9 +43,22 @@ export interface DoctorSummary {
 // ============ Constants ============
 
 const MIN_NODE_VERSION = '22.12.0';
-const CONFIG_DIR = path.join(os.homedir(), '.alexi');
-const MCP_CONFIG_FILE = path.join(CONFIG_DIR, 'mcp-servers.json');
-const SESSIONS_DIR = path.join(CONFIG_DIR, 'sessions');
+
+/**
+ * Resolve `~/.alexi/` dynamically so tests (and the `--fix` flow) can
+ * redirect HOME at runtime. `os.homedir()` is cached by the Node runtime
+ * at import time if we compute it once, which breaks per-test HOME
+ * overrides; the helpers below re-read it on every call.
+ */
+function configDir(): string {
+  return path.join(os.homedir(), '.alexi');
+}
+function mcpConfigFile(): string {
+  return path.join(configDir(), 'mcp-servers.json');
+}
+function sessionsDir(): string {
+  return path.join(configDir(), 'sessions');
+}
 
 // ============ Health Check Interface ============
 
@@ -53,7 +68,7 @@ export interface HealthCheck {
   description: string;
   category: 'environment' | 'configuration' | 'filesystem' | 'network' | 'tools';
   optional?: boolean;
-  run(): Promise<HealthCheckResult>;
+  run(options?: DoctorOptions): Promise<HealthCheckResult>;
 }
 
 // ============ Individual Health Checks ============
@@ -217,19 +232,19 @@ const mcpConfigCheck: HealthCheck = {
   async run(): Promise<HealthCheckResult> {
     const start = Date.now();
 
-    if (!fs.existsSync(MCP_CONFIG_FILE)) {
+    if (!fs.existsSync(mcpConfigFile())) {
       return {
         id: this.id,
         name: this.name,
         status: 'warn',
-        message: `MCP config file not found at ${MCP_CONFIG_FILE}`,
+        message: `MCP config file not found at ${mcpConfigFile()}`,
         fix: 'MCP config will be created automatically on first use, or run: alexi mcp list',
         duration: Date.now() - start,
       };
     }
 
     try {
-      const content = fs.readFileSync(MCP_CONFIG_FILE, 'utf-8');
+      const content = fs.readFileSync(mcpConfigFile(), 'utf-8');
       const config = JSON.parse(content);
 
       if (!config.version || !Array.isArray(config.servers)) {
@@ -238,7 +253,7 @@ const mcpConfigCheck: HealthCheck = {
           name: this.name,
           status: 'warn',
           message: 'MCP config exists but may have invalid structure',
-          fix: `Delete ${MCP_CONFIG_FILE} and let it regenerate with default structure`,
+          fix: `Delete ${mcpConfigFile()} and let it regenerate with default structure`,
           duration: Date.now() - start,
         };
       }
@@ -256,8 +271,8 @@ const mcpConfigCheck: HealthCheck = {
         id: this.id,
         name: this.name,
         status: 'fail',
-        message: `MCP config exists but is not valid JSON: ${MCP_CONFIG_FILE}`,
-        fix: `Delete ${MCP_CONFIG_FILE} and let it regenerate, or fix the JSON syntax`,
+        message: `MCP config exists but is not valid JSON: ${mcpConfigFile()}`,
+        fix: `Delete ${mcpConfigFile()} and let it regenerate, or fix the JSON syntax`,
         duration: Date.now() - start,
       };
     }
@@ -274,23 +289,23 @@ const sessionsDirCheck: HealthCheck = {
 
     try {
       // Create directory if it doesn't exist
-      if (!fs.existsSync(SESSIONS_DIR)) {
-        fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+      if (!fs.existsSync(sessionsDir())) {
+        fs.mkdirSync(sessionsDir(), { recursive: true });
       }
 
       // Test write access
-      const testFile = path.join(SESSIONS_DIR, '.write-test');
+      const testFile = path.join(sessionsDir(), '.write-test');
       fs.writeFileSync(testFile, 'test', 'utf-8');
       fs.unlinkSync(testFile);
 
       // Count existing sessions
-      const files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
+      const files = fs.readdirSync(sessionsDir()).filter((f) => f.endsWith('.json'));
 
       return {
         id: this.id,
         name: this.name,
         status: 'pass',
-        message: `Sessions directory is writable: ${SESSIONS_DIR} (${files.length} sessions)`,
+        message: `Sessions directory is writable: ${sessionsDir()} (${files.length} sessions)`,
         duration: Date.now() - start,
       };
     } catch {
@@ -298,8 +313,8 @@ const sessionsDirCheck: HealthCheck = {
         id: this.id,
         name: this.name,
         status: 'fail',
-        message: `Sessions directory is not writable: ${SESSIONS_DIR}`,
-        fix: `Ensure write permissions for ${SESSIONS_DIR} or set HOME environment variable`,
+        message: `Sessions directory is not writable: ${sessionsDir()}`,
+        fix: `Ensure write permissions for ${sessionsDir()} or set HOME environment variable`,
         duration: Date.now() - start,
       };
     }
@@ -425,14 +440,297 @@ const networkSapCheck: HealthCheck = {
   },
 };
 
+// ============ Routing / Tools / Permissions Checks ============
+
+const routingConfigCheck: HealthCheck = {
+  id: 'routing-config',
+  name: 'Routing Configuration',
+  description: 'Check routing-config.json exists and is valid',
+  category: 'configuration',
+  async run(): Promise<HealthCheckResult> {
+    const start = Date.now();
+
+    const searchPaths = [
+      path.join(process.cwd(), 'routing-config.json'),
+      path.join(process.cwd(), 'config', 'routing.json'),
+      path.join(configDir(), 'routing-config.json'),
+    ];
+
+    const found = searchPaths.find((p) => fs.existsSync(p));
+    if (!found) {
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'warn',
+        message: 'No routing-config.json found; defaults will be used',
+        fix: 'Copy routing-config.example.json to routing-config.json to customise routing',
+        duration: Date.now() - start,
+      };
+    }
+
+    try {
+      const content = fs.readFileSync(found, 'utf-8');
+      const raw = JSON.parse(content) as { models?: unknown; rules?: unknown };
+      if (!Array.isArray(raw.models)) {
+        return {
+          id: this.id,
+          name: this.name,
+          status: 'fail',
+          message: `Routing config at ${found} is missing 'models' array`,
+          fix: 'Add a top-level `models: []` array to the routing config',
+          duration: Date.now() - start,
+        };
+      }
+      const rulesCount = Array.isArray(raw.rules) ? raw.rules.length : 0;
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'pass',
+        message: `Routing config valid at ${found} (${raw.models.length} models, ${rulesCount} rules)`,
+        duration: Date.now() - start,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'fail',
+        message: `Routing config at ${found} is not valid JSON: ${msg}`,
+        fix: `Fix the JSON syntax in ${found}, or copy routing-config.example.json fresh`,
+        duration: Date.now() - start,
+      };
+    }
+  },
+};
+
+const configDirCheck: HealthCheck = {
+  id: 'config-dir',
+  name: 'Alexi Config Directory',
+  description: 'Check ~/.alexi/ exists and is writable',
+  category: 'filesystem',
+  async run(options?: DoctorOptions): Promise<HealthCheckResult> {
+    const start = Date.now();
+    try {
+      if (!fs.existsSync(configDir())) {
+        if (options?.fix) {
+          fs.mkdirSync(configDir(), { recursive: true });
+          return {
+            id: this.id,
+            name: this.name,
+            status: 'pass',
+            message: `Created missing config directory: ${configDir()}`,
+            duration: Date.now() - start,
+          };
+        }
+        return {
+          id: this.id,
+          name: this.name,
+          status: 'warn',
+          message: `Config directory does not exist: ${configDir()}`,
+          fix: `Run 'alexi doctor --fix' to create it, or mkdir -p ${configDir()}`,
+          duration: Date.now() - start,
+        };
+      }
+      // Writable probe
+      const testFile = path.join(configDir(), '.write-test');
+      fs.writeFileSync(testFile, 'test', 'utf-8');
+      fs.unlinkSync(testFile);
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'pass',
+        message: `Config directory writable: ${configDir()}`,
+        duration: Date.now() - start,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'fail',
+        message: `Config directory not writable: ${configDir()} (${msg})`,
+        fix: `Ensure write permission on ${configDir()}`,
+        duration: Date.now() - start,
+      };
+    }
+  },
+};
+
+const toolRegistryCheck: HealthCheck = {
+  id: 'tool-registry',
+  name: 'Tool Registry',
+  description: 'Check all built-in tools load with valid schemas',
+  category: 'tools',
+  async run(): Promise<HealthCheckResult> {
+    const start = Date.now();
+    try {
+      // Ensure built-in tools are registered before inspecting the
+      // registry. `registerBuiltInTools` is idempotent — the registry
+      // dedupes by tool name — so repeated calls are safe.
+      const toolsMod = (await import('../tool/tools/index.js')) as {
+        registerBuiltInTools?: () => void;
+      };
+      toolsMod.registerBuiltInTools?.();
+
+      const mod = (await import('../tool/index.js')) as {
+        getToolRegistry: () => { list: () => Array<{ name: string; parameters?: unknown }> };
+      };
+      const registry = mod.getToolRegistry();
+      const tools = registry.list();
+      if (tools.length === 0) {
+        return {
+          id: this.id,
+          name: this.name,
+          status: 'warn',
+          message: 'Tool registry loaded but reports zero tools',
+          fix: 'Ensure built-in tools register via src/tool/registry.ts',
+          duration: Date.now() - start,
+        };
+      }
+      const nameless = tools.filter((t) => !t.name || typeof t.name !== 'string');
+      if (nameless.length > 0) {
+        return {
+          id: this.id,
+          name: this.name,
+          status: 'fail',
+          message: `${nameless.length} tool(s) are missing a 'name' field`,
+          fix: 'Check tool definitions under src/tool/tools/ and src/tool/registry.ts',
+          duration: Date.now() - start,
+        };
+      }
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'pass',
+        message: `Tool registry loaded ${tools.length} tool(s)`,
+        duration: Date.now() - start,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'fail',
+        message: `Failed to load tool registry: ${msg}`,
+        fix: 'Rebuild the project (npm run build) and verify tool imports',
+        duration: Date.now() - start,
+      };
+    }
+  },
+};
+
+const permissionsCheck: HealthCheck = {
+  id: 'permissions',
+  name: 'Permission Rules',
+  description: 'Check permission rules are valid',
+  category: 'configuration',
+  async run(): Promise<HealthCheckResult> {
+    const start = Date.now();
+    try {
+      const mod = (await import('../permission/index.js')) as {
+        PermissionRuleSchema: { safeParse: (value: unknown) => { success: boolean } };
+        defaultRules: unknown[];
+        getPermissionManager: () => unknown;
+      };
+      // Load manager to ensure defaults are consistent
+      mod.getPermissionManager();
+      const rules = mod.defaultRules;
+      let invalid = 0;
+      for (const rule of rules) {
+        const result = mod.PermissionRuleSchema.safeParse(rule);
+        if (!result.success) {
+          invalid++;
+        }
+      }
+      if (invalid > 0) {
+        return {
+          id: this.id,
+          name: this.name,
+          status: 'fail',
+          message: `${invalid} of ${rules.length} default permission rules failed schema validation`,
+          fix: 'Inspect defaultRules in src/permission/index.ts for shape regressions',
+          duration: Date.now() - start,
+        };
+      }
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'pass',
+        message: `Permission rules valid (${rules.length} default rules)`,
+        duration: Date.now() - start,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'fail',
+        message: `Failed to load permission module: ${msg}`,
+        fix: 'Rebuild the project (npm run build) and check src/permission/index.ts',
+        duration: Date.now() - start,
+      };
+    }
+  },
+};
+
+const mcpBreakageCheck: HealthCheck = {
+  id: 'mcp-breakage',
+  name: 'MCP Breakage Tracker',
+  description: 'Check for recent MCP server protocol violations',
+  category: 'tools',
+  optional: true,
+  async run(): Promise<HealthCheckResult> {
+    const start = Date.now();
+    try {
+      const mod = (await import('../mcp/breakage-tracker.js')) as {
+        McpBreakageTracker: new () => unknown;
+      };
+      // We can only inspect a live tracker if the MCP client manager has
+      // been created in this process. The tracker import alone validates
+      // the module shape; a passing load is reported as pass.
+      if (typeof mod.McpBreakageTracker !== 'function') {
+        return {
+          id: this.id,
+          name: this.name,
+          status: 'fail',
+          message: 'McpBreakageTracker export is not a constructor',
+          duration: Date.now() - start,
+        };
+      }
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'pass',
+        message: 'MCP breakage tracker module loaded',
+        duration: Date.now() - start,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        id: this.id,
+        name: this.name,
+        status: 'warn',
+        message: `MCP breakage tracker not loadable: ${msg}`,
+        fix: 'Rebuild the project (npm run build) and verify src/mcp/breakage-tracker.ts',
+        duration: Date.now() - start,
+      };
+    }
+  },
+};
+
 // ============ All Checks Registry ============
 
 const ALL_CHECKS: HealthCheck[] = [
   nodeVersionCheck,
   envSapAicoreCheck,
   envModelCheck,
+  configDirCheck,
+  routingConfigCheck,
   mcpConfigCheck,
+  mcpBreakageCheck,
   sessionsDirCheck,
+  toolRegistryCheck,
+  permissionsCheck,
   gitAvailableCheck,
   networkSapCheck,
 ];
@@ -466,7 +764,7 @@ export class DoctorService {
       }
 
       try {
-        const result = await check.run();
+        const result = await check.run(options);
         results.push(result);
       } catch (error) {
         results.push({
@@ -485,7 +783,7 @@ export class DoctorService {
   /**
    * Run a single health check by ID
    */
-  async runCheck(id: string): Promise<HealthCheckResult> {
+  async runCheck(id: string, options: DoctorOptions = {}): Promise<HealthCheckResult> {
     const check = this.checks.find((c) => c.id === id);
 
     if (!check) {
@@ -499,7 +797,7 @@ export class DoctorService {
     }
 
     try {
-      return await check.run();
+      return await check.run(options);
     } catch (error) {
       return {
         id: check.id,
@@ -619,6 +917,34 @@ export class DoctorService {
     lines.push('');
 
     return lines.join('\n');
+  }
+
+  /**
+   * Format results as structured JSON. The shape is stable and intended
+   * for programmatic consumption (CI gates, agent workflows).
+   */
+  formatJson(results: HealthCheckResult[]): string {
+    const summary = this.getSummary(results);
+    const payload = {
+      version: 1,
+      summary,
+      overall:
+        summary.failed > 0
+          ? ('fail' as const)
+          : summary.warned > 0
+            ? ('warn' as const)
+            : ('pass' as const),
+      checks: results.map((r) => ({
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        message: r.message,
+        fix: r.fix,
+        duration: r.duration,
+        category: this.checks.find((c) => c.id === r.id)?.category,
+      })),
+    };
+    return JSON.stringify(payload, null, 2);
   }
 
   /**

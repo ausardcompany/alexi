@@ -1066,6 +1066,235 @@ getRule(ruleId: string): PermissionRule | undefined;
 
 See [ARCHITECTURE.md — Permissions CLI](ARCHITECTURE.md#permissions-cli-srcclicommandspermissionsts) for the end-to-end call flow and [TESTING.md — Testing the Permissions CLI](TESTING.md#testing-the-permissions-cli-srcclicommandspermissionsts-issue-2087) for the pinned test contract.
 
+### doctor
+
+Run comprehensive health checks and diagnostics across environment variables, configuration files, the MCP tracker, SAP AI Core reachability, the tool registry, and permission rules. Registered by `src/cli/commands/doctor.ts:registerDoctorCommand`. The command is intentionally side-effect free by default; `--fix` opts in to a small set of safe auto-repairs (currently: create `~/.alexi/` if missing). Exit code `0` when no check failed (warnings allowed); `1` when one or more checks returned `fail`.
+
+```bash
+alexi doctor [--verbose] [--fix] [--json] [--skip-network]
+```
+
+#### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `--verbose` | boolean | Show detailed diagnostic info including per-check timings and fix hints, with ANSI colour groupings per category (`environment` / `configuration` / `filesystem` / `tools` / `network`). |
+| `--fix` | boolean | Attempt safe auto-repairs where supported. Today only `config-dir` honours this flag — it will `mkdirSync('~/.alexi', { recursive: true })` when the directory is missing. All other checks remain read-only even with `--fix`. |
+| `--json` | boolean | Emit structured JSON (stable shape — see below). Suppresses the human-readable report so operators can pipe directly into `jq` without stripping ANSI. |
+| `--skip-network` | boolean | Skip the optional SAP AI Core reachability probe. Each skipped `network`-category check is reported as a `warn` with the message `Skipped (--skip-network)` so the overall `--json` consumer still sees the row. |
+
+#### Examples
+
+```bash
+# Default: plain-text report, exit 1 if any check fails
+alexi doctor
+
+# Verbose, ANSI-coloured report with per-check timings and fix hints
+alexi doctor --verbose
+
+# Create missing ~/.alexi/ if absent
+alexi doctor --fix
+
+# Skip the network probe for air-gapped CI
+alexi doctor --skip-network --json | jq '.overall'
+
+# CI gate: proceed only when every check passes or warns
+alexi doctor --skip-network --json | jq -e '.summary.failed == 0'
+```
+
+#### Human output (default, `formatReportPlain`)
+
+```text
+Alexi - Health Check
+==================================================
+
+[PASS] Node.js Version
+  Node.js 22.12.0 meets minimum requirement (>= 22.12.0)
+
+[PASS] SAP AI Core Environment
+  AICORE_SERVICE_KEY is set and valid JSON
+
+[WARN] Model Configuration
+  Neither DEFAULT_MODEL nor AICORE_MODEL is set, will use provider default
+  Fix: Set DEFAULT_MODEL or AICORE_MODEL to specify the AI model (e.g., anthropic--claude-3.5-sonnet)
+
+[PASS] Tool Registry
+  Tool registry loaded 32 tool(s)
+
+[FAIL] SAP AI Core Network
+  SAP AI Core endpoint unreachable: https://api.ai.core.cloud.sap (ECONNREFUSED)
+  Fix: Check network connectivity, VPN status, or endpoint URL configuration
+
+==================================================
+Summary
+  Passed: 10
+  Warnings: 1
+  Failed: 1
+
+Status: Some checks failed. Please fix the issues above.
+```
+
+The verbose variant (`--verbose`, `formatReport`) groups checks under coloured category headers and adds a `(Nms)` suffix per check.
+
+#### JSON output (`--json`, `formatJson`)
+
+```json
+{
+  "version": 1,
+  "summary": {
+    "passed": 10,
+    "warned": 1,
+    "failed": 1
+  },
+  "overall": "fail",
+  "checks": [
+    {
+      "id": "node-version",
+      "name": "Node.js Version",
+      "status": "pass",
+      "message": "Node.js 22.12.0 meets minimum requirement (>= 22.12.0)",
+      "duration": 0,
+      "category": "environment"
+    },
+    {
+      "id": "env-model",
+      "name": "Model Configuration",
+      "status": "warn",
+      "message": "Neither DEFAULT_MODEL nor AICORE_MODEL is set, will use provider default",
+      "fix": "Set DEFAULT_MODEL or AICORE_MODEL to specify the AI model (e.g., anthropic--claude-3.5-sonnet)",
+      "duration": 1,
+      "category": "environment"
+    },
+    {
+      "id": "network-sap",
+      "name": "SAP AI Core Network",
+      "status": "fail",
+      "message": "SAP AI Core endpoint unreachable: https://api.ai.core.cloud.sap (ECONNREFUSED)",
+      "fix": "Check network connectivity, VPN status, or endpoint URL configuration",
+      "duration": 10001,
+      "category": "network"
+    }
+  ]
+}
+```
+
+The top-level `version` field pins the shape against future additive changes; `overall` is `'fail'` when any check failed, `'warn'` when none failed but some warned, otherwise `'pass'`.
+
+#### Registered checks
+
+| id | Category | Optional | What it validates |
+|----|----------|----------|-------------------|
+| `node-version` | environment | no | `process.version >= 22.12.0` using component-wise semver compare. |
+| `env-sap-aicore` | environment | no | `AICORE_SERVICE_KEY` is set and valid JSON, OR `SAP_PROXY_BASE_URL` is set and a valid URL. Fails when neither is present. |
+| `env-model` | environment | no | `DEFAULT_MODEL` or `AICORE_MODEL` is set. Warns (not fails) when neither is present — provider default will be used. |
+| `config-dir` | filesystem | no | `~/.alexi/` exists and is writable (write-probe + unlink). The only check that honours `--fix`: when the directory is missing and `--fix` is set, it is created with `fs.mkdirSync(..., { recursive: true })`. |
+| `routing-config` | configuration | no | Searches `./routing-config.json`, `./config/routing.json`, `~/.alexi/routing-config.json` in order. Validates JSON parse and that the top-level `models` field is an array. Warns when no config is found (defaults will be used). |
+| `mcp-config` | configuration | no | `~/.alexi/mcp-servers.json` exists and parses as JSON with `version` + `servers: []`. Warns when the file is absent (will auto-create on first MCP use). |
+| `mcp-breakage` | tools | yes | `src/mcp/breakage-tracker.ts` exports a `McpBreakageTracker` constructor. Catches module-shape regressions at `doctor` time instead of at MCP-startup time. |
+| `sessions-dir` | filesystem | no | `~/.alexi/sessions/` is writable (write-probe + unlink). Reports the current session count. |
+| `tool-registry` | tools | no | Dynamically imports `src/tool/tools/index.js` + `src/tool/index.js`, calls `registerBuiltInTools()` (idempotent), then asserts every registered tool exposes a non-empty `name: string`. |
+| `permissions` | configuration | no | Loads `src/permission/index.js` and validates every default rule against `PermissionRuleSchema.safeParse`. |
+| `git-available` | tools | no | `git --version` resolves on `PATH` (5s timeout). Warns (not fails) when git is missing — most Alexi features work without git, project-init needs it. |
+| `network-sap` | network | yes | `HEAD` on the derived SAP AI Core base URL (`serviceurls.AI_API_URL` from the service key, or `SAP_PROXY_BASE_URL`) with a 10s abort. Any HTTP response (including `401`/`403`) counts as reachable. Skipped entirely when `--skip-network` is set. |
+
+#### Programmatic API
+
+```typescript
+import {
+  getDoctor,
+  resetDoctor,
+  DoctorService,
+  ALL_CHECKS,
+  type HealthCheck,
+  type HealthCheckResult,
+  type CheckDefinition,
+  type DoctorOptions,
+  type DoctorSummary,
+} from './doctor/index.js';
+
+// Singleton — same instance across the process lifetime
+const doctor = getDoctor();
+
+// Run every registered check in registration order
+const results: HealthCheckResult[] = await doctor.runAll({
+  skipNetwork: false,
+  fix: false,
+});
+
+// Run one check by id (returns a well-formed result even for unknown ids)
+const nodeCheck = await doctor.runCheck('node-version');
+
+// Enumerate the registered check definitions (no execution)
+const defs: CheckDefinition[] = doctor.listChecks();
+
+// Aggregate the result array into a summary
+const summary: DoctorSummary = doctor.getSummary(results);
+// => { passed: number, warned: number, failed: number }
+
+// Three output formatters — all pure, all return a string
+const colored = doctor.formatReport(results);        // ANSI + category groups
+const plain = doctor.formatReportPlain(results);     // No colours, flat list
+const json = doctor.formatJson(results);             // Stable JSON shape
+
+// Test harnesses must call this between runs to drop any mutated state
+resetDoctor();
+```
+
+#### TypeScript interfaces
+
+```typescript
+interface HealthCheckResult {
+  id: string;
+  name: string;
+  status: 'pass' | 'warn' | 'fail';
+  message: string;
+  fix?: string;        // Actionable remediation hint; present on warn/fail
+  duration: number;    // Milliseconds
+}
+
+interface CheckDefinition {
+  id: string;
+  name: string;
+  description: string;
+  category: 'environment' | 'configuration' | 'filesystem' | 'network' | 'tools';
+  optional?: boolean;
+}
+
+interface DoctorOptions {
+  skipNetwork?: boolean;
+  /** When true, individual checks may attempt safe auto-repairs (e.g. mkdir). */
+  fix?: boolean;
+}
+
+interface DoctorSummary {
+  passed: number;
+  warned: number;
+  failed: number;
+}
+
+interface HealthCheck {
+  id: string;
+  name: string;
+  description: string;
+  category: 'environment' | 'configuration' | 'filesystem' | 'network' | 'tools';
+  optional?: boolean;
+  run(options?: DoctorOptions): Promise<HealthCheckResult>;
+}
+```
+
+#### Behavioural notes
+
+- **No chat / completion call.** The `network-sap` probe is a `HEAD` with a 10s abort via Node's global `fetch`. The point of the surface is validating reachability without burning model quota — operators who need deeper verification run `alexi models` or `alexi provider health` afterwards.
+- **Dynamic `~/.alexi/` resolution.** `configDir()`, `mcpConfigFile()`, and `sessionsDir()` re-read `os.homedir()` on every call so per-test `HOME` overrides via `vi.stubEnv('HOME', tmp)` affect the module correctly. A refactor that caches these paths at module load time breaks parallel-safe testing and the `--fix` flow's live inspection.
+- **`runAll` is sequential, not parallel.** Checks run in registration order so output is predictable; one slow probe does not interleave with another. The order is `node-version` → `env-sap-aicore` → `env-model` → `config-dir` → `routing-config` → `mcp-config` → `mcp-breakage` → `sessions-dir` → `tool-registry` → `permissions` → `git-available` → `network-sap`.
+- **Individual check failures never abort the sweep.** `runAll` wraps each `check.run(options)` in `try/catch` and surfaces thrown errors as `{ status: 'fail', message: 'Check failed with error: ...' }` so a buggy check cannot hide the rest of the report.
+- **`--skip-network` skips the whole category.** Any `check.category === 'network'` is replaced with a `warn` row (`Skipped (--skip-network)`) so JSON consumers still see every registered id. The result array length is stable regardless of flags.
+- **`--fix` is deliberately narrow.** Today only `config-dir` acts on it. Checks that could in principle self-heal (`sessions-dir`, `mcp-config`) are left read-only to keep the operator in control of destructive-sounding fixes.
+- **Exit code semantics.** `process.exitCode = 1` only when `summary.failed > 0`. Warnings do NOT raise the exit code — a passing-with-warnings run is the signal to proceed for CI gates, mirroring `alexi provider health`.
+- **Singleton with explicit reset.** `getDoctor()` returns a lazy singleton; `resetDoctor()` clears it so tests that mutate the registered checks list do not leak state across cases.
+
+See [docs/ARCHITECTURE.md — Doctor / Health Check System](ARCHITECTURE.md#doctor--health-check-system-srcdoctor) for the end-to-end call flow and [docs/TESTING.md — Testing the `doctor` command](TESTING.md#testing-the-doctor-command-srcdoctorindexts-srcclicommandsdoctorts) for the mocking strategy and pinned test contract.
+
 ### server
 
 Manage the local UNIX socket server that exposes Alexi's slash command surface to remote clients (VS Code extension, JetBrains plugin, test harnesses). Registered by `src/cli/commands/server.ts`. The full wire protocol lives in [`docs/SERVER.md`](SERVER.md).

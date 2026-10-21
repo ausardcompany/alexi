@@ -12788,6 +12788,188 @@ describe('SessionLegacy.event', () => {
 
 When a future shape rename adds a `case` branch, the matching test must assert on both the renamed shape AND the pass-through for every other type — the "ignores the type argument" test above becomes "ignores every type except the newly handled one".
 
+## Testing the `doctor` command (`src/doctor/index.ts`, `src/cli/commands/doctor.ts`)
+
+Two test suites cover the health-check surface introduced in commit `1f313d00`:
+
+- `tests/doctor/index.test.ts` (328 lines) — exercises the `DoctorService` directly: individual check behaviour, `runAll` aggregation, `--skip-network` and `--fix` plumbing, the stable JSON shape, both report formatters, and the `getDoctor()` / `resetDoctor()` singleton contract.
+- `tests/cli/commands/doctor.test.ts` (139 lines) — exercises the Commander wiring: flag parsing, output routing (`--json` vs `--verbose` vs default), `runAll` option plumbing, and the exit-code contract.
+
+### Service-level test strategy
+
+The service tests drive the real `DoctorService` without mocking the underlying modules. Isolation comes from redirecting `HOME` and clearing the env vars the checks read:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { DoctorService, resetDoctor, getDoctor } from '../../src/doctor/index.js';
+
+describe('DoctorService', () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let originalEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    // Redirect HOME to a temp dir so sessions / mcp paths do not touch
+    // the developer's real ~/.alexi during the test.
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-doctor-test-'));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+
+    // Snapshot env vars the checks look at so afterEach can restore them.
+    originalEnv = {
+      AICORE_SERVICE_KEY: process.env.AICORE_SERVICE_KEY,
+      SAP_PROXY_BASE_URL: process.env.SAP_PROXY_BASE_URL,
+      SAP_PROXY_API_KEY: process.env.SAP_PROXY_API_KEY,
+      DEFAULT_MODEL: process.env.DEFAULT_MODEL,
+      AICORE_MODEL: process.env.AICORE_MODEL,
+    };
+    delete process.env.AICORE_SERVICE_KEY;
+    delete process.env.SAP_PROXY_BASE_URL;
+    delete process.env.SAP_PROXY_API_KEY;
+    delete process.env.DEFAULT_MODEL;
+    delete process.env.AICORE_MODEL;
+
+    resetDoctor();
+  });
+
+  afterEach(() => {
+    // Restore env + HOME, then wipe the temp dir.
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    try {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    } catch {
+      // Best effort — nothing to assert if cleanup fails.
+    }
+    resetDoctor();
+  });
+});
+```
+
+The `HOME` redirection is load-bearing: `src/doctor/index.ts` exposes `configDir()`, `mcpConfigFile()`, and `sessionsDir()` as function-scoped helpers that re-read `os.homedir()` on every call precisely so this per-test redirection works. If the module ever reverts to module-level `const` paths, every test in this suite will silently touch the developer's real `~/.alexi/` — pin the dynamic resolution contract explicitly.
+
+### What the service suite pins
+
+| Case | Contract pinned |
+|------|-----------------|
+| `listChecks exposes all six required check categories` | The registered check array covers env / config / MCP / routing / tools / permissions / network ids; a refactor that renames or drops a check surfaces here. |
+| `env-sap-aicore fails when neither AICORE_SERVICE_KEY nor SAP_PROXY_BASE_URL is set` | Missing credential short-circuits with `fail` + `fix` hint. |
+| `env-sap-aicore passes when AICORE_SERVICE_KEY is valid JSON` | Happy path — JSON.parse succeeds. |
+| `env-sap-aicore fails when AICORE_SERVICE_KEY is set but malformed JSON` | Error message matches `/not valid JSON/` so the operator can disambiguate "unset" from "corrupt". |
+| `env-sap-aicore passes when SAP_PROXY_BASE_URL is a valid URL` | Proxy mode works without a service key. |
+| `routing-config warns when no routing config is present` | Missing config is a `warn`, not a `fail` — defaults are used. The test chdirs into a temp dir so none of the three search paths resolve. |
+| `routing-config fails when routing config is malformed JSON` | Broken JSON surfaces as `fail`. |
+| `routing-config passes when routing config has required shape` | A `{ models: [], rules: [] }` payload is accepted. |
+| `config-dir warns when ~/.alexi/ is missing and --fix is not set` | Default is `warn` with a fix hint mentioning `--fix`. The temp `HOME` is empty on entry so this is the natural state. |
+| `config-dir creates ~/.alexi/ when --fix is set` | The `--fix` plumbing from CLI → service → check is the single auto-repair path today; a regression here means `--fix` silently became a no-op. |
+| `config-dir passes when ~/.alexi/ already exists and is writable` | Writable-probe branch. |
+| `mcp-config warns when the MCP config file is missing` | Absent config is non-fatal. |
+| `mcp-config fails when the MCP config file is malformed JSON` | Broken JSON surfaces as `fail`. |
+| `mcp-config passes when the MCP config has valid shape` | A `{ version: 1, servers: [] }` payload is accepted. |
+| `tool-registry loads the tool registry and reports a non-zero tool count` | The dynamic import path (`src/tool/tools/index.js` + `src/tool/index.js`) works in-process. `['pass', 'warn']` is accepted because the registry's exact count depends on build state. |
+| `permissions passes when permission module exports validate default rules` | `PermissionRuleSchema.safeParse` accepts every entry in `defaultRules`; the message matches `/default rules/`. |
+| `runAll aggregates all checks with a summary` | `results.length >= 10` AND `passed + warned + failed === results.length`. Guards against the aggregator losing a row. |
+| `runAll skips network checks when skipNetwork is true` | `network-sap` row has message `/Skipped/`. The row is still present, just degraded — JSON consumers can trust `.checks[].id` membership. |
+| `formatJson produces a stable JSON shape with overall status` | `version === 1`, `overall ∈ {pass, warn, fail}`, every `.checks[].id` is a string, and the per-row count matches `results.length`. |
+| `formatJson reports overall=fail when any check fails` | With no credentials, `env-sap-aicore` fails, so `.overall === 'fail'`. Pins the overall-status derivation. |
+| `formatReport renders a colored report with a Summary section` | Contains `Alexi` and `Summary`. |
+| `formatReportPlain is ANSI-free` | Does NOT contain `\u001b[`. Guards against a leak from the coloured formatter into the default path. |
+| `getDoctor() returns the same instance until resetDoctor() is called` | Singleton semantics — tests that mutate the service must reset in `afterEach`. |
+| `runCheck returns fail for an unknown id` | Status is `fail`, message matches `/not found/`; the fallback never throws. |
+
+### CLI-level test strategy
+
+The CLI tests mock `getDoctor()` with `vi.hoisted` so the harness never pays for the real check sweep, and drives the registered subcommand via `program.parseAsync(['node', 'alexi', 'doctor', ...])`:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
+
+const { runAllMock, getSummaryMock, formatJsonMock, formatReportMock, formatReportPlainMock } =
+  vi.hoisted(() => ({
+    runAllMock: vi.fn(),
+    getSummaryMock: vi.fn(),
+    formatJsonMock: vi.fn(),
+    formatReportMock: vi.fn(),
+    formatReportPlainMock: vi.fn(),
+  }));
+
+vi.mock('../../../src/doctor/index.js', () => ({
+  getDoctor: () => ({
+    runAll: runAllMock,
+    getSummary: getSummaryMock,
+    formatJson: formatJsonMock,
+    formatReport: formatReportMock,
+    formatReportPlain: formatReportPlainMock,
+  }),
+}));
+
+import { registerDoctorCommand } from '../../../src/cli/commands/doctor.js';
+
+async function runDoctorCommand(argv: string[]): Promise<Captured> {
+  const stdoutChunks: string[] = [];
+  const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+    chunk: string | Uint8Array
+  ) => {
+    stdoutChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+    return true;
+  }) as never);
+
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+
+  const program = new Command();
+  program.exitOverride();
+  registerDoctorCommand(program);
+
+  try {
+    await program.parseAsync(['node', 'alexi', 'doctor', ...argv]);
+  } finally {
+    outSpy.mockRestore();
+  }
+
+  const exitCode = process.exitCode;
+  process.exitCode = previousExitCode;
+
+  return { stdout: stdoutChunks.join(''), exitCode };
+}
+```
+
+### What the CLI suite pins
+
+| Case | Contract pinned |
+|------|-----------------|
+| `runs all checks and emits plain-text report by default` | `runAllMock` is called with `{ skipNetwork: undefined, fix: undefined }`; `formatReportPlain` is invoked and `formatReport` (coloured) is NOT; stdout contains the plain report; exit code is `undefined`. |
+| `emits colored verbose report with --verbose` | `formatReport` is invoked; `formatReportPlain` is NOT; stdout contains the verbose report. Guards against a swapped branch. |
+| `emits JSON with --json` | `formatJson` is invoked; stdout contains the serialised payload. |
+| `passes --fix through to runAll` | `runAllMock` receives `expect.objectContaining({ fix: true })`. Pins the `--fix` plumbing from CLI → service. |
+| `passes --skip-network through to runAll` | `runAllMock` receives `expect.objectContaining({ skipNetwork: true })`. |
+| `exits with code 1 when any check fails` | `process.exitCode === 1` when `getSummary` reports `failed: 1`. |
+| `exits with no error code when only warnings are present` | `process.exitCode === undefined` when `failed: 0` and `warned: 1`. Warnings do NOT raise the exit code — pins the "warn is still a passing CI gate" contract. |
+
+### Patterns worth internalising
+
+1. **Redirect `HOME`, do not mock the filesystem.** The doctor module uses `fs.*` directly. Mocking `fs` would be invasive and would leak into every other dynamic-import check (tool registry, permissions, MCP). Redirecting `HOME` to a temp dir makes the real filesystem calls run against a scratch tree instead. The three dynamic-resolver helpers (`configDir()`, `mcpConfigFile()`, `sessionsDir()`) exist precisely so this works.
+2. **Snapshot and clear env vars in `beforeEach`.** The sweep reads `AICORE_SERVICE_KEY`, `SAP_PROXY_BASE_URL`, `SAP_PROXY_API_KEY`, `DEFAULT_MODEL`, `AICORE_MODEL`. A developer with any of these set in their shell would see different results between the test suite and CI; the snapshot-and-clear pattern makes the empty-env branch the deterministic default.
+3. **Call `resetDoctor()` in both `beforeEach` and `afterEach`.** The singleton is lazy, so a mutating test in one suite can leak state into another. Resetting on both ends is cheap and defeats order-dependent flakes.
+4. **Mock at the module boundary the system under test imports.** `tests/cli/commands/doctor.test.ts` mocks `../../../src/doctor/index.js`, not individual check modules. The CLI test suite's job is flag parsing + output routing + exit-code contract — the semantic validation of individual checks belongs in the service suite.
+5. **Isolate `process.exitCode` across runs.** The CLI harness saves `previousExitCode` before each case and restores it after; without this, a failing-doctor case would leak `process.exitCode = 1` into unrelated cases and make them look broken.
+6. **Use `expect.objectContaining` for pass-through assertions.** `runAllMock.toHaveBeenCalledWith(expect.objectContaining({ fix: true }))` catches the `--fix` plumbing without pinning the exact option shape, so adding a new `DoctorOptions` field (e.g. `verbose`) does not force every option-plumbing test to be updated.
+7. **Accept `['pass', 'warn']` for environment-dependent checks.** The `tool-registry` test uses `expect(['pass', 'warn']).toContain(result.status)` because the dynamic import may surface a different count depending on build state. A test that pins `pass` here would flake on fresh clones; a test that pins `warn` would miss a regression where the registry failed to load entirely. The accepted-set pattern is the right granularity for inherently non-deterministic checks.
+
 ## Testing the todowrite scheduled-todo promotion hook (`src/tool/tools/todowrite.ts`)
 
 Introduced by commit `5ddc600d feat(tools): promote scheduled todos to task scheduler`. The `todowrite` tool now inspects each submitted `Todo` for an optional `schedule` field and, when present, promotes it into a durable `ScheduledTask` on the process-wide scheduler exposed by `src/core/task-scheduler.ts`. The promotion path has three load-bearing invariants that the regression suite in `tests/tool/tools/todowrite-schedule.test.ts` pins:
