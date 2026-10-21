@@ -34,6 +34,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing the todowrite scheduled-todo promotion hook (`src/tool/tools/todowrite.ts`)](#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets)
 - [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
+- [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -12723,6 +12724,118 @@ describe('PermissionAllowlist.exceptions (2026-10-20 sync)', () => {
 ```
 
 The allowlist tests must NOT reach for a global `PermissionManager` — the helpers are deliberately pure, and injecting a manager would couple the regression suite to unrelated state. Fixtures are plain `PermissionRule` arrays constructed inline.
+
+## Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)
+
+Added in commit `85ffc171 test(agent): audit subagent tool allowlist inheritance (#2104)`. The 233-line suite is a **verification-only regression suite** (see [docs/CONTRIBUTING.md — Verification-only regression suites](CONTRIBUTING.md#verification-only-regression-suites-lock-in-a-contract-with-tests--inline-jsdoc)): no new runtime behaviour, just four `describe` blocks that pin the current behaviour of `deriveSubagentSessionPermission` and `TaskTool.buildSubagentConfig` so a future refactor cannot silently reintroduce the Kilocode PR #15254 bug.
+
+### What the suite audits
+
+Kilocode PR #15254 (2026-10-19) fixed a bug where a parent-session edit allowlist written as `[deny *, allow <path>]` was flattened into a blanket deny on every delegated subagent. The flatten dropped the subsequent path-specific allow(s) from the subagent's ruleset, so `write` / `edit` / `apply_patch` / `multiedit` / `patch` all disappeared from the subagent's tool surface even though the parent could still edit the narrowed paths. Alexi fixes this at `src/agent/subagent-permissions.ts:209-222` via an `editAllowlistBaselines: Set<PermissionRule>` filter (see `PermissionAllowlist.exceptions` / `.catchAll` in `src/permission/allowlist.ts`), and the suite guarantees that filter never regresses.
+
+### Four regression contracts, pinned individually
+
+1. **Allowlist baseline is dropped, path allow is dropped, no synthetic deny appears.** Parametrised across the full `EDIT_PERMISSION_NAMES` list (`['edit', 'write', 'multiedit', 'apply_patch', 'patch']`) so adding a new edit-family name to `src/agent/subagent-permissions.ts:43` requires a matching test entry — a silent omission would otherwise narrow coverage without failing anything.
+
+   ```typescript
+   for (const tool of ['edit', 'write', 'multiedit', 'apply_patch', 'patch'] as const) {
+     it(`parent catch-all deny + path allow for '${tool}' is dropped from subagent ruleset`, () => {
+       const subagent = makeAgent();
+       const parentSessionPermission = allowlistBaseline(tool, 'candidate/**/*.md');
+
+       const result = deriveSubagentSessionPermission({
+         parentSessionPermission,
+         parentAgent: undefined,
+         subagent,
+       });
+
+       expect(result.find((r) => r.id === `parent-${tool}-baseline-deny`)).toBeUndefined();
+       expect(result.find((r) => r.id === `parent-${tool}-path-allow`)).toBeUndefined();
+       expect(hasDenyFor(result, tool)).toBe(false);
+     });
+   }
+   ```
+
+2. **End-to-end through `TaskTool.buildSubagentConfig`.** Equivalent customer scenario from Kilocode PR #15254: a primary delegates to a subagent whose task invocation lists `allowedTools: ['read', 'edit', 'write']`. The derived `config.permission` must NOT contain a tool-level deny for `edit` or `write`, and the baseline rule object must NOT be propagated by identity.
+
+   ```typescript
+   const config = TaskTool.buildSubagentConfig(context, subagent, {
+     parentAgent,
+     parentSessionPermission,
+     allowedTools: ['read', 'edit', 'write'],
+   });
+
+   expect(hasDenyFor(config.permission, 'edit')).toBe(false);
+   expect(hasDenyFor(config.permission, 'write')).toBe(false);
+   expect(config.permission.find((r) => r.id === 'parent-edit-baseline-deny')).toBeUndefined();
+   expect(config.permission.find((r) => r.id === 'parent-edit-path-allow')).toBeUndefined();
+   ```
+
+3. **True blanket deny still propagates (regression guard the other way).** The fix only unflattens true allowlist baselines (`deny + narrowing allow`). Two sibling cases pin this:
+   - A parent with ONLY `{ tools: ['edit'], paths: ['*'], decision: 'deny' }` and no narrowing allow MUST still forward the deny to the subagent verbatim.
+   - A parent catch-all deny followed by a path-specific DENY (not allow) is just two denies in a row — the baseline must still survive. A regression that over-eagerly stripped every catch-all deny would trip the latter case loudly.
+
+4. **Parent approvals are never forwarded (cline #14225 contract).** A parent `allow write` on `src/**` does NOT surface to the subagent even when the path is scoped; because `write` is not on the test's `allowedTools: ['read']`, derivation must additionally add an explicit `deny write` so the subagent fails closed. This closes the gap where a subagent could silently inherit a `write` approval the parent negotiated interactively.
+
+### Mixed-shape test (allowlist baseline alongside unrelated denies)
+
+The final `describe` block seeds a parent ruleset with the allowlist baseline AND an unrelated secrets-deny:
+
+```typescript
+const parentSessionPermission: PermissionRule[] = [
+  ...allowlistBaseline('edit', 'src/**'),
+  {
+    id: 'parent-deny-secrets',
+    paths: ['**/.env'],
+    decision: 'deny',
+    priority: 70,
+  },
+];
+```
+
+Asserts that the derived subagent ruleset drops the edit baseline (`parent-edit-baseline-deny` is `undefined`) while preserving the secrets deny (`parent-deny-secrets` is `defined`). Without this test, a regression that stripped every parent deny — not just allowlist baselines — would pass the parametrised block above but silently remove unrelated denies that the subagent genuinely needs as ceilings.
+
+### Fixture helpers (reusable across future suites)
+
+```typescript
+function makeAgent(overrides: Partial<Agent> = {}): Agent {
+  return {
+    id: 'code',
+    name: 'Code Agent',
+    description: 'test stub',
+    mode: 'all',
+    systemPrompt: 'stub',
+    canUseTool: () => true,
+    ...overrides,
+  };
+}
+
+function hasDenyFor(rules: PermissionRule[], tool: string): boolean {
+  return rules.some((r) => r.decision === 'deny' && r.tools?.includes(tool));
+}
+
+function allowlistBaseline(tool: string, allowedPath: string): PermissionRule[] {
+  return [
+    { id: `parent-${tool}-baseline-deny`, tools: [tool], paths: ['*'], decision: 'deny', priority: 50 },
+    { id: `parent-${tool}-path-allow`, tools: [tool], paths: [allowedPath], decision: 'allow', priority: 60 },
+  ];
+}
+```
+
+### Patterns worth internalising
+
+1. **Audit against a specific upstream bug, cite it in the module docblock.** The suite's file-level docblock names Kilocode PR #15254, the audit date (2026-10-19), and the companion research file (`.github/research/subagent-inheritance-audit.md`). When a future regression trips the suite, the failing module docblock is enough to locate the originating bug class in minutes — no bisecting required.
+2. **Parametrise across `EDIT_PERMISSION_NAMES` with `for ... of` + `it(...)`, not `it.each`.** The `for` loop is explicit about which name is being audited and keeps the test name formatted with backticks so a failing assertion in CI shows `parent catch-all deny + path allow for 'apply_patch' is dropped from subagent ruleset` — unambiguous for the on-call reader.
+3. **Assert BOTH the baseline rule's absence AND the path-allow rule's absence.** The two drops happen through two independent code paths (the baseline is filtered via `editAllowlistBaselines`, the path-specific allow is filtered via the generic `rule.decision === 'deny' || external_directory` predicate). Pinning both catches a regression that broke exactly one of them.
+4. **Assert `hasDenyFor(result, tool) === false` in addition to the id-level drops.** Even if a refactor accidentally reintroduced the baseline flatten but under a NEW rule id (`subagent-forced-deny-${tool}`), the id-level assertions would silently pass while the tool-level assertion would fire. Belt-and-braces coverage against renames.
+5. **Keep the subagent fixture `canUseTool: () => true`.** The subagent's own `canUseTool` is deliberately permissive so the test exercises only the parent-side filtering logic. A test that gave the subagent restrictive `tools: [...]` would conflate parent-filter regressions with subagent-config regressions, making a failure harder to interpret.
+6. **Do NOT run this suite against a real `PermissionManager` singleton.** The helpers are pure (`deriveSubagentSessionPermission` is a pure function; `TaskTool.buildSubagentConfig` takes an explicit `parentSessionPermission` option), so the suite can run in parallel across workers without touching the global manager. Reaching for `getPermissionManager()` here would couple the audit to unrelated state and cost deterministic reproducibility.
+
+### Related suites
+
+- `tests/agent/subagent-permissions.test.ts` (if present) covers the broader `deriveSubagentSessionPermission` surface including the explore agent's `bashRules` plumbing.
+- Permission allowlist semantics are exercised directly in [Testing the Permission Allowlist](#testing-the-permission-allowlist-srcpermissionallowlistts-2026-10-20-sync).
+- `tests/permission/task-approval-boundary.test.ts` covers the task-tool approval boundary at the permission-manager level.
 
 ## Testing the `experimental.todo` flag (`src/config/userConfig.ts`, 2026-10-20 sync)
 
