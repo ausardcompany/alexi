@@ -9573,6 +9573,163 @@ permission: {
 
 Non-URL browser actions (`close`, `scroll`, `screenshot`) return `undefined` and fall back to the resource-only prompt. The dock renders `rules: [navigate:<origin>, navigate:*]` so the user sees both the scoped and broad fallbacks side by side.
 
+## Doctor / Health Check System (`src/doctor/`)
+
+Introduced by commit `1f313d00 feat(cli): add alexi doctor command for health checks and diagnostics`. The doctor subsystem exposes a dedicated CLI (`alexi doctor`) and a reusable programmatic surface (`DoctorService`) for environment, configuration, filesystem, tool-registry, permission, and SAP AI Core reachability validation. The design is deliberately separate from the per-provider `alexi provider health` surface: provider health validates reachability + env-var presence for a single provider; doctor sweeps the whole runtime (routing config, MCP tracker, tool registry, permission rules) and is the first thing an operator runs when `alexi chat` behaves unexpectedly.
+
+### Call flow
+
+```mermaid
+flowchart LR
+    CLI[alexi doctor] -->|Commander options| Register[registerDoctorCommand]
+    Register --> GetDoctor[getDoctor]
+    GetDoctor -->|singleton| Service[DoctorService]
+    Register --> RunAll[runAll skipNetwork, fix]
+    RunAll --> Loop{for check of checks}
+    Loop -->|network && skipNetwork| SkipRow[push warn 'Skipped --skip-network']
+    Loop -->|else| TryRun[check.run options]
+    TryRun -->|resolved| Push[push HealthCheckResult]
+    TryRun -->|threw| CatchRow[push fail 'Check failed with error ...']
+    SkipRow --> Loop
+    Push --> Loop
+    CatchRow --> Loop
+    Loop -->|done| Choose{output mode?}
+    Choose -->|--json| FormatJson[formatJson]
+    Choose -->|--verbose| FormatColor[formatReport ANSI + category groups]
+    Choose -->|default| FormatPlain[formatReportPlain]
+    FormatJson --> Write[process.stdout.write]
+    FormatColor --> Write
+    FormatPlain --> Write
+    Write --> Summary[getSummary]
+    Summary -->|failed > 0| Exit[process.exitCode = 1]
+```
+
+### Check registration sequence
+
+The twelve registered checks run in a deliberate order so cheaper environment checks surface before expensive network / dynamic-import checks. The order is captured as a static array in `src/doctor/index.ts:ALL_CHECKS` and preserved verbatim by `DoctorService.runAll`:
+
+```mermaid
+sequenceDiagram
+  participant CLI as alexi doctor
+  participant Svc as DoctorService
+  participant NodeV as node-version
+  participant EnvSap as env-sap-aicore
+  participant EnvM as env-model
+  participant CfgDir as config-dir
+  participant Routing as routing-config
+  participant Mcp as mcp-config / mcp-breakage
+  participant Sess as sessions-dir
+  participant Tools as tool-registry
+  participant Perm as permissions
+  participant Git as git-available
+  participant Net as network-sap
+
+  CLI->>Svc: runAll({ skipNetwork, fix })
+  Svc->>NodeV: run()
+  NodeV-->>Svc: pass | fail (semver compare)
+  Svc->>EnvSap: run()
+  EnvSap-->>Svc: pass (JSON ok OR URL ok) | fail
+  Svc->>EnvM: run()
+  EnvM-->>Svc: pass | warn (DEFAULT_MODEL / AICORE_MODEL missing)
+  Svc->>CfgDir: run({ fix })
+  CfgDir-->>Svc: pass (writable or created with --fix) | warn | fail
+  Svc->>Routing: run()
+  Routing-->>Svc: pass (models[] ok) | warn (no config) | fail (bad JSON)
+  Svc->>Mcp: run() x2
+  Mcp-->>Svc: pass | warn | fail (schema check + constructor check)
+  Svc->>Sess: run()
+  Sess-->>Svc: pass (write-probe ok) | fail
+  Svc->>Tools: run()
+  Tools-->>Svc: pass (count > 0, names ok) | warn | fail (dynamic import)
+  Svc->>Perm: run()
+  Perm-->>Svc: pass (safeParse ok) | fail
+  Svc->>Git: run()
+  Git-->>Svc: pass (version) | warn (not on PATH)
+  Svc->>Net: run()
+  Net-->>Svc: pass (HEAD responded) | warn (timeout / unreachable)
+  Svc-->>CLI: HealthCheckResult[]
+```
+
+### `HealthCheckResult` shape and category layout
+
+```mermaid
+classDiagram
+  class HealthCheckResult {
+    +string id
+    +string name
+    +pass|warn|fail status
+    +string message
+    +string? fix
+    +number duration
+  }
+  class CheckDefinition {
+    +string id
+    +string name
+    +string description
+    +environment|configuration|filesystem|network|tools category
+    +boolean? optional
+  }
+  class HealthCheck {
+    <<interface>>
+    +string id
+    +string name
+    +string description
+    +environment|configuration|filesystem|network|tools category
+    +boolean? optional
+    +run(options?: DoctorOptions) Promise~HealthCheckResult~
+  }
+  class DoctorService {
+    -HealthCheck[] checks
+    +runAll(options?: DoctorOptions) Promise~HealthCheckResult[]~
+    +runCheck(id, options?) Promise~HealthCheckResult~
+    +listChecks() CheckDefinition[]
+    +getSummary(results) DoctorSummary
+    +formatReport(results) string
+    +formatReportPlain(results) string
+    +formatJson(results) string
+  }
+  class DoctorSummary {
+    +number passed
+    +number warned
+    +number failed
+  }
+  HealthCheck <|.. nodeVersionCheck
+  HealthCheck <|.. envSapAicoreCheck
+  HealthCheck <|.. configDirCheck
+  HealthCheck <|.. routingConfigCheck
+  HealthCheck <|.. toolRegistryCheck
+  HealthCheck <|.. permissionsCheck
+  HealthCheck <|.. networkSapCheck
+  DoctorService --> HealthCheck
+  DoctorService --> HealthCheckResult
+  DoctorService --> DoctorSummary
+```
+
+### Module structure
+
+- `src/doctor/index.ts` — the single-module home for the health-check surface. Exports:
+  - **Types**: `HealthCheckResult`, `CheckDefinition`, `DoctorOptions`, `DoctorSummary`, `HealthCheck`.
+  - **Service**: `class DoctorService` with the twelve pre-registered checks, `runAll`, `runCheck`, `listChecks`, `getSummary`, `formatReport`, `formatReportPlain`, `formatJson`.
+  - **Singleton helpers**: `getDoctor()` returns a lazy singleton; `resetDoctor()` clears it so tests can start from a known state.
+  - **Registry**: `ALL_CHECKS` — the registered-check array, re-exported for tests that iterate over the full set without instantiating the service.
+  - **Internal helpers**: `configDir()`, `mcpConfigFile()`, `sessionsDir()` — dynamic resolvers for `~/.alexi/` paths that re-read `os.homedir()` on every call, so `vi.stubEnv('HOME', tmp)` applies even after the module has been imported.
+- `src/cli/commands/doctor.ts` — the Commander wiring. Exports `registerDoctorCommand(program)`. Four flags: `--verbose`, `--fix`, `--json`, `--skip-network`. Composes `getDoctor().runAll({ skipNetwork, fix })` → format → `process.stdout.write` → `process.exitCode = 1` only when `summary.failed > 0`.
+- `src/cli/commands/index.ts` — composes `registerDoctorCommand` into `registerAllCommands`.
+
+### Design notes
+
+- **Separate from `alexi provider health`.** The provider-health surface validates a specific provider (`sap-ai-core` / `sap-proxy`) and is useful as a per-provider CI gate. Doctor sweeps every subsystem: env, config files, routing config, MCP tracker, sessions dir, tool registry, permission rules, git, AND the SAP endpoint. The two are intentionally orthogonal; a reviewer merging their check lists back into one surface is reintroducing exactly the ambiguity that split them.
+- **Dynamic `~/.alexi/` resolution is load-bearing.** The pre-existing module-level constants (`CONFIG_DIR`, `MCP_CONFIG_FILE`, `SESSIONS_DIR`) captured `os.homedir()` once at import time. Tests redirecting `HOME` via `vi.stubEnv` therefore read stale paths and either leaked into the operator's real `~/.alexi/` or raced across parallel runs. The three helper functions (`configDir()`, `mcpConfigFile()`, `sessionsDir()`) re-read `os.homedir()` on every call so the module behaves correctly under test and the `--fix` flow sees the live path. Reverting to constants is a regression.
+- **`--fix` is deliberately narrow.** Only `config-dir` acts on it today (mkdir of `~/.alexi/`). Checks that could in principle self-heal (`sessions-dir`, `mcp-config`) are left read-only. The bar for extending `--fix` is "safe enough to run unattended in CI" — a reviewer should block any destructive-sounding fix (file deletion, config rewrites, permission chmods) and ask for a dedicated interactive command instead.
+- **`runAll` wraps every `check.run()` in try/catch.** A buggy check that throws becomes a `{ status: 'fail', message: 'Check failed with error: ...' }` row — it never aborts the sweep. The regression bar is "a single broken check cannot hide the rest of the report".
+- **Dynamic imports for tool / permission / MCP checks.** `tool-registry`, `permissions`, and `mcp-breakage` reach for `src/tool/`, `src/permission/`, `src/mcp/` via `await import(...)` INSIDE their `run` method. This is deliberate: it keeps `alexi doctor` cheap when the operator's actual issue is "I can't start the CLI at all" (an import crash surfaces as a specific check failure, not a process-level stack trace), and it preserves the CLI's lazy-loading contract (`alexi --help` does not pay for the tool registry or the permission schema).
+- **Sequential, not parallel.** The registered checks run in registration order, not via `Promise.all`. Predictable output ordering matters more than wall-clock speed for a diagnostic surface, and interleaving a slow 10s `HEAD` probe with a 1ms env-var read would make the plain-text report unreadable.
+- **Stable JSON shape.** `formatJson` emits `{ version: 1, summary, overall, checks[] }` with pretty-printed JSON. The `version` field is the opt-out hook for a future breaking change — CI gates that parse `.checks[].status` or `.overall` do not need to pin a toolchain version today, and a future `version: 2` payload can rename / reshape the inner fields without breaking those gates (they would read `.version` and switch on it). Reviewers must bump `version` and update downstream consumers in the same PR when the shape changes.
+- **Exit code only flips on `fail`, not on `warn`.** Mirrors `alexi provider health`. CI pipelines that gate on `doctor` can use `alexi doctor --skip-network && alexi chat ...` without accidentally short-circuiting on a benign missing-git warning on a minimal container.
+- **Singleton with explicit reset.** `getDoctor()` + `resetDoctor()` mirrors the pattern used by `getPermissionManager()` / `resetPermissionManager()`. Tests that mutate the service's internal check list MUST call `resetDoctor()` in `afterEach` so state does not leak across cases.
+
+See [docs/API.md — `doctor` command](API.md#doctor), [docs/TESTING.md — Testing the `doctor` command](TESTING.md#testing-the-doctor-command-srcdoctorindexts-srcclicommandsdoctorts), and [docs/CONTRIBUTING.md — Doctor Command](CONTRIBUTING.md#doctor-command-srcdoctorindexts).
+
 ## Permission Edit History Diagram
 
 The [`PermissionProvenance` edit history tracking](#) introduced in commit `3acad684` records an append-only audit trail of post-creation edits to a `PermissionRule`. The flow a provenance snapshot takes through `appendEditHistory` is:

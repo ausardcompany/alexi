@@ -31,8 +31,10 @@ This document provides comprehensive testing guidelines for Alexi, including tes
   - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
   - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
 - [Testing permission edit history tracking (`src/permission/provenance.ts`, issue #2085)](#testing-permission-edit-history-tracking-srcpermissionprovenancets-issue-2085)
+- [Testing the todowrite scheduled-todo promotion hook (`src/tool/tools/todowrite.ts`)](#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets)
 - [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
+- [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -12723,6 +12725,118 @@ describe('PermissionAllowlist.exceptions (2026-10-20 sync)', () => {
 
 The allowlist tests must NOT reach for a global `PermissionManager` — the helpers are deliberately pure, and injecting a manager would couple the regression suite to unrelated state. Fixtures are plain `PermissionRule` arrays constructed inline.
 
+## Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)
+
+Added in commit `85ffc171 test(agent): audit subagent tool allowlist inheritance (#2104)`. The 233-line suite is a **verification-only regression suite** (see [docs/CONTRIBUTING.md — Verification-only regression suites](CONTRIBUTING.md#verification-only-regression-suites-lock-in-a-contract-with-tests--inline-jsdoc)): no new runtime behaviour, just four `describe` blocks that pin the current behaviour of `deriveSubagentSessionPermission` and `TaskTool.buildSubagentConfig` so a future refactor cannot silently reintroduce the Kilocode PR #15254 bug.
+
+### What the suite audits
+
+Kilocode PR #15254 (2026-10-19) fixed a bug where a parent-session edit allowlist written as `[deny *, allow <path>]` was flattened into a blanket deny on every delegated subagent. The flatten dropped the subsequent path-specific allow(s) from the subagent's ruleset, so `write` / `edit` / `apply_patch` / `multiedit` / `patch` all disappeared from the subagent's tool surface even though the parent could still edit the narrowed paths. Alexi fixes this at `src/agent/subagent-permissions.ts:209-222` via an `editAllowlistBaselines: Set<PermissionRule>` filter (see `PermissionAllowlist.exceptions` / `.catchAll` in `src/permission/allowlist.ts`), and the suite guarantees that filter never regresses.
+
+### Four regression contracts, pinned individually
+
+1. **Allowlist baseline is dropped, path allow is dropped, no synthetic deny appears.** Parametrised across the full `EDIT_PERMISSION_NAMES` list (`['edit', 'write', 'multiedit', 'apply_patch', 'patch']`) so adding a new edit-family name to `src/agent/subagent-permissions.ts:43` requires a matching test entry — a silent omission would otherwise narrow coverage without failing anything.
+
+   ```typescript
+   for (const tool of ['edit', 'write', 'multiedit', 'apply_patch', 'patch'] as const) {
+     it(`parent catch-all deny + path allow for '${tool}' is dropped from subagent ruleset`, () => {
+       const subagent = makeAgent();
+       const parentSessionPermission = allowlistBaseline(tool, 'candidate/**/*.md');
+
+       const result = deriveSubagentSessionPermission({
+         parentSessionPermission,
+         parentAgent: undefined,
+         subagent,
+       });
+
+       expect(result.find((r) => r.id === `parent-${tool}-baseline-deny`)).toBeUndefined();
+       expect(result.find((r) => r.id === `parent-${tool}-path-allow`)).toBeUndefined();
+       expect(hasDenyFor(result, tool)).toBe(false);
+     });
+   }
+   ```
+
+2. **End-to-end through `TaskTool.buildSubagentConfig`.** Equivalent customer scenario from Kilocode PR #15254: a primary delegates to a subagent whose task invocation lists `allowedTools: ['read', 'edit', 'write']`. The derived `config.permission` must NOT contain a tool-level deny for `edit` or `write`, and the baseline rule object must NOT be propagated by identity.
+
+   ```typescript
+   const config = TaskTool.buildSubagentConfig(context, subagent, {
+     parentAgent,
+     parentSessionPermission,
+     allowedTools: ['read', 'edit', 'write'],
+   });
+
+   expect(hasDenyFor(config.permission, 'edit')).toBe(false);
+   expect(hasDenyFor(config.permission, 'write')).toBe(false);
+   expect(config.permission.find((r) => r.id === 'parent-edit-baseline-deny')).toBeUndefined();
+   expect(config.permission.find((r) => r.id === 'parent-edit-path-allow')).toBeUndefined();
+   ```
+
+3. **True blanket deny still propagates (regression guard the other way).** The fix only unflattens true allowlist baselines (`deny + narrowing allow`). Two sibling cases pin this:
+   - A parent with ONLY `{ tools: ['edit'], paths: ['*'], decision: 'deny' }` and no narrowing allow MUST still forward the deny to the subagent verbatim.
+   - A parent catch-all deny followed by a path-specific DENY (not allow) is just two denies in a row — the baseline must still survive. A regression that over-eagerly stripped every catch-all deny would trip the latter case loudly.
+
+4. **Parent approvals are never forwarded (cline #14225 contract).** A parent `allow write` on `src/**` does NOT surface to the subagent even when the path is scoped; because `write` is not on the test's `allowedTools: ['read']`, derivation must additionally add an explicit `deny write` so the subagent fails closed. This closes the gap where a subagent could silently inherit a `write` approval the parent negotiated interactively.
+
+### Mixed-shape test (allowlist baseline alongside unrelated denies)
+
+The final `describe` block seeds a parent ruleset with the allowlist baseline AND an unrelated secrets-deny:
+
+```typescript
+const parentSessionPermission: PermissionRule[] = [
+  ...allowlistBaseline('edit', 'src/**'),
+  {
+    id: 'parent-deny-secrets',
+    paths: ['**/.env'],
+    decision: 'deny',
+    priority: 70,
+  },
+];
+```
+
+Asserts that the derived subagent ruleset drops the edit baseline (`parent-edit-baseline-deny` is `undefined`) while preserving the secrets deny (`parent-deny-secrets` is `defined`). Without this test, a regression that stripped every parent deny — not just allowlist baselines — would pass the parametrised block above but silently remove unrelated denies that the subagent genuinely needs as ceilings.
+
+### Fixture helpers (reusable across future suites)
+
+```typescript
+function makeAgent(overrides: Partial<Agent> = {}): Agent {
+  return {
+    id: 'code',
+    name: 'Code Agent',
+    description: 'test stub',
+    mode: 'all',
+    systemPrompt: 'stub',
+    canUseTool: () => true,
+    ...overrides,
+  };
+}
+
+function hasDenyFor(rules: PermissionRule[], tool: string): boolean {
+  return rules.some((r) => r.decision === 'deny' && r.tools?.includes(tool));
+}
+
+function allowlistBaseline(tool: string, allowedPath: string): PermissionRule[] {
+  return [
+    { id: `parent-${tool}-baseline-deny`, tools: [tool], paths: ['*'], decision: 'deny', priority: 50 },
+    { id: `parent-${tool}-path-allow`, tools: [tool], paths: [allowedPath], decision: 'allow', priority: 60 },
+  ];
+}
+```
+
+### Patterns worth internalising
+
+1. **Audit against a specific upstream bug, cite it in the module docblock.** The suite's file-level docblock names Kilocode PR #15254, the audit date (2026-10-19), and the companion research file (`.github/research/subagent-inheritance-audit.md`). When a future regression trips the suite, the failing module docblock is enough to locate the originating bug class in minutes — no bisecting required.
+2. **Parametrise across `EDIT_PERMISSION_NAMES` with `for ... of` + `it(...)`, not `it.each`.** The `for` loop is explicit about which name is being audited and keeps the test name formatted with backticks so a failing assertion in CI shows `parent catch-all deny + path allow for 'apply_patch' is dropped from subagent ruleset` — unambiguous for the on-call reader.
+3. **Assert BOTH the baseline rule's absence AND the path-allow rule's absence.** The two drops happen through two independent code paths (the baseline is filtered via `editAllowlistBaselines`, the path-specific allow is filtered via the generic `rule.decision === 'deny' || external_directory` predicate). Pinning both catches a regression that broke exactly one of them.
+4. **Assert `hasDenyFor(result, tool) === false` in addition to the id-level drops.** Even if a refactor accidentally reintroduced the baseline flatten but under a NEW rule id (`subagent-forced-deny-${tool}`), the id-level assertions would silently pass while the tool-level assertion would fire. Belt-and-braces coverage against renames.
+5. **Keep the subagent fixture `canUseTool: () => true`.** The subagent's own `canUseTool` is deliberately permissive so the test exercises only the parent-side filtering logic. A test that gave the subagent restrictive `tools: [...]` would conflate parent-filter regressions with subagent-config regressions, making a failure harder to interpret.
+6. **Do NOT run this suite against a real `PermissionManager` singleton.** The helpers are pure (`deriveSubagentSessionPermission` is a pure function; `TaskTool.buildSubagentConfig` takes an explicit `parentSessionPermission` option), so the suite can run in parallel across workers without touching the global manager. Reaching for `getPermissionManager()` here would couple the audit to unrelated state and cost deterministic reproducibility.
+
+### Related suites
+
+- `tests/agent/subagent-permissions.test.ts` (if present) covers the broader `deriveSubagentSessionPermission` surface including the explore agent's `bashRules` plumbing.
+- Permission allowlist semantics are exercised directly in [Testing the Permission Allowlist](#testing-the-permission-allowlist-srcpermissionallowlistts-2026-10-20-sync).
+- `tests/permission/task-approval-boundary.test.ts` covers the task-tool approval boundary at the permission-manager level.
+
 ## Testing the `experimental.todo` flag (`src/config/userConfig.ts`, 2026-10-20 sync)
 
 The `experimental.todo` getter / setter writes `~/.alexi/config.json`. Tests that exercise it must redirect the config path to a temp directory to stay parallel-safe:
@@ -13091,3 +13205,264 @@ describe('RateLimitError normalisation', () => {
 ```
 
 The retry driver (`retryWithRateLimit`) consumes `retryAfterSeconds` via `getRetryAfterMs` — write the driver-interaction test under `tests/core/retryWithRateLimit.test.ts`, not next to the error class, so the test file stays focused on one concern.
+
+## Testing the `doctor` command (`src/doctor/index.ts`, `src/cli/commands/doctor.ts`)
+
+Two test suites cover the health-check surface introduced in commit `1f313d00`:
+
+- `tests/doctor/index.test.ts` (328 lines) — exercises the `DoctorService` directly: individual check behaviour, `runAll` aggregation, `--skip-network` and `--fix` plumbing, the stable JSON shape, both report formatters, and the `getDoctor()` / `resetDoctor()` singleton contract.
+- `tests/cli/commands/doctor.test.ts` (139 lines) — exercises the Commander wiring: flag parsing, output routing (`--json` vs `--verbose` vs default), `runAll` option plumbing, and the exit-code contract.
+
+### Service-level test strategy
+
+The service tests drive the real `DoctorService` without mocking the underlying modules. Isolation comes from redirecting `HOME` and clearing the env vars the checks read:
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { DoctorService, resetDoctor, getDoctor } from '../../src/doctor/index.js';
+
+describe('DoctorService', () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let originalEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    // Redirect HOME to a temp dir so sessions / mcp paths do not touch
+    // the developer's real ~/.alexi during the test.
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-doctor-test-'));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+
+    // Snapshot env vars the checks look at so afterEach can restore them.
+    originalEnv = {
+      AICORE_SERVICE_KEY: process.env.AICORE_SERVICE_KEY,
+      SAP_PROXY_BASE_URL: process.env.SAP_PROXY_BASE_URL,
+      SAP_PROXY_API_KEY: process.env.SAP_PROXY_API_KEY,
+      DEFAULT_MODEL: process.env.DEFAULT_MODEL,
+      AICORE_MODEL: process.env.AICORE_MODEL,
+    };
+    delete process.env.AICORE_SERVICE_KEY;
+    delete process.env.SAP_PROXY_BASE_URL;
+    delete process.env.SAP_PROXY_API_KEY;
+    delete process.env.DEFAULT_MODEL;
+    delete process.env.AICORE_MODEL;
+
+    resetDoctor();
+  });
+
+  afterEach(() => {
+    // Restore env + HOME, then wipe the temp dir.
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    try {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    } catch {
+      // Best effort — nothing to assert if cleanup fails.
+    }
+    resetDoctor();
+  });
+});
+```
+
+The `HOME` redirection is load-bearing: `src/doctor/index.ts` exposes `configDir()`, `mcpConfigFile()`, and `sessionsDir()` as function-scoped helpers that re-read `os.homedir()` on every call precisely so this per-test redirection works. If the module ever reverts to module-level `const` paths, every test in this suite will silently touch the developer's real `~/.alexi/` — pin the dynamic resolution contract explicitly.
+
+### What the service suite pins
+
+| Case | Contract pinned |
+|------|-----------------|
+| `listChecks exposes all six required check categories` | The registered check array covers env / config / MCP / routing / tools / permissions / network ids; a refactor that renames or drops a check surfaces here. |
+| `env-sap-aicore fails when neither AICORE_SERVICE_KEY nor SAP_PROXY_BASE_URL is set` | Missing credential short-circuits with `fail` + `fix` hint. |
+| `env-sap-aicore passes when AICORE_SERVICE_KEY is valid JSON` | Happy path — JSON.parse succeeds. |
+| `env-sap-aicore fails when AICORE_SERVICE_KEY is set but malformed JSON` | Error message matches `/not valid JSON/` so the operator can disambiguate "unset" from "corrupt". |
+| `env-sap-aicore passes when SAP_PROXY_BASE_URL is a valid URL` | Proxy mode works without a service key. |
+| `routing-config warns when no routing config is present` | Missing config is a `warn`, not a `fail` — defaults are used. The test chdirs into a temp dir so none of the three search paths resolve. |
+| `routing-config fails when routing config is malformed JSON` | Broken JSON surfaces as `fail`. |
+| `routing-config passes when routing config has required shape` | A `{ models: [], rules: [] }` payload is accepted. |
+| `config-dir warns when ~/.alexi/ is missing and --fix is not set` | Default is `warn` with a fix hint mentioning `--fix`. The temp `HOME` is empty on entry so this is the natural state. |
+| `config-dir creates ~/.alexi/ when --fix is set` | The `--fix` plumbing from CLI → service → check is the single auto-repair path today; a regression here means `--fix` silently became a no-op. |
+| `config-dir passes when ~/.alexi/ already exists and is writable` | Writable-probe branch. |
+| `mcp-config warns when the MCP config file is missing` | Absent config is non-fatal. |
+| `mcp-config fails when the MCP config file is malformed JSON` | Broken JSON surfaces as `fail`. |
+| `mcp-config passes when the MCP config has valid shape` | A `{ version: 1, servers: [] }` payload is accepted. |
+| `tool-registry loads the tool registry and reports a non-zero tool count` | The dynamic import path (`src/tool/tools/index.js` + `src/tool/index.js`) works in-process. `['pass', 'warn']` is accepted because the registry's exact count depends on build state. |
+| `permissions passes when permission module exports validate default rules` | `PermissionRuleSchema.safeParse` accepts every entry in `defaultRules`; the message matches `/default rules/`. |
+| `runAll aggregates all checks with a summary` | `results.length >= 10` AND `passed + warned + failed === results.length`. Guards against the aggregator losing a row. |
+| `runAll skips network checks when skipNetwork is true` | `network-sap` row has message `/Skipped/`. The row is still present, just degraded — JSON consumers can trust `.checks[].id` membership. |
+| `formatJson produces a stable JSON shape with overall status` | `version === 1`, `overall ∈ {pass, warn, fail}`, every `.checks[].id` is a string, and the per-row count matches `results.length`. |
+| `formatJson reports overall=fail when any check fails` | With no credentials, `env-sap-aicore` fails, so `.overall === 'fail'`. Pins the overall-status derivation. |
+| `formatReport renders a colored report with a Summary section` | Contains `Alexi` and `Summary`. |
+| `formatReportPlain is ANSI-free` | Does NOT contain `\u001b[`. Guards against a leak from the coloured formatter into the default path. |
+| `getDoctor() returns the same instance until resetDoctor() is called` | Singleton semantics — tests that mutate the service must reset in `afterEach`. |
+| `runCheck returns fail for an unknown id` | Status is `fail`, message matches `/not found/`; the fallback never throws. |
+
+### CLI-level test strategy
+
+The CLI tests mock `getDoctor()` with `vi.hoisted` so the harness never pays for the real check sweep, and drives the registered subcommand via `program.parseAsync(['node', 'alexi', 'doctor', ...])`:
+
+```typescript
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
+
+const { runAllMock, getSummaryMock, formatJsonMock, formatReportMock, formatReportPlainMock } =
+  vi.hoisted(() => ({
+    runAllMock: vi.fn(),
+    getSummaryMock: vi.fn(),
+    formatJsonMock: vi.fn(),
+    formatReportMock: vi.fn(),
+    formatReportPlainMock: vi.fn(),
+  }));
+
+vi.mock('../../../src/doctor/index.js', () => ({
+  getDoctor: () => ({
+    runAll: runAllMock,
+    getSummary: getSummaryMock,
+    formatJson: formatJsonMock,
+    formatReport: formatReportMock,
+    formatReportPlain: formatReportPlainMock,
+  }),
+}));
+
+import { registerDoctorCommand } from '../../../src/cli/commands/doctor.js';
+
+async function runDoctorCommand(argv: string[]): Promise<Captured> {
+  const stdoutChunks: string[] = [];
+  const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((
+    chunk: string | Uint8Array
+  ) => {
+    stdoutChunks.push(typeof chunk === 'string' ? chunk : String(chunk));
+    return true;
+  }) as never);
+
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+
+  const program = new Command();
+  program.exitOverride();
+  registerDoctorCommand(program);
+
+  try {
+    await program.parseAsync(['node', 'alexi', 'doctor', ...argv]);
+  } finally {
+    outSpy.mockRestore();
+  }
+
+  const exitCode = process.exitCode;
+  process.exitCode = previousExitCode;
+
+  return { stdout: stdoutChunks.join(''), exitCode };
+}
+```
+
+### What the CLI suite pins
+
+| Case | Contract pinned |
+|------|-----------------|
+| `runs all checks and emits plain-text report by default` | `runAllMock` is called with `{ skipNetwork: undefined, fix: undefined }`; `formatReportPlain` is invoked and `formatReport` (coloured) is NOT; stdout contains the plain report; exit code is `undefined`. |
+| `emits colored verbose report with --verbose` | `formatReport` is invoked; `formatReportPlain` is NOT; stdout contains the verbose report. Guards against a swapped branch. |
+| `emits JSON with --json` | `formatJson` is invoked; stdout contains the serialised payload. |
+| `passes --fix through to runAll` | `runAllMock` receives `expect.objectContaining({ fix: true })`. Pins the `--fix` plumbing from CLI → service. |
+| `passes --skip-network through to runAll` | `runAllMock` receives `expect.objectContaining({ skipNetwork: true })`. |
+| `exits with code 1 when any check fails` | `process.exitCode === 1` when `getSummary` reports `failed: 1`. |
+| `exits with no error code when only warnings are present` | `process.exitCode === undefined` when `failed: 0` and `warned: 1`. Warnings do NOT raise the exit code — pins the "warn is still a passing CI gate" contract. |
+
+### Patterns worth internalising
+
+1. **Redirect `HOME`, do not mock the filesystem.** The doctor module uses `fs.*` directly. Mocking `fs` would be invasive and would leak into every other dynamic-import check (tool registry, permissions, MCP). Redirecting `HOME` to a temp dir makes the real filesystem calls run against a scratch tree instead. The three dynamic-resolver helpers (`configDir()`, `mcpConfigFile()`, `sessionsDir()`) exist precisely so this works.
+2. **Snapshot and clear env vars in `beforeEach`.** The sweep reads `AICORE_SERVICE_KEY`, `SAP_PROXY_BASE_URL`, `SAP_PROXY_API_KEY`, `DEFAULT_MODEL`, `AICORE_MODEL`. A developer with any of these set in their shell would see different results between the test suite and CI; the snapshot-and-clear pattern makes the empty-env branch the deterministic default.
+3. **Call `resetDoctor()` in both `beforeEach` and `afterEach`.** The singleton is lazy, so a mutating test in one suite can leak state into another. Resetting on both ends is cheap and defeats order-dependent flakes.
+4. **Mock at the module boundary the system under test imports.** `tests/cli/commands/doctor.test.ts` mocks `../../../src/doctor/index.js`, not individual check modules. The CLI test suite's job is flag parsing + output routing + exit-code contract — the semantic validation of individual checks belongs in the service suite.
+5. **Isolate `process.exitCode` across runs.** The CLI harness saves `previousExitCode` before each case and restores it after; without this, a failing-doctor case would leak `process.exitCode = 1` into unrelated cases and make them look broken.
+6. **Use `expect.objectContaining` for pass-through assertions.** `runAllMock.toHaveBeenCalledWith(expect.objectContaining({ fix: true }))` catches the `--fix` plumbing without pinning the exact option shape, so adding a new `DoctorOptions` field (e.g. `verbose`) does not force every option-plumbing test to be updated.
+7. **Accept `['pass', 'warn']` for environment-dependent checks.** The `tool-registry` test uses `expect(['pass', 'warn']).toContain(result.status)` because the dynamic import may surface a different count depending on build state. A test that pins `pass` here would flake on fresh clones; a test that pins `warn` would miss a regression where the registry failed to load entirely. The accepted-set pattern is the right granularity for inherently non-deterministic checks.
+
+## Testing the todowrite scheduled-todo promotion hook (`src/tool/tools/todowrite.ts`)
+
+Introduced by commit `5ddc600d feat(tools): promote scheduled todos to task scheduler`. The `todowrite` tool now inspects each submitted `Todo` for an optional `schedule` field and, when present, promotes it into a durable `ScheduledTask` on the process-wide scheduler exposed by `src/core/task-scheduler.ts`. The promotion path has three load-bearing invariants that the regression suite in `tests/tool/tools/todowrite-schedule.test.ts` pins:
+
+1. **Scheduled todos are promoted; un-scheduled todos are left alone.** A todo with `schedule: "in 5 minutes"` ends up in `scheduler.getTasks()` with `nextRun ≈ now + 5min`. A todo without a `schedule` field never touches the scheduler, so plain checkpointing calls do not accidentally mint pending tasks.
+2. **`workspaceId` is auto-populated from the `ToolContext`.** When the agent did not set it, the tool falls back to `context.sessionId` first, then `context.workdir`, then the literal `'default'`. An explicit `workspaceId` on the todo is preserved verbatim — the context fallback never overrides an agent-supplied value.
+3. **A failed promotion does NOT abort the `todowrite` call.** An unsupported schedule format (`"sometime soon"`), a save error, or an unregistered workspace must surface as a `logger.warn` line while the surrounding `todowrite` call still updates the global todo list and returns `{ success: true, data: { totalCount, pendingCount, completedCount } }`.
+
+### Test setup
+
+Each test gets a fresh scheduler pointed at a `tmpdir`-backed `tasks.json` so persisted state does not leak across cases, and the module-level `currentTodos` array in `src/tool/tools/todowrite.ts` is reset in `afterEach` via `clearTodos()`:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+
+vi.mock('../../../src/tool/index.js', async () => {
+  const actual = await vi.importActual('../../../src/tool/index.js');
+  return {
+    ...actual,
+    defineTool: (def: unknown) => {
+      const d = def as { execute: (...args: unknown[]) => unknown; name: string };
+      return {
+        ...d,
+        execute: d.execute,
+        executeUnsafe: d.execute,
+        toFunctionSchema: () => ({ name: d.name, description: '', parameters: {} }),
+      };
+    },
+  };
+});
+
+import { todowriteTool, clearTodos } from '../../../src/tool/tools/todowrite.js';
+import {
+  getTaskScheduler,
+  resetTaskScheduler,
+  parseSchedule,
+} from '../../../src/core/task-scheduler.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+let tmpDir: string;
+let tasksFile: string;
+
+const context: ToolContext = {
+  workdir: process.cwd(),
+  sessionId: 'test-session',
+};
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-todowrite-schedule-'));
+  tasksFile = path.join(tmpDir, 'tasks.json');
+  resetTaskScheduler();
+  getTaskScheduler({ tasksFile, checkIntervalMs: 60_000 });
+});
+
+afterEach(() => {
+  resetTaskScheduler();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  clearTodos();
+});
+```
+
+### Minimum coverage
+
+1. **One-shot `"in 5 minutes"` promotes with a correct `nextRun`.** Compare `tasks[0].nextRun` against `parseSchedule('in 5 minutes', Date.now())` with ±10s slack for test overhead so slow CI runs do not flake. Pin `workspaceId === 'test-session'` so the `sessionId` fallback in `resolveWorkspaceId` cannot regress.
+2. **Recurring `"daily at 9am"` promotes with an explicit `workspaceId`.** Set `workspaceId: 'ws-explicit'` on the todo and assert `tasks[0].workspaceId === 'ws-explicit'` — the context fallback must NOT override an agent-supplied value. Also assert `tasks[0].nextRun > Date.now()` so a mis-parsed daily schedule shows up as a flaky test rather than a silent correctness regression.
+3. **A todo without a `schedule` field never touches the scheduler.** `getTaskScheduler().getTasks()` must return an empty array after a `todowrite` call that only submitted plain todos.
+4. **Unsupported schedule formats keep the todowrite call green.** Submit `schedule: 'sometime soon'` and assert `result.success === true` AND `result.data?.totalCount === 1` AND `getTaskScheduler().getTasks().length === 0`. The scheduler must NOT contain a half-promoted task from a `parseSchedule` throw.
+5. **`workdir` fallback for `workspaceId`.** When the `ToolContext` has no `sessionId`, the workspace must fall back to `context.workdir` (not the literal `'default'`, which is reserved for the last-resort case where both are absent).
+
+### Pitfalls
+
+- **Use `clearTodos()` in `afterEach`.** The module-level `currentTodos` array in `src/tool/tools/todowrite.ts` is process-wide. Without the reset, a case that reads `getTodos()` will see entries left behind by the previous test.
+- **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
+- **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
+- **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
