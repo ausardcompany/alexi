@@ -31,6 +31,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
   - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
   - [End-to-end: `AutoCommitManager` honors rules AND scopes](#end-to-end-autocommitmanager-honors-rules-and-scopes)
 - [Testing permission edit history tracking (`src/permission/provenance.ts`, issue #2085)](#testing-permission-edit-history-tracking-srcpermissionprovenancets-issue-2085)
+- [Testing the todowrite scheduled-todo promotion hook (`src/tool/tools/todowrite.ts`)](#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets)
 - [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Best Practices](#best-practices)
@@ -12786,3 +12787,82 @@ describe('SessionLegacy.event', () => {
 ```
 
 When a future shape rename adds a `case` branch, the matching test must assert on both the renamed shape AND the pass-through for every other type — the "ignores the type argument" test above becomes "ignores every type except the newly handled one".
+
+## Testing the todowrite scheduled-todo promotion hook (`src/tool/tools/todowrite.ts`)
+
+Introduced by commit `5ddc600d feat(tools): promote scheduled todos to task scheduler`. The `todowrite` tool now inspects each submitted `Todo` for an optional `schedule` field and, when present, promotes it into a durable `ScheduledTask` on the process-wide scheduler exposed by `src/core/task-scheduler.ts`. The promotion path has three load-bearing invariants that the regression suite in `tests/tool/tools/todowrite-schedule.test.ts` pins:
+
+1. **Scheduled todos are promoted; un-scheduled todos are left alone.** A todo with `schedule: "in 5 minutes"` ends up in `scheduler.getTasks()` with `nextRun ≈ now + 5min`. A todo without a `schedule` field never touches the scheduler, so plain checkpointing calls do not accidentally mint pending tasks.
+2. **`workspaceId` is auto-populated from the `ToolContext`.** When the agent did not set it, the tool falls back to `context.sessionId` first, then `context.workdir`, then the literal `'default'`. An explicit `workspaceId` on the todo is preserved verbatim — the context fallback never overrides an agent-supplied value.
+3. **A failed promotion does NOT abort the `todowrite` call.** An unsupported schedule format (`"sometime soon"`), a save error, or an unregistered workspace must surface as a `logger.warn` line while the surrounding `todowrite` call still updates the global todo list and returns `{ success: true, data: { totalCount, pendingCount, completedCount } }`.
+
+### Test setup
+
+Each test gets a fresh scheduler pointed at a `tmpdir`-backed `tasks.json` so persisted state does not leak across cases, and the module-level `currentTodos` array in `src/tool/tools/todowrite.ts` is reset in `afterEach` via `clearTodos()`:
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+
+vi.mock('../../../src/tool/index.js', async () => {
+  const actual = await vi.importActual('../../../src/tool/index.js');
+  return {
+    ...actual,
+    defineTool: (def: unknown) => {
+      const d = def as { execute: (...args: unknown[]) => unknown; name: string };
+      return {
+        ...d,
+        execute: d.execute,
+        executeUnsafe: d.execute,
+        toFunctionSchema: () => ({ name: d.name, description: '', parameters: {} }),
+      };
+    },
+  };
+});
+
+import { todowriteTool, clearTodos } from '../../../src/tool/tools/todowrite.js';
+import {
+  getTaskScheduler,
+  resetTaskScheduler,
+  parseSchedule,
+} from '../../../src/core/task-scheduler.js';
+import type { ToolContext } from '../../../src/tool/index.js';
+
+let tmpDir: string;
+let tasksFile: string;
+
+const context: ToolContext = {
+  workdir: process.cwd(),
+  sessionId: 'test-session',
+};
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'alexi-todowrite-schedule-'));
+  tasksFile = path.join(tmpDir, 'tasks.json');
+  resetTaskScheduler();
+  getTaskScheduler({ tasksFile, checkIntervalMs: 60_000 });
+});
+
+afterEach(() => {
+  resetTaskScheduler();
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  clearTodos();
+});
+```
+
+### Minimum coverage
+
+1. **One-shot `"in 5 minutes"` promotes with a correct `nextRun`.** Compare `tasks[0].nextRun` against `parseSchedule('in 5 minutes', Date.now())` with ±10s slack for test overhead so slow CI runs do not flake. Pin `workspaceId === 'test-session'` so the `sessionId` fallback in `resolveWorkspaceId` cannot regress.
+2. **Recurring `"daily at 9am"` promotes with an explicit `workspaceId`.** Set `workspaceId: 'ws-explicit'` on the todo and assert `tasks[0].workspaceId === 'ws-explicit'` — the context fallback must NOT override an agent-supplied value. Also assert `tasks[0].nextRun > Date.now()` so a mis-parsed daily schedule shows up as a flaky test rather than a silent correctness regression.
+3. **A todo without a `schedule` field never touches the scheduler.** `getTaskScheduler().getTasks()` must return an empty array after a `todowrite` call that only submitted plain todos.
+4. **Unsupported schedule formats keep the todowrite call green.** Submit `schedule: 'sometime soon'` and assert `result.success === true` AND `result.data?.totalCount === 1` AND `getTaskScheduler().getTasks().length === 0`. The scheduler must NOT contain a half-promoted task from a `parseSchedule` throw.
+5. **`workdir` fallback for `workspaceId`.** When the `ToolContext` has no `sessionId`, the workspace must fall back to `context.workdir` (not the literal `'default'`, which is reserved for the last-resort case where both are absent).
+
+### Pitfalls
+
+- **Use `clearTodos()` in `afterEach`.** The module-level `currentTodos` array in `src/tool/tools/todowrite.ts` is process-wide. Without the reset, a case that reads `getTodos()` will see entries left behind by the previous test.
+- **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
+- **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
+- **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.

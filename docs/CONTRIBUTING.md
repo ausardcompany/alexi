@@ -4239,6 +4239,33 @@ Updated in the 2026-10-20 upstream sync (ports upstream kilocode `KiloTask.refre
 - **`usageDescription` is inlined at the top of the `task` tool's `description`.** The model sees it even without reading `usageDescription` directly; both locations must stay in sync. The upstream kilocode layout keeps the two separate so a parent registry can render `usageDescription` without duplicating the full `description`.
 
 
+## Scheduled-todo promotion (`todowrite` → `TaskScheduler`)
+
+Introduced by commit `5ddc600d feat(tools): promote scheduled todos to task scheduler`. The `todowrite` tool (`src/tool/tools/todowrite.ts`) now bridges the agent-facing todo list to the durable, process-wide `TaskScheduler` singleton in `src/core/task-scheduler.ts` whenever a todo carries an optional `schedule` string.
+
+### Port-maintenance invariants
+
+- **Promotion is best-effort.** The per-todo promotion loop in `todowrite.execute` wraps `promoteTodoToScheduledTask(todo)` in a `try` / `catch` that emits `logger.warn` on failure and continues the surrounding loop. A failed promotion must NEVER abort the `todowrite` call — the todo list is the agent's working memory, and losing it because a scheduler write failed would be a UX regression. Keep this guard. If a future consumer needs to react to promotion failures, surface them through a dedicated status channel (bus event, structured return field) rather than by letting the `todowrite` call fail.
+- **Workspace resolution has a fixed preference order.** `resolveWorkspaceId(context)` returns `context.sessionId` first, then `context.workdir`, then the literal `'default'`. The `sessionId`-first ordering treats session boundaries as the scheduler's isolation unit — reorder this ONLY alongside a matching change in the scheduler's workspace registry semantics, and update the regression suite in `tests/tool/tools/todowrite-schedule.test.ts` in the same commit.
+- **Explicit `workspaceId` on the todo wins.** When the agent sets `todo.workspaceId` directly, the context fallback must NOT override it. The current guard is `if (!todo.workspaceId) { todo.workspaceId = resolveWorkspaceId(context); }`; keep the `!todo.workspaceId` check and do not "normalise" an agent-supplied value through `resolveWorkspaceId`.
+- **Scheduler import stays lazy.** `promoteTodoToScheduledTask` uses `const { getTaskScheduler } = await import('../../core/task-scheduler.js')` so the todowrite tool bundle does not drag the scheduler module and its singleton into every registry build. Do NOT convert this to a top-level `import` — the scheduler owns persistent file I/O that call sites which only ever submit plain todos should not pay for.
+- **Approval stays explicit.** `promoteTodoToScheduledTask` sets `approved: false` on the inserted `ScheduledTask`. The scheduler's `checkDueTasks` sweep refuses to execute a task until `requestTaskApproval(workspaceId)` has been called for its workspace. Do NOT auto-approve on promotion — a scheduled todo must not be able to auto-execute untrusted code just by appearing in the list.
+- **`registerWorkspace` is idempotent and on-demand.** Promotion calls `scheduler.registerWorkspace(todo.workspaceId)` before `scheduleTask`, so a fresh workspace does not throw `"not registered"` on first use. Register unconditionally — the scheduler guards against duplicate registration internally and the extra call is cheap.
+- **`parseSchedule` throws on unsupported formats.** The scheduler's `scheduleTask` recomputes `nextRun` from the schedule string, so a bad format is caught at insertion time rather than at execution time. The `todowrite` layer catches that throw and converts it to a `logger.warn`. Do NOT swallow the throw inside `scheduleTask` or `parseSchedule` — the loud failure is what keeps `tasks.json` free of half-promoted entries.
+- **Both new `TodoSchema` fields are optional.** `schedule` and `workspaceId` are `z.string().optional()`. Existing agent prompts that submit the pre-sync shape (`content` / `status` / `priority` only) continue to parse. If a future refactor makes `workspaceId` mandatory for scheduled todos at the schema level, pair it with a model-prompt update AND a migration path for any persisted agent memory.
+
+### What a new schedule format needs
+
+If you extend `parseSchedule` (e.g. add `"weekly on Monday at 9am"`):
+
+1. Extend the parser in `src/core/task-scheduler.ts` and the `isRecurring` predicate so the one-shot vs. recurring split stays correct for the new form.
+2. Update the human-readable description on `TodoSchema.schedule` in `src/tool/tools/todowrite.ts` so the model sees the supported syntax.
+3. Add a regression case to `tests/tool/tools/todowrite-schedule.test.ts` that submits the new format via `todowrite` AND asserts both `nextRun > now` and (for recurring forms) that the task stays `pending` after `checkDueTasks` instead of flipping to `completed`.
+4. If the new form needs a new fallback (e.g. a per-schedule default time), do NOT put it in `resolveWorkspaceId` — that helper is workspace-only. Add a dedicated helper next to `parseSchedule`.
+
+See [docs/TESTING.md — Testing the todowrite scheduled-todo promotion hook](TESTING.md#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets) for the regression surface.
+
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
