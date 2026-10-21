@@ -2568,6 +2568,15 @@ export type ModelCapability = 'image-generation' | 'tools' | 'embeddings';
 export interface OrchestrationModelMetadata {
   /** Capability tags advertised by the model. Missing = unknown. */
   capabilities?: ModelCapability[];
+  /**
+   * Marks an entry as "free" / unlicensed. Honoured by
+   * {@link filterFreeModels} (see modelCatalog) via the
+   * `ALEXI_DISABLE_FREE_MODELS` environment variable. SAP AI Core
+   * deployments are enterprise-licensed, so this is effectively a
+   * no-op for the SAP catalog but keeps the shape compatible with the
+   * upstream opencode port.
+   */
+  free?: boolean;
 }
 
 /**
