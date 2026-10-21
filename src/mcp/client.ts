@@ -613,13 +613,47 @@ function formatTimeoutError(
 }
 
 /**
+ * MIME types the model-request layer currently accepts as image inputs.
+ * SAP AI Core (and the orchestration service in particular) rejects
+ * arbitrary media types with a 400/422 before the request even reaches
+ * the model, so we filter unsupported media out of tool outputs here
+ * instead of letting the provider explode mid-stream.
+ *
+ * Ports upstream commit `94bc566` — keep unsupported MCP media out of
+ * tool attachments.
+ */
+const SUPPORTED_IMAGE_MIME = new Set<string>([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
+
+/**
+ * Return true when a given image MIME type is acceptable to attach to a
+ * tool output. Exported so other MCP code paths that compose
+ * multi-part tool results can gate on the same list.
+ */
+export function isSupportedImageMime(mimeType: string | undefined): boolean {
+  if (!mimeType) {
+    return false;
+  }
+  return SUPPORTED_IMAGE_MIME.has(mimeType);
+}
+
+/**
  * Format a single MCP content part into a string suitable for the model.
  *
  * - `text` parts pass through their text verbatim.
- * - `image` parts render as `[image: <mime>, <bytes> bytes omitted]` so the
- *   model knows an image was returned without flooding context with base64.
+ * - `image` parts with a supported MIME render as
+ *   `[image: <mime>, <bytes> bytes omitted]` so the model knows an image
+ *   was returned without flooding context with base64. Images with an
+ *   unsupported MIME render as `[omitted unsupported image: <mime>]` —
+ *   see {@link SUPPORTED_IMAGE_MIME} and upstream commit `94bc566`.
  * - `resource` parts render as `[resource: <uri>]` so the model can reference
- *   the file/URI that was returned.
+ *   the file/URI that was returned. Non-text, non-image resources are
+ *   also omitted with a placeholder so the provider does not reject the
+ *   whole request.
  * - Any other type falls back to `JSON.stringify(part)` to avoid silent loss.
  */
 export function formatContentPart(part: unknown): string {
@@ -629,18 +663,30 @@ export function formatContentPart(part: unknown): string {
     mimeType?: string;
     data?: string;
     uri?: string;
-    resource?: { uri?: string };
+    resource?: { uri?: string; mimeType?: string; text?: string };
   };
   switch (p.type) {
     case 'text':
       return typeof p.text === 'string' ? p.text : '';
     case 'image': {
       const mime = p.mimeType ?? 'unknown';
+      if (!isSupportedImageMime(p.mimeType)) {
+        return `[omitted unsupported image: ${mime}]`;
+      }
       const bytes = typeof p.data === 'string' ? Math.floor((p.data.length * 3) / 4) : 0;
       return `[image: ${mime}, ${bytes} bytes omitted]`;
     }
     case 'resource': {
       const uri = p.resource?.uri ?? p.uri ?? 'unknown';
+      const resourceMime = p.resource?.mimeType;
+      if (resourceMime && resourceMime.startsWith('text/')) {
+        return typeof p.resource?.text === 'string' && p.resource.text.length > 0
+          ? p.resource.text
+          : `[resource: ${uri}]`;
+      }
+      if (resourceMime && !isSupportedImageMime(resourceMime)) {
+        return `[omitted unsupported resource: ${resourceMime} (${uri})]`;
+      }
       return `[resource: ${uri}]`;
     }
     default:

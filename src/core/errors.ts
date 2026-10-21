@@ -40,6 +40,24 @@ export interface RateLimitErrorOptions {
    * retry driver honours this over its default exponential backoff.
    */
   retryAfterSeconds?: number;
+  /**
+   * Retry window in milliseconds — convenience field for provider adapters
+   * that already know the wait in ms (SAP AI Core returns `Retry-After` as
+   * seconds, but proxy providers sometimes forward a parsed `retryAfterMs`).
+   * When both `retryAfterSeconds` and `retryAfterMs` are set, the seconds
+   * field wins (it is the canonical header shape). Ports upstream commit
+   * `80b8762` — forward `retryAfterMs` across provider session errors.
+   */
+  retryAfterMs?: number;
+  /**
+   * Absolute wall-clock instant at which the rate-limit window resets.
+   * When set, `getRetryAfterMs` honours this over the default exponential
+   * backoff. Ports upstream commit `a9fa57b` — typed free-limit error with
+   * reset time.
+   */
+  resetAt?: Date;
+  /** Provider identifier (e.g. `sap-ai-core`) for diagnostics / telemetry. */
+  provider?: string;
   /** Upstream error preserved on `cause`. */
   cause?: unknown;
   /**
@@ -71,6 +89,8 @@ export class RateLimitError extends Error {
   readonly statusCode = 429;
   readonly modelName?: string;
   readonly retryAfterSeconds?: number;
+  readonly resetAt?: Date;
+  readonly provider?: string;
   readonly suggestedAction?: string;
   readonly docsUrl?: string;
 
@@ -86,6 +106,22 @@ export class RateLimitError extends Error {
       options.retryAfterSeconds >= 0
     ) {
       this.retryAfterSeconds = Math.floor(options.retryAfterSeconds);
+    } else if (
+      typeof options.retryAfterMs === 'number' &&
+      Number.isFinite(options.retryAfterMs) &&
+      options.retryAfterMs >= 0
+    ) {
+      // Forward `retryAfterMs` from provider adapters into the canonical
+      // `retryAfterSeconds` field so `getRetryAfterMs` surfaces the same
+      // wait regardless of which shape the provider used. Ports upstream
+      // commit `80b8762`.
+      this.retryAfterSeconds = Math.floor(options.retryAfterMs / 1000);
+    }
+    if (options.resetAt instanceof Date && !Number.isNaN(options.resetAt.getTime())) {
+      this.resetAt = options.resetAt;
+    }
+    if (typeof options.provider === 'string' && options.provider.length > 0) {
+      this.provider = options.provider;
     }
     if (options.suggestedAction !== undefined) {
       this.suggestedAction = options.suggestedAction;

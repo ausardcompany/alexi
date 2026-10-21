@@ -403,14 +403,51 @@ export function getCatalogStatus(): CatalogStatus {
 }
 
 /**
+ * Return true when the operator has asked to hide "free" / unlicensed
+ * models via `ALEXI_DISABLE_FREE_MODELS=1|true`.
+ *
+ * Ports upstream opencode `aadd4d8` (`OPENCODE_DISABLE_FREE_MODELS`). For
+ * SAP AI Core, "free" is interpreted as any catalog entry carrying a
+ * `free` metadata flag or whose id lives under a `free/` prefix — SAP
+ * enterprise deployments are, by definition, not free, so this filter is
+ * a no-op for a typical AI Core catalog.
+ */
+function isFreeModelsDisabled(): boolean {
+  const raw = process.env.ALEXI_DISABLE_FREE_MODELS;
+  if (typeof raw !== 'string') {
+    return false;
+  }
+  const normalised = raw.trim().toLowerCase();
+  return normalised === '1' || normalised === 'true';
+}
+
+/**
+ * Apply the `ALEXI_DISABLE_FREE_MODELS` filter to a catalog slice. Keeps
+ * the catalog itself unchanged — callers that want the hidden list
+ * (TUI model picker, `models` CLI command) opt in by calling this.
+ */
+export function filterFreeModels<T extends { id: string; metadata?: { free?: boolean } }>(
+  models: readonly T[]
+): readonly T[] {
+  if (!isFreeModelsDisabled()) {
+    return models;
+  }
+  return models.filter((m) => !m.metadata?.free && !m.id.startsWith('free/'));
+}
+
+/**
  * All currently known model ids (static + any live models discovered).
  *
  * Always returns the static catalog until the first refresh completes, so
  * callers are never blocked. Live entries appear immediately when the refresh
  * succeeds.
+ *
+ * Honours `ALEXI_DISABLE_FREE_MODELS` — when set, free/unlicensed models
+ * are stripped from the returned list.
  */
 export function getAvailableModels(): readonly string[] {
-  return _state.entries.map((e) => e.id);
+  const filtered = filterFreeModels(_state.entries);
+  return filtered.map((e) => e.id);
 }
 
 /**
