@@ -3142,52 +3142,69 @@ The subagent still fails closed on paths outside the parent's narrowed allow-lis
 
 See [docs/ARCHITECTURE.md — Permission Allowlist Baseline Detection](ARCHITECTURE.md#permission-allowlist-baseline-detection-srcpermissionallowlistts) for the API and the subagent-permission derivation integration.
 
-## `ALEXI_DISABLE_FREE_MODELS` filter
+## `ALEXI_DISABLE_FREE_MODELS`
 
-Introduced in the 2026-10-21 upstream sync (ports upstream opencode commit `aadd4d8` — `OPENCODE_DISABLE_FREE_MODELS`). Hides "free" or unlicensed models from the catalog surfaces that operators and the router consult.
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, autohealing follow-up `f647beb7`, ports upstream opencode `aadd4d8` `OPENCODE_DISABLE_FREE_MODELS`). Hide "free" / unlicensed models from the TUI model picker and the `alexi models` command.
 
-### Enabling
+### Accepted values
 
 ```bash
-# Any of the following enables the filter (case-insensitive, trimmed).
-ALEXI_DISABLE_FREE_MODELS=1 alexi i
-ALEXI_DISABLE_FREE_MODELS=true alexi i
-ALEXI_DISABLE_FREE_MODELS=' TRUE ' alexi i
+# Enable the filter (both equivalent)
+export ALEXI_DISABLE_FREE_MODELS=1
+export ALEXI_DISABLE_FREE_MODELS=true
 
-# Any other value (0, false, empty, non-string, missing) leaves it OFF.
+# Any other value — including unset, empty string, `0`, `false`, `off` — leaves the filter inactive.
 ```
 
-### Which models are filtered
+Parsing is case-insensitive and whitespace-trimmed (`" True "` is accepted). The lookup lives in a private `isFreeModelsDisabled()` helper inside `src/providers/modelCatalog.ts`; callers never read the env var directly.
 
-A catalog entry is considered "free" when EITHER:
+### Which entries are hidden
 
-- `metadata.free === true` on the catalog entry (as declared in `OrchestrationModelMetadata.free`), OR
-- the model id starts with `free/` (prefix match on the raw id).
+The filter drops a catalog entry when EITHER:
 
-### Scope of the filter
+- `metadata.free === true` — the entry's `OrchestrationModelMetadata.free` flag is set, OR
+- `id.startsWith('free/')` — the id lives under a conventional `free/` prefix (compatible with upstream opencode catalogs that mix enterprise and free tiers).
 
-| Surface                       | Honours filter |
-|-------------------------------|----------------|
-| `getAvailableModels()`        | yes            |
-| `getLiveModels()` (via static merge path) | yes (filtered through `getAvailableModels()`) |
-| `getCatalogEntries()`         | **no** — returns the full list |
-| `isAvailableModel(id)`        | **no** — permission / allowlist boundary is unchanged |
-| TUI model picker              | yes (via `getAvailableModels()`) |
-| `alexi models` command        | yes (via `getAvailableModels()`) |
-| Router validation             | yes (via `getAvailableModels()`) |
+For a typical SAP AI Core catalog the filter is a no-op: SAP AI Core deployments are enterprise-licensed, so no entry carries `free: true`. The shape is kept compatible with upstream opencode so a future proxy-provider catalog that aggregates free and enterprise tiers can opt into the same filter without a schema change.
 
-The filter is strictly additive: operators get a smaller picker and a smaller `models` list, but code paths that need to validate against the hard catalog boundary (permission allowlists, provider sanity checks) continue to see every entry.
+### Behaviour
 
-### Typical SAP AI Core deployment
+- `getAvailableModels()` honours the filter (public read path, used by routing and validation).
+- `getCatalogEntries()` is intentionally NOT filtered — callers that want the hidden list (TUI picker, `alexi models` command) opt in by calling `filterFreeModels` explicitly.
+- `getLiveModels()` returns live-only ids and does not consult the filter — a live deployment is, by definition, provisioned under an enterprise tenant.
 
-For a typical enterprise SAP AI Core catalog, the filter is a no-op: SAP deployments are, by definition, not free, so neither the `metadata.free` flag nor the `free/` id prefix matches. The filter exists for parity with the upstream opencode behaviour and for operators who overlay their own catalog with free-tier entries sourced from a secondary provider.
-
-### Programmatic access
+### `OrchestrationModelMetadata.free`
 
 ```typescript
-import { filterFreeModels } from '../providers/modelCatalog.js';
-
-const picker = filterFreeModels(entries);
+// src/providers/sapOrchestration.ts
+export interface OrchestrationModelMetadata {
+  capabilities?: ModelCapability[];
+  free?: boolean;
+}
 ```
 
-Call sites that compose their own catalog slice (custom TUI panel, scripting, agent-manager integrations) can opt in by calling `filterFreeModels` directly. See [docs/PROVIDERS.md — Hiding free models](PROVIDERS.md#hiding-free-models-alexi_disable_free_models) for the provider-layer treatment.
+Missing / `false` is "licensed" (default). See [docs/PROVIDERS.md — Free / unlicensed model filter](PROVIDERS.md#free--unlicensed-model-filter-filterfreemodels) for the full API.
+
+## MCP image / resource MIME allowlist (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566`). SAP AI Core (and the orchestration service in particular) rejects arbitrary media types with a 400/422 before the request reaches the model, so unsupported media is filtered at the MCP content-part formatter.
+
+### Allowlist
+
+| MIME | Behaviour |
+|------|-----------|
+| `image/png` | Attached as `[image: image/png, <bytes> bytes omitted]` |
+| `image/jpeg` | Attached as `[image: image/jpeg, <bytes> bytes omitted]` |
+| `image/gif` | Attached as `[image: image/gif, <bytes> bytes omitted]` |
+| `image/webp` | Attached as `[image: image/webp, <bytes> bytes omitted]` |
+| any other image MIME | Rendered as `[omitted unsupported image: <mime>]` |
+| `text/*` resources | Inlined via `resource.text` when present, else `[resource: <uri>]` |
+| non-image, non-text resources | Rendered as `[omitted unsupported resource: <mime> (<uri>)]` |
+
+The allowlist is deliberately conservative — it mirrors what SAP AI Core Orchestration advertises as a supported media type on the input side. There is no configuration surface to extend it today; the next MIME to flip from omitted-with-placeholder to attached requires both an entry in `SUPPORTED_IMAGE_MIME` AND provider-side confirmation that the orchestration layer will accept the new type.
+
+### Operator-facing impact
+
+An MCP tool that returns, say, a `image/bmp` screenshot will now show up to the model as `[omitted unsupported image: image/bmp]` instead of causing the whole chat turn to fail with an opaque 400 from the SAP AI Core orchestration endpoint. The tool's structured error path and text output are unaffected — only the embedded media attachment is dropped.
+
+See [docs/ARCHITECTURE.md — MCP Tool-Output MIME Filtering](ARCHITECTURE.md#mcp-tool-output-mime-filtering-srcmcpclientts) for the full dispatch flow and [docs/PROVIDERS.md — MCP MIME Allowlist](API.md#mcp-mime-allowlist-srcmcpclientts) for the public API shape.

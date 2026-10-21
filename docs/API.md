@@ -9287,25 +9287,25 @@ export const TaskTool = {
 
 `usageDescription` disambiguates the `task` tool from `agent_manager` in the model's prompt. `refresh(parent, child)` merges a parent session's permission ruleset with a child subagent's derived rules — rules whose identity matches (same `tools`, `paths`, `commands`, `hosts`, `actions`, sorted) are replaced in-place; otherwise the child rule is appended. `decision` and `priority` are intentionally excluded from identity comparison so swapping a `deny` for an `allow` on the same scope replaces rather than duplicates.
 
-## `RateLimitErrorOptions`
+## Rate-Limit Error Shape (`src/core/errors.ts`)
 
-Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `80b8762` and `a9fa57b`). The canonical rate-limit error for the core layer gains three optional fields so provider adapters can forward their native wait representation without lossy conversion.
+Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `80b8762` and `a9fa57b`). The core `RateLimitErrorOptions` interface and `RateLimitError` class — the single source of truth for rate-limit payloads crossing the `src/core` ↔ `src/providers` boundary — gain three fields alongside the existing `retryAfterSeconds` / `modelName` / `suggestedAction` / `docsUrl` / `cause`.
+
+### `RateLimitErrorOptions`
 
 ```typescript
-// src/core/errors.ts
 export interface RateLimitErrorOptions {
   modelName?: string;
   retryAfterSeconds?: number;
   /**
    * Retry window in milliseconds — convenience field for provider adapters
    * that already know the wait in ms. When both `retryAfterSeconds` and
-   * `retryAfterMs` are set, the seconds field wins (canonical HTTP shape).
+   * `retryAfterMs` are set, the seconds field wins (canonical header shape).
    */
   retryAfterMs?: number;
   /**
-   * Absolute wall-clock instant at which the rate-limit window resets.
-   * When set, `getRetryAfterMs` honours this over the default exponential
-   * backoff.
+   * Absolute wall-clock instant at which the rate-limit window resets
+   * (free-tier semantics). Stored only when it is a valid Date.
    */
   resetAt?: Date;
   /** Provider identifier (e.g. `sap-ai-core`) for diagnostics / telemetry. */
@@ -9327,40 +9327,37 @@ export class RateLimitError extends Error {
 }
 ```
 
-Normalisation rules enforced by the constructor:
+### Normalisation rules
 
-- `retryAfterMs` is only applied when `retryAfterSeconds` is unset / invalid, and it is floored into the canonical `retryAfterSeconds` field via `Math.floor(options.retryAfterMs / 1000)` so `computeRateLimitDelay` surfaces the same wait regardless of which shape the provider used.
-- `resetAt` is accepted only as a non-`NaN` `Date` instance; invalid values are silently dropped.
-- `provider` is accepted only as a non-empty string; empty strings and non-string values are dropped so a stray `provider: ''` does not pollute downstream logs.
+- When only `retryAfterMs` is provided, the constructor stores `Math.floor(ms / 1000)` on `retryAfterSeconds` so `getRetryAfterMs()` surfaces the same wait regardless of which shape the adapter used.
+- `resetAt` is stored only when `options.resetAt instanceof Date && !Number.isNaN(options.resetAt.getTime())` — a malformed timestamp from an upstream SDK is silently dropped rather than throwing from the constructor.
+- `provider` is stored only when it is a non-empty string.
+- Structural detection via `isRateLimitError()` is unchanged — it dispatches on `code === 'rate_limit'`, `name === 'RateLimitError'`, or `statusCode === 429`, so cross-module callers that import the class from either path continue to recognise instances identically.
 
-Example — a proxy provider forwarding `retry_after_ms` from an upstream Anthropic-shaped response:
+See [docs/PROVIDERS.md — Rate limit error metadata](PROVIDERS.md#rate-limit-error-metadata-srccoreerrorsts) for the retry-driver interaction.
 
-```typescript
-import { RateLimitError } from '../core/errors.js';
+## Instruction Diff Types (`src/core/instructions.ts`)
 
-throw new RateLimitError('rate limit exceeded', {
-  modelName: 'anthropic--claude-4-sonnet',
-  retryAfterMs: upstream.retry_after_ms,
-  resetAt: upstream.reset_at ? new Date(upstream.reset_at) : undefined,
-  provider: 'sap-ai-core',
-  cause: upstream,
-});
-```
-
-## Instruction Diffing API (`src/core/instructions.ts`)
-
-Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d`). Pure helper that computes the delta between two instruction snapshots so call sites can forward only `added` / `updated` / `removed` entries instead of re-emitting the full set every turn.
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d`). Pure building block for sending only the changed instruction entries on each turn — see [docs/ARCHITECTURE.md — Instruction-Set Diffing](ARCHITECTURE.md#instruction-set-diffing-srccoreinstructionsts) for the end-to-end flow.
 
 ```typescript
-// src/core/instructions.ts
 export interface InstructionEntry {
-  id: string;       // stable across turns
+  /**
+   * Stable, deterministic id — e.g. `mcp:playwright::navigate`,
+   * `skill:code-review`, `reference:AGENTS.md`. MUST be stable across
+   * turns; a UUID regenerated per turn defeats diffing entirely.
+   */
+  id: string;
+  /** Body the model should see for this id. */
   content: string;
 }
 
 export interface InstructionDiff {
+  /** Entries present in `current` but not in `previous`. */
   added: InstructionEntry[];
+  /** Ids present in `previous` but not in `current`. */
   removed: string[];
+  /** Entries present in both but whose content changed. */
   updated: InstructionEntry[];
 }
 
@@ -9372,37 +9369,18 @@ export function diffInstructions(
 export function isEmptyDiff(diff: InstructionDiff): boolean;
 ```
 
-Usage example — an MCP tool-list refresh that forwards only the delta:
+### Guarantees
+
+- Pure function — both inputs are consumed by value, output arrays are freshly allocated.
+- Duplicates in either input are not errors — later entries win in the lookup map, mirroring `new Map(...)` semantics.
+- Output order follows insertion order of `current` for `added` / `updated` and of `previous` for `removed`, which keeps diffs stable across runs and easy to assert in tests.
+- `isEmptyDiff(diff)` is `true` iff `added.length === 0 && removed.length === 0 && updated.length === 0`. Call sites use it to skip the "send instruction update" step entirely when snapshots are identical.
+
+## Session Title Types (`src/core/session/title.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` and `5c52626`). Generates session titles at the cheapest declared variant of the active model with a tightened prompt — see [docs/ARCHITECTURE.md — Session Title Generation](ARCHITECTURE.md#session-title-generation-srccoresessiontitlets) for the end-to-end flow.
 
 ```typescript
-import { diffInstructions, isEmptyDiff } from '../core/instructions.js';
-
-const diff = diffInstructions(previousToolInstructions, currentToolInstructions);
-if (isEmptyDiff(diff)) {
-  return; // snapshots identical, skip the provider round-trip entirely
-}
-await provider.updateInstructions({
-  added: diff.added,
-  updated: diff.updated,
-  removed: diff.removed,
-});
-```
-
-Behavioural contract:
-
-- Pure: both inputs are consumed by value and the output arrays are freshly allocated.
-- Ordering: `added` and `updated` follow insertion order of `current`; `removed` follows insertion order of `previous`.
-- Duplicates: a duplicate `id` in either input is NOT treated as an error — the later entry wins. Callers that need strict-mode behaviour should deduplicate upstream.
-- `isEmptyDiff` returns `true` when all three partitions are empty, so callers can skip the "send update" step entirely.
-
-See [docs/ARCHITECTURE.md — Instruction-Set Diffing](ARCHITECTURE.md#instruction-set-diffing-srccoreinstructionsts) for the design-notes level treatment and the diff-decision flow diagram.
-
-## Session Title API (`src/core/session/title.ts`)
-
-Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` and `5c52626`). Encapsulates the two decisions that drive per-session title cost on SAP AI Core: WHAT prompt to send and WHICH model variant to pick.
-
-```typescript
-// src/core/session/title.ts
 export const TITLE_PROMPT: string;
 
 export interface TitleModelVariant {
@@ -9436,78 +9414,32 @@ export function generateTitle(
 ): Promise<string>;
 ```
 
-Usage example — generate a title for a freshly started session:
+### Behaviour
+
+- `selectTitleVariant` returns the model itself when no variants are declared (caller is already on the smallest known shape, swap is a no-op); otherwise it returns the variant with the lowest `cost.input` (missing cost treated as `Infinity`, so untyped variants fall through to any priced variant).
+- `extractFirstUserText` returns the first non-empty `role === 'user'` message, or `''`. The whole transcript is not forwarded — long sessions would blow the input budget and skew titles toward later tangents.
+- `generateTitle` composes the above and calls `model.generate({ system: TITLE_PROMPT, prompt: userText, maxTokens: 32, temperature: 0.2 })`. Variants delegate back to the parent model's `generate` — the only thing variant selection changes is the id quoted to the provider at call time. The caller is responsible for trimming / fallback behaviour (e.g. use a heuristic slice if the model returns an empty string).
+
+## MCP MIME Allowlist (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566`). SAP AI Core rejects arbitrary media types with a 400/422 before the request even reaches the model, so unsupported media is filtered in the MCP content-part formatter — see [docs/ARCHITECTURE.md — MCP Tool-Output MIME Filtering](ARCHITECTURE.md#mcp-tool-output-mime-filtering-srcmcpclientts) for the end-to-end dispatch.
 
 ```typescript
-import { generateTitle } from '../core/session/title.js';
-
-const title = await generateTitle(session.messages, {
-  id: 'anthropic--claude-4-sonnet',
-  variants: [
-    { id: 'anthropic--claude-4-sonnet', cost: { input: 3.0 } },
-    { id: 'anthropic--claude-4-haiku', cost: { input: 0.25 } }, // cheapest wins
-  ],
-  async generate({ system, prompt, maxTokens, temperature }) {
-    return (await provider.chat({ system, prompt, maxTokens, temperature })).trim();
-  },
-});
-```
-
-Behavioural contract:
-
-- `TITLE_PROMPT` is the tightened system prompt: 3–7 word titles, no quotes, no trailing punctuation, no markdown, no filler nouns ("chat", "conversation", "session").
-- `selectTitleVariant` sorts variants by `cost.input` ascending and returns the cheapest; missing cost metadata sorts last (`Infinity`).
-- `extractFirstUserText` returns the first non-empty user message so the title model does not see the entire transcript.
-- `generateTitle` passes `maxTokens: 32` and `temperature: 0.2` so the title is bounded in length and deterministic enough to re-use between retries.
-- Deferred-attempt gating (debouncing title generation across many quick turns) lives separately in `src/kilocode/session/title.ts`; this module only concerns itself with WHAT and WHICH.
-
-See [docs/ARCHITECTURE.md — Session Title Generation](ARCHITECTURE.md#session-title-generation-srccoresessiontitlets) for the design-notes level treatment.
-
-## MCP Content-Part Format API (`src/mcp/client.ts`)
-
-Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566`). The MIME-filter predicate and the content-part formatter are exported so other MCP code paths that compose multi-part tool results can gate on the same list without duplicating the allowlist.
-
-```typescript
-// src/mcp/client.ts
 export function isSupportedImageMime(mimeType: string | undefined): boolean;
 export function formatContentPart(part: unknown): string;
 ```
 
-Supported image MIME types (hardcoded allowlist):
+The allowlist is `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Missing / `undefined` MIME is treated as unsupported. `formatContentPart` dispatches on `part.type`:
 
-| MIME type   | Supported |
-|-------------|-----------|
-| `image/png` | yes       |
-| `image/jpeg`| yes       |
-| `image/gif` | yes       |
-| `image/webp`| yes       |
-| anything else | no      |
+| `part.type` | Output |
+|-------------|--------|
+| `text` | `part.text` verbatim (or `''`) |
+| `image` with supported MIME | `[image: <mime>, <bytes> bytes omitted]` |
+| `image` with unsupported MIME | `[omitted unsupported image: <mime>]` |
+| `resource` with `text/*` MIME and `text` body | the resource's own `text` content |
+| `resource` with `text/*` MIME and no body | `[resource: <uri>]` |
+| `resource` with unsupported MIME | `[omitted unsupported resource: <mime> (<uri>)]` |
+| `resource` with any other MIME | `[resource: <uri>]` |
+| anything else | `JSON.stringify(part)` |
 
-Rendered placeholders by content-part shape:
-
-| Part                                                         | Rendered as                                             |
-|--------------------------------------------------------------|---------------------------------------------------------|
-| `{ type: 'text', text: 'hello' }`                            | `hello`                                                 |
-| `{ type: 'image', mimeType: 'image/png', data: '…' }`        | `[image: image/png, <bytes> bytes omitted]`             |
-| `{ type: 'image', mimeType: 'image/bmp', data: '…' }`        | `[omitted unsupported image: image/bmp]`                |
-| `{ type: 'resource', resource: { uri, mimeType: 'text/md', text: 'body' } }` | `body` (inlined verbatim)                 |
-| `{ type: 'resource', resource: { uri, mimeType: 'application/pdf' } }` | `[omitted unsupported resource: application/pdf (uri)]` |
-| `{ type: 'resource', resource: { uri } }`                    | `[resource: <uri>]`                                     |
-
-The widened `resource` shape (`{ uri?: string; mimeType?: string; text?: string }`) is read defensively, so pre-existing callers that passed only `{ uri }` continue to work unchanged.
-
-See [docs/ARCHITECTURE.md — MCP MIME-Type Allowlist](ARCHITECTURE.md#mcp-mime-type-allowlist-srcmcpclientts) for the full behavioural table and design notes.
-
-## Direct Agent Selection (`Ctrl+1..9`)
-
-The 2026-10-21 release cycle lands the `Ctrl+1..9` TUI agent-selection shortcut on `master` (PR #2096, feature commit `aff532d3`). The keybinding was documented in the 1.22.51 cycle and is now part of the stable interactive mode surface. The `useKeyboard` hook gains an optional `onJumpToAgent?: (index: number) => void` callback that fires exactly when `key.ctrl === true` and `input` is a single digit `1`..`9`; `AppLayout` wires it to `setAgent(AGENTS[index - 1])` with a transient system message for out-of-range indices.
-
-```typescript
-// src/cli/tui/hooks/useKeyboard.ts
-export interface UseKeyboardOptions {
-  // ...
-  onJumpToAgent?: (index: number) => void;
-}
-```
-
-See [docs/ARCHITECTURE.md — TUI Direct Agent Selection](ARCHITECTURE.md#tui-direct-agent-selection-ctrl1-9) for the full keybinding map and [docs/TESTING.md — Testing the `Ctrl+{1-9}` agent-selection binding](TESTING.md#testing-the-ctrl1-9-agent-selection-binding) for the test harness.
+The embedded `resource` type used by the formatter is widened to `{ uri?: string; mimeType?: string; text?: string }`.

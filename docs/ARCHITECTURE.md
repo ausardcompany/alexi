@@ -9597,30 +9597,20 @@ sequenceDiagram
 
 ## Instruction-Set Diffing (`src/core/instructions.ts`)
 
-Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d` — send only changed entries in instruction updates). The module exposes a pure `diffInstructions(previous, current): InstructionDiff` function so call sites that previously re-emitted the whole system/instruction block (MCP tool-list updates, skill registry refreshes, reference-doc attachments) can forward only the delta.
-
-### Why it matters on SAP AI Core
-
-Every turn's instruction update is billed as input tokens AND is throttled against the deployment's token-per-minute quota. Resending the entire instruction set on each message:
-
-- Wastes input tokens on identical MCP tool descriptions, skill registry entries, and reference docs.
-- Pollutes the model's attention budget with content it has already seen.
-- Causes spurious re-injection of the same block on the model side, which some providers surface as "cache miss" charges.
-
-Diffing the previous and current snapshots and forwarding only the `added` / `updated` / `removed` partitions keeps the per-turn update tight.
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d` — send only changed entries in instruction updates). Resending the full MCP tool-list / skill-registry / reference-doc instruction block on every turn wastes input tokens on SAP AI Core and causes spurious re-injection of identical content on the model side. `src/core/instructions.ts` is the pure building block that call sites wire into their refresh paths to compute only the delta.
 
 ### Shape
 
 ```typescript
 export interface InstructionEntry {
-  id: string;       // stable across turns; a UUID per turn defeats the module
-  content: string;  // the body the model should see for this id
+  id: string;       // stable across turns (e.g. mcp:playwright::navigate)
+  content: string;
 }
 
 export interface InstructionDiff {
-  added: InstructionEntry[];   // in current, not in previous
-  removed: string[];           // in previous, not in current (ids only)
-  updated: InstructionEntry[]; // in both, content changed
+  added: InstructionEntry[];
+  removed: string[];
+  updated: InstructionEntry[];
 }
 
 export function diffInstructions(
@@ -9631,79 +9621,87 @@ export function diffInstructions(
 export function isEmptyDiff(diff: InstructionDiff): boolean;
 ```
 
-### Design notes
-
-- **Pure function.** Both inputs are consumed by value and the output arrays are freshly allocated. `diffInstructions` is a drop-in building block that call sites can combine with their own cache without needing to reason about shared state.
-- **Stable ordering.** `added` and `updated` follow insertion order of `current`; `removed` follows insertion order of `previous`. The ordering is stable across runs, which makes test fixtures and diff logs easy to reason about.
-- **Duplicate ids tolerated.** A duplicate `id` in either input is NOT treated as an error — the later entry wins in the lookup map, mirroring `new Map([[a,1],[a,2]]).get(a) === 2`. Callers that need strict-mode behaviour should deduplicate upstream.
-- **`isEmptyDiff` fast path.** When the previous and current snapshots are identical, the caller can skip the "send instruction update" step entirely rather than send three empty arrays over the wire.
-- **No stored state.** The module does not maintain its own `previous` cache — each caller owns the snapshot it diffs against. This keeps the module composable (one instance per call site, independent lifecycles) and avoids global mutable state in `src/core/`.
-
-### Diff decision flow
+### Flow
 
 ```mermaid
-flowchart TD
-  A[call site: new instruction set assembled] --> B{isEmptyDiff of<br/>diffInstructions prev, curr?}
-  B -->|yes| C[skip provider round-trip<br/>no tokens spent]
-  B -->|no| D[forward added updated removed to provider]
-  D --> E[update cached snapshot = curr]
-  C --> E
+sequenceDiagram
+    participant Caller as Call site (MCP / skill / reference refresh)
+    participant Diff as diffInstructions
+    participant Core as Orchestrator (future wiring)
+    participant Model as SAP AI Core
+
+    Caller->>Caller: build current InstructionEntry[]
+    Caller->>Caller: read previous snapshot (from cache)
+    Caller->>Diff: diffInstructions(previous, current)
+    Diff-->>Caller: { added, removed, updated }
+    alt isEmptyDiff(diff)
+        Caller-->>Caller: skip instruction update (no tokens spent)
+    else
+        Caller->>Core: forward only non-empty partitions
+        Core->>Model: minimal instruction delta
+        Caller->>Caller: persist current as new previous snapshot
+    end
 ```
+
+### Rules
+
+- `id` MUST be stable across turns. A UUID regenerated per turn defeats the whole point of this module — every entry would land in `added` / `removed` and the diff would always be a full resend.
+- Duplicate `id` in either input is NOT an error. The later entry wins in the lookup map, mirroring `new Map([[a, 1], [a, 2]]).get(a) === 2`. Callers that need strict-mode behaviour deduplicate upstream.
+- Output order follows insertion order of `current` for `added` / `updated` and of `previous` for `removed`. Diffs are stable across runs and easy to assert in tests.
+- The module is pure: no provider I/O, no bus event emission, no coupling to `src/mcp/` or `src/skill/`. Wiring lives in each call site so plumbing can land as thin PRs under `src/mcp/instructions-sync.ts`, `src/skill/instructions-sync.ts`, etc.
 
 ## Session Title Generation (`src/core/session/title.ts`)
 
-Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` — tighten session title prompt — and `5c52626` — generate titles at the lowest model variant). The module owns the two decisions that drive per-session title cost on SAP AI Core: WHAT prompt to send to the title model, and WHICH model variant to pick.
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` tighten session title prompt and `5c52626` generate titles at the lowest model variant). Every title call is billed and throttled on SAP AI Core, so generating titles with the cheapest declared variant of the active model and a terser system prompt is a real win on long workloads.
 
-### Why decouple it from `src/providers/`
+### Decoupling
 
-The title generator is deliberately independent of the providers layer. The caller passes a `TitleModel` adapter that knows how to invoke the target provider. This lets:
+The module is deliberately decoupled from `src/providers/`: callers pass a `TitleModel` adapter that knows how to invoke the target provider. The deferred-attempt gating (how long to wait before the first title attempt, retry cadence) lives separately in `src/kilocode/session/title.ts`. This module only decides **what** prompt to send and **which** variant to pick.
 
-- Unit tests mock the generator with a stub model and no provider imports.
-- Non-SAP providers (future proxy adapters, local LLMs) reuse the same prompt and variant-selection logic.
-- Deferred-attempt gating (debouncing title generation across many quick turns) live separately in `src/kilocode/session/title.ts` without crowding the WHAT/WHICH decisions.
+### Flow
 
-### Shape
+```mermaid
+sequenceDiagram
+    participant Session as Session create / rename
+    participant Gen as generateTitle
+    participant Select as selectTitleVariant
+    participant Extract as extractFirstUserText
+    participant Model as TitleModel adapter
+    participant SAP as SAP AI Core
 
-```typescript
-export const TITLE_PROMPT: string; // 3–7 word titles, no markdown, no filler nouns
-
-export interface TitleModelVariant {
-  id: string;
-  cost?: { input?: number }; // per-million-token input cost; cheapest wins
-}
-
-export interface TitleModel {
-  id: string;
-  variants?: readonly TitleModelVariant[];
-  generate: (opts: TitleGenerateOptions) => Promise<string>;
-}
-
-export interface TitleGenerateOptions {
-  system: string;
-  prompt: string;
-  maxTokens: number;   // 32 by default
-  temperature: number; // 0.2 by default
-}
-
-export function selectTitleVariant(model: TitleModel): TitleModel | TitleModelVariant;
-export function extractFirstUserText(messages: readonly TitleMessage[]): string;
-export function generateTitle(
-  messages: readonly TitleMessage[],
-  model: TitleModel
-): Promise<string>;
+    Session->>Gen: generateTitle(messages, model)
+    Gen->>Select: selectTitleVariant(model)
+    Select->>Select: sort variants by cost?.input ascending
+    Select-->>Gen: cheapest variant (or model when no variants)
+    Gen->>Extract: extractFirstUserText(messages)
+    Extract-->>Gen: first non-empty user content, or ''
+    Gen->>Model: generate({ system: TITLE_PROMPT, prompt, maxTokens: 32, temperature: 0.2 })
+    Model->>SAP: invoke cheapest variant id
+    SAP-->>Model: 3-7 word title
+    Model-->>Gen: title string
+    Gen-->>Session: title (caller trims / fallback-slices if empty)
 ```
 
-### Design notes
+### `TITLE_PROMPT` contract
 
-- **Tightened `TITLE_PROMPT`.** The prompt is intentionally terse: titles are 3–7 words, no quotes, no trailing punctuation, no markdown. Filler nouns like "chat", "conversation", and "session" are explicitly forbidden. The reduced system prompt also reduces per-call input tokens.
-- **Cheapest variant wins.** `selectTitleVariant` sorts variants by `cost.input` ascending and returns the first entry. Variants with missing cost metadata sort last (`Infinity`), so a well-known cheap variant is always preferred over an untagged one. When no variants are declared the function returns the model itself — the caller is already on the smallest known shape.
-- **First-user-message only.** `extractFirstUserText` ensures the title model sees only the user's actual request, not the whole transcript. The whole transcript blows the input budget on long sessions AND skews the title toward later tangents.
-- **Max 32 tokens, temperature 0.2.** `generateTitle` passes these to every provider so the title is bounded in length and deterministic enough to re-use between retries.
-- **Variants delegate to the parent model.** `TitleModelVariant` does not carry its own `generate` function; `generateTitle` falls back to the parent model when the selected variant lacks a generator, so the only thing variant selection changes is the `id` quoted to the provider.
+```typescript
+export const TITLE_PROMPT = `Generate a concise 3-7 word title summarizing the user's request.
+Rules:
+- No quotes, no trailing punctuation, no markdown.
+- Prefer imperative or noun phrases.
+- Do NOT include words like "chat", "conversation", "session".`;
+```
 
-## MCP MIME-Type Allowlist (`src/mcp/client.ts`)
+- 3–7 words, imperative or noun phrase, no filler. The forbidden-word rule stops the model from producing "Chat about X" / "Conversation on Y" titles that collapse the entire session list into one visual blob.
+- Reducing the system prompt also reduces per-call input tokens on top of the variant swap.
 
-Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566` — keep unsupported MCP media out of tool attachments). SAP AI Core (and the orchestration service in particular) rejects arbitrary media types with a 400/422 before the request even reaches the model, so unsupported media in MCP tool outputs must be filtered at `formatContentPart` time instead of letting the provider explode mid-stream.
+### Why strip the transcript
+
+`extractFirstUserText` returns only the first non-empty user message. The whole transcript blows the input budget on long sessions AND skews the title toward later tangents (titles are supposed to describe the user's original intent). Callers that want to re-title mid-session should pass only the message slice they want summarised.
+
+## MCP Tool-Output MIME Filtering (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566` — keep unsupported MCP media out of tool attachments). SAP AI Core (and the orchestration service in particular) rejects arbitrary media types with a 400/422 before the request even reaches the model, so unsupported media is now filtered in the MCP content-part formatter instead of being allowed to blow up mid-stream.
 
 ### Allowlist
 
@@ -9718,24 +9716,25 @@ const SUPPORTED_IMAGE_MIME = new Set<string>([
 export function isSupportedImageMime(mimeType: string | undefined): boolean;
 ```
 
-The predicate is exported so other MCP code paths that compose multi-part tool results can gate on the same list — the allowlist exists once, not duplicated per call site.
+Exported so other MCP code paths that compose multi-part tool results can gate on the same list without re-declaring it.
 
-### `formatContentPart` behaviour
+### `formatContentPart` dispatch
 
-| Part type | MIME | Rendered as |
-|-----------|------|-------------|
-| `text`    | n/a  | `part.text` verbatim |
-| `image`   | in allowlist | `[image: <mime>, <bytes> bytes omitted]` |
-| `image`   | NOT in allowlist | `[omitted unsupported image: <mime>]` |
-| `resource` | `text/*` with `resource.text` body | the text body verbatim |
-| `resource` | non-text, NOT in image allowlist | `[omitted unsupported resource: <mime> (<uri>)]` |
-| `resource` | otherwise | `[resource: <uri>]` |
-| anything else | n/a | `JSON.stringify(part)` |
+```mermaid
+flowchart TD
+    Part["MCP content part"] --> Switch{"part.type"}
+    Switch -- "text" --> Verbatim["return part.text (verbatim)"]
+    Switch -- "image" --> ImgMime{"isSupportedImageMime(mimeType)?"}
+    ImgMime -- yes --> ImgOk["return [image: &lt;mime&gt;, &lt;bytes&gt; bytes omitted]"]
+    ImgMime -- no --> ImgOmit["return [omitted unsupported image: &lt;mime&gt;]"]
+    Switch -- "resource" --> ResMime{"mimeType"}
+    ResMime -- "text/*" --> ResText["return resource.text when present,<br/>else [resource: &lt;uri&gt;]"]
+    ResMime -- "image/* unsupported" --> ResOmit["return [omitted unsupported resource: &lt;mime&gt; (&lt;uri&gt;)]"]
+    ResMime -- other / absent --> ResUri["return [resource: &lt;uri&gt;]"]
+    Switch -- "other" --> Fallback["return JSON.stringify(part)"]
+```
 
-### Design notes
+### Resource embed shape
 
-- **Filter at the boundary.** The filter runs when MCP tool output is formatted for the model, not inside each MCP client call, so one bad resource in a multi-part response does not poison the whole response.
-- **Inline text resources.** `text/*` resources with a non-empty `resource.text` body are inlined verbatim rather than rendered as opaque `[resource: <uri>]` placeholders. The content is already available in the tool response, so round-tripping through the URI buys nothing.
-- **Widened resource shape.** The internal `resource` shape widens from `{ uri?: string }` to `{ uri?: string; mimeType?: string; text?: string }` to accept the richer upstream MCP shape without breaking older callers.
-- **No silent drop.** Unsupported media still render a placeholder with the MIME and (where available) the URI so the model can describe what was filtered out — the placeholder keeps the response coherent for the user even though the raw bytes are gone.
+The embedded `resource` field in the formatter's input type was widened to `{ uri?: string; mimeType?: string; text?: string }` so the formatter can inline a `text/*` resource's body directly when the server supplies it. Non-text, non-image resources (e.g. `application/pdf`) render as a placeholder — the model knows the file exists without the orchestration layer rejecting the whole request.
 
