@@ -12901,6 +12901,311 @@ describe('SessionLegacy.event', () => {
 
 When a future shape rename adds a `case` branch, the matching test must assert on both the renamed shape AND the pass-through for every other type — the "ignores the type argument" test above becomes "ignores every type except the newly handled one".
 
+## Testing `diffInstructions` (`src/core/instructions.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d`). The function is pure, so tests do not need provider mocks or temp directories — exercise the three partitions directly, including the stable-order and duplicate-key edge cases.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { diffInstructions, isEmptyDiff } from '../../src/core/instructions.js';
+
+describe('diffInstructions', () => {
+  it('returns empty partitions when snapshots are identical', () => {
+    const snapshot = [{ id: 'a', content: 'x' }];
+    const diff = diffInstructions(snapshot, snapshot);
+    expect(diff).toEqual({ added: [], removed: [], updated: [] });
+    expect(isEmptyDiff(diff)).toBe(true);
+  });
+
+  it('classifies added / removed / updated independently', () => {
+    const prev = [
+      { id: 'keep', content: 'same' },
+      { id: 'change', content: 'before' },
+      { id: 'drop', content: 'gone' },
+    ];
+    const curr = [
+      { id: 'keep', content: 'same' },
+      { id: 'change', content: 'after' },
+      { id: 'new', content: 'fresh' },
+    ];
+    expect(diffInstructions(prev, curr)).toEqual({
+      added: [{ id: 'new', content: 'fresh' }],
+      removed: ['drop'],
+      updated: [{ id: 'change', content: 'after' }],
+    });
+  });
+
+  it('preserves insertion order of current for added / updated and of previous for removed', () => {
+    const prev = [
+      { id: 'd1', content: 'x' },
+      { id: 'd2', content: 'y' },
+    ];
+    const curr = [
+      { id: 'a1', content: '1' },
+      { id: 'a2', content: '2' },
+    ];
+    const diff = diffInstructions(prev, curr);
+    expect(diff.added.map((e) => e.id)).toEqual(['a1', 'a2']);
+    expect(diff.removed).toEqual(['d1', 'd2']);
+  });
+
+  it('treats duplicate ids with later-wins semantics in both inputs', () => {
+    const prev = [
+      { id: 'x', content: 'first' },
+      { id: 'x', content: 'last' },
+    ];
+    const curr = [{ id: 'x', content: 'last' }];
+    // Both inputs collapse to id='x', content='last' — no change.
+    expect(diffInstructions(prev, curr)).toEqual({ added: [], removed: [], updated: [] });
+  });
+});
+```
+
+Call sites that wire `diffInstructions` into a refresh path should pair the pure-function tests with an integration test that asserts the "no change ⇒ no provider call" skip via `isEmptyDiff(diff)`. The orchestrator-side tests belong next to the call site (e.g. `tests/mcp/instructions-sync.test.ts`), not next to the pure diff module.
+
+## Testing session title generation (`src/core/session/title.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` and `5c52626`). The module is pure except for `generateTitle`, which calls `model.generate` once — pass a fake `TitleModel` to assert both which variant was chosen AND the exact `TitleGenerateOptions` payload.
+
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import {
+  TITLE_PROMPT,
+  selectTitleVariant,
+  extractFirstUserText,
+  generateTitle,
+} from '../../src/core/session/title.js';
+
+describe('selectTitleVariant', () => {
+  it('returns the model when no variants are declared', () => {
+    const model = { id: 'gpt-4o', generate: vi.fn() };
+    expect(selectTitleVariant(model)).toBe(model);
+  });
+
+  it('picks the variant with the lowest cost.input', () => {
+    const model = {
+      id: 'gpt-4o',
+      variants: [
+        { id: 'gpt-4o:full', cost: { input: 5 } },
+        { id: 'gpt-4o:mini', cost: { input: 0.15 } },
+        { id: 'gpt-4o:nano', cost: { input: 0.075 } },
+      ],
+      generate: vi.fn(),
+    };
+    expect(selectTitleVariant(model)).toEqual({ id: 'gpt-4o:nano', cost: { input: 0.075 } });
+  });
+
+  it('treats missing cost as Infinity so priced variants beat untyped ones', () => {
+    const model = {
+      id: 'gpt-4o',
+      variants: [{ id: 'unknown-cost' }, { id: 'priced', cost: { input: 1 } }],
+      generate: vi.fn(),
+    };
+    expect(selectTitleVariant(model)).toEqual({ id: 'priced', cost: { input: 1 } });
+  });
+});
+
+describe('extractFirstUserText', () => {
+  it('returns the first non-empty user message content', () => {
+    expect(
+      extractFirstUserText([
+        { role: 'system', content: 'ignored' },
+        { role: 'assistant', content: 'ignored' },
+        { role: 'user', content: '  ' }, // whitespace-only skipped
+        { role: 'user', content: 'help me ship a feature' },
+        { role: 'user', content: 'later tangent' },
+      ])
+    ).toBe('help me ship a feature');
+  });
+
+  it('returns "" when there is no non-empty user message', () => {
+    expect(extractFirstUserText([{ role: 'assistant', content: 'ok' }])).toBe('');
+    expect(extractFirstUserText([])).toBe('');
+  });
+});
+
+describe('generateTitle', () => {
+  it('forwards TITLE_PROMPT and the first user text with the cost-sensitive variant', async () => {
+    const generate = vi.fn().mockResolvedValue('Ship Feature X');
+    const model = {
+      id: 'gpt-4o',
+      variants: [
+        { id: 'gpt-4o:full', cost: { input: 5 } },
+        { id: 'gpt-4o:nano', cost: { input: 0.075 } },
+      ],
+      generate,
+    };
+    const title = await generateTitle(
+      [{ role: 'user', content: 'help me ship feature X' }],
+      model
+    );
+    expect(title).toBe('Ship Feature X');
+    expect(generate).toHaveBeenCalledWith({
+      system: TITLE_PROMPT,
+      prompt: 'help me ship feature X',
+      maxTokens: 32,
+      temperature: 0.2,
+    });
+  });
+});
+```
+
+The deferred-attempt gating lives in `src/kilocode/session/title.ts`, so test the "when do we attempt" policy there — this module only covers "what do we send once we've decided to attempt". Do not reach for provider mocks in these tests; the `TitleModel` interface is a sealed boundary.
+
+## Testing MCP MIME filtering (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566`). `isSupportedImageMime` and `formatContentPart` are pure — exercise them directly without an MCP server mock.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { isSupportedImageMime, formatContentPart } from '../../src/mcp/client.js';
+
+describe('isSupportedImageMime', () => {
+  it.each(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])(
+    'accepts %s',
+    (mime) => expect(isSupportedImageMime(mime)).toBe(true)
+  );
+  it.each([undefined, '', 'image/bmp', 'image/svg+xml', 'application/pdf', 'text/plain'])(
+    'rejects %s',
+    (mime) => expect(isSupportedImageMime(mime as string | undefined)).toBe(false)
+  );
+});
+
+describe('formatContentPart', () => {
+  it('renders supported images with their byte count', () => {
+    expect(
+      formatContentPart({ type: 'image', mimeType: 'image/png', data: 'YWJj' })
+    ).toBe('[image: image/png, 2 bytes omitted]');
+  });
+
+  it('replaces unsupported images with an omit placeholder', () => {
+    expect(
+      formatContentPart({ type: 'image', mimeType: 'image/bmp', data: 'YWJj' })
+    ).toBe('[omitted unsupported image: image/bmp]');
+  });
+
+  it('inlines a text resource body when present', () => {
+    expect(
+      formatContentPart({
+        type: 'resource',
+        resource: { uri: 'file:///a.txt', mimeType: 'text/plain', text: 'hello' },
+      })
+    ).toBe('hello');
+  });
+
+  it('falls back to the uri placeholder when a text resource has no body', () => {
+    expect(
+      formatContentPart({
+        type: 'resource',
+        resource: { uri: 'file:///a.txt', mimeType: 'text/plain' },
+      })
+    ).toBe('[resource: file:///a.txt]');
+  });
+
+  it('omits unsupported non-text resources', () => {
+    expect(
+      formatContentPart({
+        type: 'resource',
+        resource: { uri: 'file:///a.pdf', mimeType: 'application/pdf' },
+      })
+    ).toBe('[omitted unsupported resource: application/pdf (file:///a.pdf)]');
+  });
+});
+```
+
+The "unknown type ⇒ `JSON.stringify(part)`" fallback is already covered by the pre-existing `formatContentPart` suite — the new cases above extend it with the MIME-sensitive branches.
+
+## Testing `filterFreeModels` and `ALEXI_DISABLE_FREE_MODELS`
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`). The filter reads `process.env.ALEXI_DISABLE_FREE_MODELS` on every call, so tests mutate the env var in a `beforeEach` / `afterEach` pair.
+
+```typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { filterFreeModels } from '../../src/providers/modelCatalog.js';
+
+describe('filterFreeModels', () => {
+  const original = process.env.ALEXI_DISABLE_FREE_MODELS;
+  beforeEach(() => {
+    delete process.env.ALEXI_DISABLE_FREE_MODELS;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.ALEXI_DISABLE_FREE_MODELS;
+    else process.env.ALEXI_DISABLE_FREE_MODELS = original;
+  });
+
+  const catalog = [
+    { id: 'gpt-4o', metadata: { free: false } },
+    { id: 'anthropic--claude-sonnet-4', metadata: {} },
+    { id: 'free/mystery-model', metadata: {} },
+    { id: 'other', metadata: { free: true } },
+  ];
+
+  it('is a no-op when the env var is unset', () => {
+    expect(filterFreeModels(catalog)).toBe(catalog);
+  });
+
+  it.each(['1', 'true', 'TRUE', ' True '])('activates on %s', (value) => {
+    process.env.ALEXI_DISABLE_FREE_MODELS = value;
+    expect(filterFreeModels(catalog).map((m) => m.id)).toEqual([
+      'gpt-4o',
+      'anthropic--claude-sonnet-4',
+    ]);
+  });
+
+  it.each(['0', 'false', 'off', ''])('ignores %s', (value) => {
+    process.env.ALEXI_DISABLE_FREE_MODELS = value;
+    expect(filterFreeModels(catalog)).toBe(catalog);
+  });
+});
+```
+
+For `getAvailableModels()` — which applies the filter transitively — call `invalidateCatalog()` first to reset state, then set the env var, then assert. The catalog itself does not reload when the env var changes; the filter is applied on every read, so no explicit refresh is needed.
+
+## Testing `RateLimitError` metadata (`src/core/errors.ts`)
+
+Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `80b8762` and `a9fa57b`). The constructor normalises three new fields — exercise them directly to lock the normalisation contract.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import { RateLimitError, isRateLimitError } from '../../src/core/errors.js';
+
+describe('RateLimitError normalisation', () => {
+  it('normalises retryAfterMs into retryAfterSeconds when seconds is absent', () => {
+    const err = new RateLimitError('rate limit', { retryAfterMs: 30_000 });
+    expect(err.retryAfterSeconds).toBe(30);
+  });
+
+  it('prefers retryAfterSeconds over retryAfterMs when both are present', () => {
+    const err = new RateLimitError('rate limit', { retryAfterSeconds: 15, retryAfterMs: 99_000 });
+    expect(err.retryAfterSeconds).toBe(15);
+  });
+
+  it('ignores retryAfterMs when seconds is non-finite', () => {
+    const err = new RateLimitError('rate limit', { retryAfterMs: Number.NaN });
+    expect(err.retryAfterSeconds).toBeUndefined();
+  });
+
+  it('stores a valid Date on resetAt and silently drops a bad one', () => {
+    const good = new Date('2026-10-22T00:00:00Z');
+    const bad = new Date('not-a-date');
+    expect(new RateLimitError('x', { resetAt: good }).resetAt).toBe(good);
+    expect(new RateLimitError('x', { resetAt: bad }).resetAt).toBeUndefined();
+  });
+
+  it('stores a non-empty provider identifier', () => {
+    expect(new RateLimitError('x', { provider: 'sap-ai-core' }).provider).toBe('sap-ai-core');
+    expect(new RateLimitError('x', { provider: '' }).provider).toBeUndefined();
+  });
+
+  it('remains structurally detectable regardless of which fields are set', () => {
+    expect(isRateLimitError(new RateLimitError('x'))).toBe(true);
+    expect(isRateLimitError(new RateLimitError('x', { retryAfterMs: 1_000 }))).toBe(true);
+  });
+});
+```
+
+The retry driver (`retryWithRateLimit`) consumes `retryAfterSeconds` via `getRetryAfterMs` — write the driver-interaction test under `tests/core/retryWithRateLimit.test.ts`, not next to the error class, so the test file stays focused on one concern.
+
 ## Testing the `doctor` command (`src/doctor/index.ts`, `src/cli/commands/doctor.ts`)
 
 Two test suites cover the health-check surface introduced in commit `1f313d00`:

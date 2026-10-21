@@ -6,299 +6,273 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-20
+Generated: 2026-10-21
 Based on upstream commits analyzed:
-- **kilocode**: 2a1903f29..5cc65d121 (30 commits, v7.8.14 → v7.8.15)
-- **opencode**: 214fb7f..d814879 (65 commits, v2.0.32 → v2.1.0)
+- `94bc566` - fix(core): keep unsupported MCP media out of tool attachments
+- `aadd4d8` - feat(core): add OPENCODE_DISABLE_FREE_MODELS to hide free models
+- `80b8762` - fix(core): forward retryAfterMs across provider session errors
+- `a9fa57b` - feat(core): typed free-limit error with reset time
+- `d2812d1` - fix(core): tighten session title prompt
+- `5c52626` - fix(core): generate titles at the lowest model variant
+- `15adc3d` - fix(core): send only changed entries in instruction updates
+- `c3b613c` - fix(core): resolve relative directories during V1 migration
+- `d898c04` - feat(core): add experimental.location_idle_timeout
+- `89d996c` - fix(core): keep locations with running sessions or background jobs
+- `e9ac459` - fix(core): build provider variants after package normalization
+- `3b593dd` - fix(codemode): run each job to completion
+- `3fdb13b` - fix(stats): retry failed syncs instead of waiting an hour
 
 ## Summary
-- Total changes planned: 12
-- Critical: 2 | High: 5 | Medium: 3 | Low: 2
-
-Key themes:
-1. **Permission allowlist semantics fix** — critical correctness fix for subagent edit permissions
-2. **browser_open permission scoping** — always-allow rules per origin
-3. **task tool refresh** — new `refresh` API instead of `merge`
-4. **Todo tool restoration** — experimental flag-gated todo tool
-5. **Bus event legacy decoding** — payload shape upgrades for stored events
-6. **Config policy debug logging** — denied provider logging improvements
-
----
+- Total changes planned: 10
+- Critical: 1 | High: 4 | Medium: 4 | Low: 1
 
 ## Changes
 
-### 1. Add PermissionAllowlist helper namespace
-**File**: `src/permission/allowlist.ts` (NEW)
+### 1. Filter unsupported MCP media from tool attachments
+**File**: `src/tool/mcp.ts`
 **Priority**: critical
 **Type**: bugfix
-**Reason**: Upstream kilocode introduced this helper to distinguish between a true blanket deny (`"*": deny`) and an allowlist baseline (`"*": deny` followed by path allows). Without this, subagents launched from plan/orchestrator agents lose edit/write capabilities entirely because the baseline is collapsed into a wildcard deny. This is a correctness bug that affects any delegated workflow.
+**Reason**: Upstream fix (`94bc566`) prevents sending unsupported media types to models, which can crash the model request or lead to provider rejection errors. Important for SAP AI Core which has stricter media payload validation.
+
+**Current code** (likely around media/content handling in MCP tool call result):
+```typescript
+// results from an MCP tool call are returned as part of the content array
+const output = result.content.map((item) => {
+  if (item.type === "text") return { type: "text", text: item.text }
+  if (item.type === "image") return { type: "image", data: item.data, mimeType: item.mimeType }
+  if (item.type === "resource") return { type: "resource", resource: item.resource }
+  return item
+})
+```
 
 **New code**:
 ```typescript
-import { Wildcard } from "@opencode-ai/core/util/wildcard"
-import type { Ruleset } from "@/permission/rule"
+// Supported MIME types for attaching to tool outputs
+const SUPPORTED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
 
-// A scoped policy can be written either as an explicit catch-all deny or as an
-// allowlist baseline: `"*": deny` followed by path allows. `Permission.evaluate`
-// only ever sees the catch-all for a literal "*" pattern, so code that needs to
-// tell a real blanket deny apart from an allowlist baseline has to inspect the
-// rules that follow it.
-export namespace PermissionAllowlist {
-  /** Last rule that applies `permission`'s catch-all pattern, if any. */
-  export function catchAll(permission: string, rules: Ruleset) {
-    return rules.findLast(
-      (rule) => Wildcard.match(permission, rule.permission) && rule.pattern === "*",
-    )
-  }
+const output: Array<ToolOutputPart> = []
+const unsupported: string[] = []
 
-  /** True when a catch-all deny is only the baseline for later path exceptions. */
-  export function exceptions(permission: string, rules: Ruleset) {
-    const rule = catchAll(permission, rules)
-    if (rule?.action !== "deny") return false
-    const index = rules.lastIndexOf(rule)
-    return rules
-      .slice(index + 1)
-      .some(
-        (next) =>
-          Wildcard.match(permission, next.permission) &&
-          next.pattern !== "*" &&
-          next.action !== "deny",
-      )
+for (const item of result.content) {
+  if (item.type === "text") {
+    output.push({ type: "text", text: item.text })
+    continue
   }
+  if (item.type === "image") {
+    if (SUPPORTED_IMAGE_MIME.has(item.mimeType)) {
+      output.push({ type: "image", data: item.data, mimeType: item.mimeType })
+    } else {
+      unsupported.push(`image/${item.mimeType}`)
+    }
+    continue
+  }
+  if (item.type === "resource") {
+    // Only attach resources that are text or supported images
+    if (item.resource.mimeType?.startsWith("text/")) {
+      output.push({ type: "text", text: item.resource.text ?? "" })
+    } else if (item.resource.mimeType && SUPPORTED_IMAGE_MIME.has(item.resource.mimeType)) {
+      output.push({ type: "image", data: item.resource.blob, mimeType: item.resource.mimeType })
+    } else {
+      unsupported.push(item.resource.mimeType ?? "unknown")
+    }
+    continue
+  }
+  unsupported.push(item.type)
+}
+
+if (unsupported.length > 0) {
+  output.push({
+    type: "text",
+    text: `[Omitted ${unsupported.length} unsupported attachment(s): ${unsupported.join(", ")}]`,
+  })
 }
 ```
 
----
-
-### 2. Fix subagent edit permission inheritance in task tool
-**File**: `src/tool/task.ts` (or `src/kilocode/tool/task.ts` if following kilocode layout)
-**Priority**: critical
-**Type**: bugfix
-**Reason**: Companion fix to PermissionAllowlist. The previous logic treated an allowlist baseline as a blanket edit deny, breaking delegated subagents launched from read-only/plan modes. Also fix the `readonly` detection: only a true global `*/*` deny should strip edit from subagents.
-
-**Current code** (equivalent section):
-```typescript
-const mutation = new Set(["edit", ...guarded.filter((p) => p !== "bash")])
-const inherited = [
-  ...rules.filter((rule) => rule.permission !== "edit"),
-  ...edit.filter((rule) => rule.permission === "edit"),
-].filter(
-  (r: Permission.Rule) =>
-    r.action === "deny" && (mutation.has(r.permission) || isMcp(r.permission)),
-)
-```
-
-**New code**:
-```typescript
-import { PermissionAllowlist } from "@/permission/allowlist"
-
-// ... existing imports and setup ...
-
-const mutation = mutations() // existing helper returning Set of mutating permission names
-const prefixes = Object.keys(input.mcp ?? {}).map(
-  (k) => k.replace(/[^a-zA-Z0-9_-]/g, "_") + "_",
-)
-const isMcp = (p: string) => prefixes.some((prefix) => p.startsWith(prefix))
-
-// Only `*`-permission rules can match the literal input "*", so this is true exactly
-// for the modes whose guard sets `"*": "deny"` and for a global deny-all config.
-const readonly = Permission.evaluate("*", "*", rules).action === "deny"
-
-const inherited = [
-  ...rules.filter((rule) => rule.permission !== "edit"),
-  ...edit.filter((rule) => rule.permission === "edit" && rule.action === "deny"),
-].filter(
-  (r: Permission.Rule) =>
-    r.action === "deny" &&
-    (isMcp(r.permission) ||
-      (r.permission === "edit"
-        ? readonly || r.pattern !== "*" || !PermissionAllowlist.exceptions("edit", edit)
-        : mutation.has(r.permission))),
-)
-```
-
-Also update the doc comment to document the new semantics (see upstream diff).
-
----
-
-### 3. Rename `KiloTask.merge` → `KiloTask.refresh` for child permission handling
-**File**: `src/tool/task.ts` (parent task tool)
-**Priority**: high
-**Type**: refactor
-**Reason**: Upstream renamed the merge entry point to `refresh` for clarity. The behavior may also differ (semantic refresh vs. merge). Keep API aligned.
-
-**Current code**:
-```typescript
-const permission = KiloTask.merge(session.permission ?? [], childPermission)
-```
-
-**New code**:
-```typescript
-const permission = KiloTask.refresh(session.permission ?? [], childPermission)
-```
-
-Export the new name from the kilocode task module. If needed, keep `merge` as a deprecated alias during transition:
-```typescript
-/** @deprecated use refresh */
-export const merge = refresh
-```
-
----
-
-### 4. Update browser_open always-allow and metadata rules
-**File**: `src/tool/browser-open.ts`
+### 2. Typed free-limit / rate-limit error with retry/reset time
+**File**: `src/core/errors.ts` (or wherever `SessionError` is defined)
 **Priority**: high
 **Type**: feature
-**Reason**: Allow users to persist "always allow this origin" for browser_open and ensure the permission dock surfaces the correct scope rules.
+**Reason**: Upstream commits `a9fa57b` and `80b8762` introduce a typed error carrying `retryAfterMs` / reset time. For SAP AI Core we commonly hit quota (429) and need to surface rate-limit metadata to the UI / caller for retry UX.
 
-**Current code**:
+**New code** (add to session error schema):
 ```typescript
-yield* ctx.ask({
-  permission: "browser_open",
-  patterns: [`navigate:${url.origin}`],
-  always: [],
-  metadata: { operation: "open", url: url.href },
+export const SessionRateLimitError = Schema.TaggedStruct("SessionRateLimitError", {
+  message: Schema.String,
+  retryAfterMs: Schema.optional(Schema.Number),
+  resetAt: Schema.optional(Schema.DateFromString),
+  provider: Schema.optional(Schema.String),
 })
+export type SessionRateLimitError = Schema.Schema.Type<typeof SessionRateLimitError>
+
+// In the SessionError union, add this variant alongside existing errors.
+export const SessionError = Schema.Union(
+  // ...existing variants...
+  SessionRateLimitError,
+)
 ```
 
-**New code**:
+**Translator helper** in `src/providers/sap-ai-core.ts`:
 ```typescript
-yield* ctx.ask({
-  permission: "browser_open",
-  patterns: [`navigate:${url.origin}`],
-  always: [`navigate:${url.origin}`],
-  metadata: {
-    operation: "open",
-    url: url.href,
-    rules: [`navigate:${url.origin}`, "navigate:*"],
-  },
-})
-```
-
----
-
-### 5. Add bus event legacy payload decoding
-**File**: `src/bus/index.ts` (or `src/bus.ts`)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Opencode v2.1 added `SessionLegacy.event()` upgrades to decode previously-stored events whose shape has since been renamed. Without this, upgraded Alexi deployments may fail to read older stored events.
-
-**Current code**:
-```typescript
-const decodeSerializedEvent = (event: SerializedEvent): Event.Payload => {
-  const definition = Durable.get(event.type)
-  if (!definition?.durable) {
-    throw new Error(`Unknown or non-durable event type: ${event.type}`)
+function toSessionError(err: unknown): SessionError {
+  if (isProviderError(err) && err.status === 429) {
+    const headerRetry = err.headers?.["retry-after"]
+    const retryAfterMs = headerRetry ? Number(headerRetry) * 1000 : undefined
+    return {
+      _tag: "SessionRateLimitError",
+      message: err.message,
+      retryAfterMs,
+      provider: "sap-ai-core",
+    }
   }
-  return {
-    id: Event.ID.make(event.id),
-    created: event.created ?? 0,
-    type: definition.type,
-    durable: envelope(event.aggregateID, event.seq, definition.durable.version),
-    data: Schema.decodeUnknownSync(definition.data)(event.data),
-  }
+  // ...existing mapping
 }
 ```
 
-**New code**:
-```typescript
-import { SessionLegacy } from "@opencode/schema/session-legacy"
-
-// Every stored event decodes through here, so payloads written in older shapes
-// are upgraded in one place.
-const decodeStoredData = (definition: Event.DurableDefinition, data: unknown) =>
-  Schema.decodeUnknownSync(definition.data)(SessionLegacy.event(definition.type, data))
-
-const decodeSerializedEvent = (event: SerializedEvent): Event.Payload => {
-  const definition = Durable.get(event.type)
-  if (!definition?.durable) {
-    throw new Error(`Unknown or non-durable event type: ${event.type}`)
-  }
-  return {
-    id: Event.ID.make(event.id),
-    created: event.created ?? 0,
-    type: definition.type,
-    durable: envelope(event.aggregateID, event.seq, definition.durable.version),
-    data: decodeStoredData(definition, event.data),
-  }
-}
-```
-
-Also update the idempotency comparison for stored rows:
-```typescript
-// Rows written before a payload rename compare in their upgraded shape.
-isDeepStrictEqual(SessionLegacy.event(definition.type, stored.data), encoded)
-```
-
-And the second decode site (commitDurableEvent) similarly.
-
----
-
-### 6. Restore todowrite tool behind experimental flag
-**File**: `src/tool/todo.ts` (NEW), `src/tool/todowrite.txt`, `src/config/experimental.ts`
+### 3. Hide free models via env flag (SAP equivalent: hide non-licensed models)
+**File**: `src/providers/registry.ts` or `src/model.ts`
 **Priority**: medium
 **Type**: feature
-**Reason**: Opencode re-introduced the todowrite tool gated by `experimental.todo` config flag. This is useful for structured task tracking in long sessions.
+**Reason**: Upstream `aadd4d8` adds `OPENCODE_DISABLE_FREE_MODELS`. For Alexi, mirror this with `ALEXI_DISABLE_FREE_MODELS` and (optionally) a flag to hide non-SAP-licensed models for enterprise deployments.
 
-**New file** `src/tool/todo.ts`: port from `packages/core/src/tool/plugin/todo.ts` (~83 lines). Key structure:
+**New code**:
 ```typescript
-import { Tool } from "@opencode-ai/core/tool"
-import { Schema } from "effect"
+const disableFreeModels =
+  process.env.ALEXI_DISABLE_FREE_MODELS === "1" ||
+  process.env.ALEXI_DISABLE_FREE_MODELS === "true"
 
-// Define the todo list schema (array of {id, content, status, priority})
-// Expose as a plugin tool conditional on experimental.todo
-export const TodoWriteTool = Tool.define({
-  name: "todowrite",
-  description: readFileSync(path.join(__dirname, "todowrite.txt"), "utf8"),
-  parameters: Schema.Struct({
-    todos: Schema.Array(Schema.Struct({
-      id: Schema.String,
-      content: Schema.String,
-      status: Schema.Literal("pending", "in_progress", "completed"),
-      priority: Schema.Literal("high", "medium", "low"),
-    })),
-  }),
-  execute: (input, ctx) => Effect.gen(function* () {
-    // persist todos on session metadata and emit event
-  }),
-})
+export function filterModels(models: Model[]): Model[] {
+  if (!disableFreeModels) return models
+  return models.filter((m) => !m.free && !m.id.startsWith("free/"))
+}
 ```
 
-**New file** `src/tool/todowrite.txt`: port the 7-line prompt file verbatim from upstream.
+### 4. Generate session titles with lowest-cost model variant & tightened prompt
+**File**: `src/core/session/title.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream `5c52626` + `d2812d1` improve title quality and reduce token cost by picking the smallest variant and tightening the prompt. Important for SAP AI Core where every call is billed/throttled.
 
-**Config change** in `src/config/experimental.ts`:
+**Current code**:
 ```typescript
-export const Info = Schema.Struct({
-  // ...existing fields
-  todo: Schema.optional(Schema.Boolean),
-  // ...
-})
+export async function generateTitle(messages: Message[], model: Model) {
+  const prompt = `Summarize the following conversation in a short title:\n${JSON.stringify(messages)}`
+  return model.generate({ prompt, maxTokens: 50 })
+}
 ```
 
-**Normalize change** (`src/config/normalize.ts`):
+**New code**:
 ```typescript
-if (own(experimental, "todo")) {
-  const value = decodeEncoded(
-    ConfigExperimental.Info.fields.todo,
-    experimental.todo,
-    ["experimental", "todo"],
-    diagnostics,
+const TITLE_PROMPT = `Generate a concise 3-7 word title summarizing the user's request.
+Rules:
+- No quotes, no trailing punctuation, no markdown.
+- Prefer imperative or noun phrases.
+- Do NOT include words like "chat", "conversation", "session".`
+
+function selectTitleVariant(model: Model): Model {
+  // Prefer the cheapest/smallest variant if the provider exposes variants.
+  if (!model.variants?.length) return model
+  const sorted = [...model.variants].sort(
+    (a, b) => (a.cost?.input ?? Infinity) - (b.cost?.input ?? Infinity),
   )
-  if (value !== undefined) result.todo = value
+  return sorted[0] ?? model
+}
+
+export async function generateTitle(messages: Message[], model: Model) {
+  const chosen = selectTitleVariant(model)
+  const userText = extractFirstUserText(messages)
+  return chosen.generate({
+    system: TITLE_PROMPT,
+    prompt: userText,
+    maxTokens: 32,
+    temperature: 0.2,
+  })
 }
 ```
 
----
+### 5. Instruction updates: send only changed entries
+**File**: `src/core/instructions.ts` (or wherever MCP/skill/reference instructions are composed)
+**Priority**: medium
+**Type**: refactor / bugfix
+**Reason**: Upstream `15adc3d` sends only diffs across MCP, skill, and reference instruction updates. Reduces payload size and avoids spurious re-injections.
 
-### 7. Add provider policy denial debug logging
-**File**: `src/config/plugin/policy.ts`
+**New code**:
+```typescript
+type InstructionEntry = { id: string; content: string }
+
+export function diffInstructions(
+  previous: InstructionEntry[],
+  current: InstructionEntry[],
+): { added: InstructionEntry[]; removed: string[]; updated: InstructionEntry[] } {
+  const prevMap = new Map(previous.map((e) => [e.id, e.content]))
+  const currMap = new Map(current.map((e) => [e.id, e.content]))
+
+  const added: InstructionEntry[] = []
+  const updated: InstructionEntry[] = []
+  const removed: string[] = []
+
+  for (const [id, content] of currMap) {
+    if (!prevMap.has(id)) added.push({ id, content })
+    else if (prevMap.get(id) !== content) updated.push({ id, content })
+  }
+  for (const id of prevMap.keys()) {
+    if (!currMap.has(id)) removed.push(id)
+  }
+  return { added, removed, updated }
+}
+```
+
+Call sites that previously re-sent the entire instruction set should instead compute the diff and only send `added`/`updated`/`removed`.
+
+### 6. Experimental: `location_idle_timeout` config
+**File**: `src/schema/config.ts` and `src/core/location-activity.ts`
 **Priority**: medium
 **Type**: feature
-**Reason**: Prevents log spam when a deny-all prov
-{"prompt_tokens":33418,"completion_tokens":4096,"total_tokens":37514,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+**Reason**: Upstream `d898c04` + `89d996c` add an idle-timeout for locations, and keep locations alive while sessions / jobs are still running. Useful for long-running SAP AI Core sessions that occasionally stall mid-stream.
 
-[Session: d2b7e7a6-9a3a-4716-81e6-e2c053d9672b]
-[Messages: 2, Tokens: 37514]
+**Schema change**:
+```typescript
+export const ConfigExperimental = Schema.Struct({
+  // ...existing fields...
+  location_idle_timeout: Schema.optional(Schema.Number), // milliseconds
+})
+```
+
+**Location sweeper**:
+```typescript
+export function shouldReleaseLocation(
+  loc: Location,
+  now: number,
+  idleTimeoutMs: number,
+  runningSessions: Set<string>,
+  backgroundJobs: Set<string>,
+): boolean {
+  // Keep locations with any active work regardless of idle time.
+  if (runningSessions.has(loc.id)) return false
+  if ([...backgroundJobs].some((jobId) => jobId.startsWith(loc.id))) return false
+  return now - loc.lastActiveAt > idleTimeoutMs
+}
+```
+
+### 7. V1 migration: resolve relative session directories against project worktree
+**File**: `src/database/v1-migration.ts` (or wherever Alexi stores/migrates persisted sessions)
+**Priority**: medium
+**Type**: bugfix
+**Reason**: Upstream `c3b613c` fixes legacy ACP sessions whose `cwd` was stored relative to an unknown process. If Alexi has any legacy session format, apply the same fallback: substitute the project worktree when the stored directory is not absolute.
+
+**New helper**:
+```typescript
+export function storedAbsolutePath(input: string): string | undefined {
+  const result = storagePath(input)
+  if (nodePath.posix.isAbsolute(result) || isWindowsStoragePath(result)) return result
+  return undefined
+}
+```
+
+**Migration logic**
+{"prompt_tokens":12791,"completion_tokens":4096,"total_tokens":16887,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: 8d525815-3efa-4224-9b7f-2587f0834ed4]
+[Messages: 2, Tokens: 16887]
 
 ## Execution Instructions
 

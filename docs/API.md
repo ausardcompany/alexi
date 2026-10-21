@@ -9515,3 +9515,160 @@ export const TaskTool = {
 ```
 
 `usageDescription` disambiguates the `task` tool from `agent_manager` in the model's prompt. `refresh(parent, child)` merges a parent session's permission ruleset with a child subagent's derived rules — rules whose identity matches (same `tools`, `paths`, `commands`, `hosts`, `actions`, sorted) are replaced in-place; otherwise the child rule is appended. `decision` and `priority` are intentionally excluded from identity comparison so swapping a `deny` for an `allow` on the same scope replaces rather than duplicates.
+
+## Rate-Limit Error Shape (`src/core/errors.ts`)
+
+Updated in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `80b8762` and `a9fa57b`). The core `RateLimitErrorOptions` interface and `RateLimitError` class — the single source of truth for rate-limit payloads crossing the `src/core` ↔ `src/providers` boundary — gain three fields alongside the existing `retryAfterSeconds` / `modelName` / `suggestedAction` / `docsUrl` / `cause`.
+
+### `RateLimitErrorOptions`
+
+```typescript
+export interface RateLimitErrorOptions {
+  modelName?: string;
+  retryAfterSeconds?: number;
+  /**
+   * Retry window in milliseconds — convenience field for provider adapters
+   * that already know the wait in ms. When both `retryAfterSeconds` and
+   * `retryAfterMs` are set, the seconds field wins (canonical header shape).
+   */
+  retryAfterMs?: number;
+  /**
+   * Absolute wall-clock instant at which the rate-limit window resets
+   * (free-tier semantics). Stored only when it is a valid Date.
+   */
+  resetAt?: Date;
+  /** Provider identifier (e.g. `sap-ai-core`) for diagnostics / telemetry. */
+  provider?: string;
+  cause?: unknown;
+  suggestedAction?: string;
+  docsUrl?: string;
+}
+
+export class RateLimitError extends Error {
+  readonly code: 'rate_limit';
+  readonly statusCode: 429;
+  readonly modelName?: string;
+  readonly retryAfterSeconds?: number;
+  readonly resetAt?: Date;
+  readonly provider?: string;
+  readonly suggestedAction?: string;
+  readonly docsUrl?: string;
+}
+```
+
+### Normalisation rules
+
+- When only `retryAfterMs` is provided, the constructor stores `Math.floor(ms / 1000)` on `retryAfterSeconds` so `getRetryAfterMs()` surfaces the same wait regardless of which shape the adapter used.
+- `resetAt` is stored only when `options.resetAt instanceof Date && !Number.isNaN(options.resetAt.getTime())` — a malformed timestamp from an upstream SDK is silently dropped rather than throwing from the constructor.
+- `provider` is stored only when it is a non-empty string.
+- Structural detection via `isRateLimitError()` is unchanged — it dispatches on `code === 'rate_limit'`, `name === 'RateLimitError'`, or `statusCode === 429`, so cross-module callers that import the class from either path continue to recognise instances identically.
+
+See [docs/PROVIDERS.md — Rate limit error metadata](PROVIDERS.md#rate-limit-error-metadata-srccoreerrorsts) for the retry-driver interaction.
+
+## Instruction Diff Types (`src/core/instructions.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `15adc3d`). Pure building block for sending only the changed instruction entries on each turn — see [docs/ARCHITECTURE.md — Instruction-Set Diffing](ARCHITECTURE.md#instruction-set-diffing-srccoreinstructionsts) for the end-to-end flow.
+
+```typescript
+export interface InstructionEntry {
+  /**
+   * Stable, deterministic id — e.g. `mcp:playwright::navigate`,
+   * `skill:code-review`, `reference:AGENTS.md`. MUST be stable across
+   * turns; a UUID regenerated per turn defeats diffing entirely.
+   */
+  id: string;
+  /** Body the model should see for this id. */
+  content: string;
+}
+
+export interface InstructionDiff {
+  /** Entries present in `current` but not in `previous`. */
+  added: InstructionEntry[];
+  /** Ids present in `previous` but not in `current`. */
+  removed: string[];
+  /** Entries present in both but whose content changed. */
+  updated: InstructionEntry[];
+}
+
+export function diffInstructions(
+  previous: readonly InstructionEntry[],
+  current: readonly InstructionEntry[]
+): InstructionDiff;
+
+export function isEmptyDiff(diff: InstructionDiff): boolean;
+```
+
+### Guarantees
+
+- Pure function — both inputs are consumed by value, output arrays are freshly allocated.
+- Duplicates in either input are not errors — later entries win in the lookup map, mirroring `new Map(...)` semantics.
+- Output order follows insertion order of `current` for `added` / `updated` and of `previous` for `removed`, which keeps diffs stable across runs and easy to assert in tests.
+- `isEmptyDiff(diff)` is `true` iff `added.length === 0 && removed.length === 0 && updated.length === 0`. Call sites use it to skip the "send instruction update" step entirely when snapshots are identical.
+
+## Session Title Types (`src/core/session/title.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commits `d2812d1` and `5c52626`). Generates session titles at the cheapest declared variant of the active model with a tightened prompt — see [docs/ARCHITECTURE.md — Session Title Generation](ARCHITECTURE.md#session-title-generation-srccoresessiontitlets) for the end-to-end flow.
+
+```typescript
+export const TITLE_PROMPT: string;
+
+export interface TitleModelVariant {
+  id: string;
+  cost?: { input?: number };
+}
+
+export interface TitleModel {
+  id: string;
+  variants?: readonly TitleModelVariant[];
+  generate: (opts: TitleGenerateOptions) => Promise<string>;
+}
+
+export interface TitleGenerateOptions {
+  system: string;
+  prompt: string;
+  maxTokens: number;
+  temperature: number;
+}
+
+export interface TitleMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+export function selectTitleVariant(model: TitleModel): TitleModel | TitleModelVariant;
+export function extractFirstUserText(messages: readonly TitleMessage[]): string;
+export function generateTitle(
+  messages: readonly TitleMessage[],
+  model: TitleModel
+): Promise<string>;
+```
+
+### Behaviour
+
+- `selectTitleVariant` returns the model itself when no variants are declared (caller is already on the smallest known shape, swap is a no-op); otherwise it returns the variant with the lowest `cost.input` (missing cost treated as `Infinity`, so untyped variants fall through to any priced variant).
+- `extractFirstUserText` returns the first non-empty `role === 'user'` message, or `''`. The whole transcript is not forwarded — long sessions would blow the input budget and skew titles toward later tangents.
+- `generateTitle` composes the above and calls `model.generate({ system: TITLE_PROMPT, prompt: userText, maxTokens: 32, temperature: 0.2 })`. Variants delegate back to the parent model's `generate` — the only thing variant selection changes is the id quoted to the provider at call time. The caller is responsible for trimming / fallback behaviour (e.g. use a heuristic slice if the model returns an empty string).
+
+## MCP MIME Allowlist (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-21 upstream sync (commit `5bae9dc1`, ports upstream commit `94bc566`). SAP AI Core rejects arbitrary media types with a 400/422 before the request even reaches the model, so unsupported media is filtered in the MCP content-part formatter — see [docs/ARCHITECTURE.md — MCP Tool-Output MIME Filtering](ARCHITECTURE.md#mcp-tool-output-mime-filtering-srcmcpclientts) for the end-to-end dispatch.
+
+```typescript
+export function isSupportedImageMime(mimeType: string | undefined): boolean;
+export function formatContentPart(part: unknown): string;
+```
+
+The allowlist is `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Missing / `undefined` MIME is treated as unsupported. `formatContentPart` dispatches on `part.type`:
+
+| `part.type` | Output |
+|-------------|--------|
+| `text` | `part.text` verbatim (or `''`) |
+| `image` with supported MIME | `[image: <mime>, <bytes> bytes omitted]` |
+| `image` with unsupported MIME | `[omitted unsupported image: <mime>]` |
+| `resource` with `text/*` MIME and `text` body | the resource's own `text` content |
+| `resource` with `text/*` MIME and no body | `[resource: <uri>]` |
+| `resource` with unsupported MIME | `[omitted unsupported resource: <mime> (<uri>)]` |
+| `resource` with any other MIME | `[resource: <uri>]` |
+| anything else | `JSON.stringify(part)` |
+
+The embedded `resource` type used by the formatter is widened to `{ uri?: string; mimeType?: string; text?: string }`.

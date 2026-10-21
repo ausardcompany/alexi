@@ -4241,6 +4241,26 @@ Updated in the 2026-10-20 upstream sync (ports upstream kilocode `KiloTask.refre
 - **`usageDescription` is inlined at the top of the `task` tool's `description`.** The model sees it even without reading `usageDescription` directly; both locations must stay in sync. The upstream kilocode layout keeps the two separate so a parent registry can render `usageDescription` without duplicating the full `description`.
 
 
+## Working with Upstream Sync Ports
+
+Many of Alexi's internal modules are explicit ports of upstream kilocode / opencode / claude-code commits. When touching one of these, the convention is:
+
+- Keep the `Ports upstream commit <sha>` reference in the module docblock verbatim — it is the single source of truth for diffing against upstream.
+- Only widen a type (e.g. adding `retryAfterMs`, `resetAt`, `provider` to `RateLimitErrorOptions`) when upstream has already landed the same shape, or you have a concrete call-site that needs it. Speculative widening makes the next sync noisier.
+- When a port is pure (no provider I/O, no bus events, no coupling to `src/providers/` or registries) land the module and its tests separately from the first call-site wiring. `src/core/instructions.ts` (ports upstream `15adc3d`) and `src/core/session/title.ts` (ports upstream `d2812d1` + `5c52626`) are the pattern — pure modules landed first, call-site wiring to follow under `src/mcp/instructions-sync.ts`, `src/skill/instructions-sync.ts`, etc.
+
+### Error-shape widening without touching providers
+
+The core error layer (`src/core/errors.ts`) is intentionally upstream of `src/providers/`. When a provider adapter needs to forward a new rate-limit field, add it to `RateLimitErrorOptions` and normalise it in the constructor so the resulting `RateLimitError` instance exposes a single canonical shape to the retry driver. The 2026-10-21 sync added `retryAfterMs`, `resetAt`, and `provider` this way — provider-layer subclasses (`FreeTierRateLimitError`, `ProviderRateLimitError`) match the shape structurally, so cross-module `instanceof`-free detection via `isRateLimitError` keeps working.
+
+### MIME allowlists live where the formatter is
+
+The MCP tool-output MIME allowlist (`src/mcp/client.ts` `SUPPORTED_IMAGE_MIME`) lives next to the `formatContentPart` function that consumes it, and is exported via `isSupportedImageMime` so other MCP code paths that compose multi-part tool results can gate on the same list. Resist moving it to `src/providers/` — the filter is a defence-in-depth against SAP AI Core 400/422, not a provider capability contract. The next MIME to flip from omitted to accepted requires both an entry in the set AND provider-side confirmation.
+
+### Env-var-gated catalog filters
+
+New operator-facing filters that hide catalog entries (`ALEXI_DISABLE_FREE_MODELS` is the current example) go through a private `is<Flag>()` helper inside `src/providers/modelCatalog.ts`; callers never read `process.env` directly. The public `filterFreeModels<T extends { id; metadata?: { free? } }>(models)` function is generic so TUI and CLI call sites keep their richer `CatalogEntry` shape. `getAvailableModels()` applies the filter transitively; `getCatalogEntries()` is intentionally unfiltered so TUI call sites can opt in explicitly.
+
 ## Doctor Command (`src/doctor/index.ts`)
 
 Introduced by commit `1f313d00 feat(cli): add alexi doctor command for health checks and diagnostics`. References: [docs/ARCHITECTURE.md — Doctor / Health Check System](ARCHITECTURE.md#doctor--health-check-system-srcdoctor), [docs/API.md — `doctor` command](API.md#doctor), [docs/TESTING.md — Testing the `doctor` command](TESTING.md#testing-the-doctor-command-srcdoctorindexts-srcclicommandsdoctorts).
