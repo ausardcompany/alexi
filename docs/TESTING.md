@@ -35,6 +35,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing surgical URL / object credential redaction (`src/utils/url-redact.ts`)](#testing-surgical-url--object-credential-redaction-srcutilsurl-redactts)
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
+- [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -12833,9 +12834,149 @@ function allowlistBaseline(tool: string, allowedPath: string): PermissionRule[] 
 
 ### Related suites
 
-- `tests/agent/subagent-permissions.test.ts` (if present) covers the broader `deriveSubagentSessionPermission` surface including the explore agent's `bashRules` plumbing.
+- `tests/agent/subagent-permissions.test.ts` is the sibling array-shape-preservation suite that covers the specific Kilocode PR #15254 regression where `allowedTools: ['edit']` was flattened to `allowedTools: true` — see [Testing subagent `allowedTools` array-shape preservation](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108) below.
 - Permission allowlist semantics are exercised directly in [Testing the Permission Allowlist](#testing-the-permission-allowlist-srcpermissionallowlistts-2026-10-20-sync).
 - `tests/permission/task-approval-boundary.test.ts` covers the task-tool approval boundary at the permission-manager level.
+
+## Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)
+
+Added in commit `f0d0e15d test(agent): pin subagent allowedTools array-shape preservation`. A 211-line **verification-only** regression suite that pins the TypeScript array shape of `SubagentOptions.allowedTools` through the two main entry points on the subagent delegation path:
+
+1. `TaskTool.buildSubagentConfig(context, subagent, options)` from `src/tool/tools/task.ts:216-239` — must echo `options.allowedTools` onto `config.allowedTools` verbatim (same reference, same contents, same type).
+2. `deriveSubagentSessionPermission({ allowedTools, ... })` from `src/agent/subagent-permissions.ts:246-282` — must iterate the array when present, skip the narrowing block entirely when the field is `undefined`, and emit the full `subagent-deny-*` suite when the array is empty.
+
+### What the suite audits
+
+Kilocode PR #15254 (merged 2026-10-19) fixed an upstream bug where a parent agent configured with `allowedTools: ['edit']` was flattened by the subagent-spawning path into `allowedTools: true`, which the registry then interpreted as "grant every tool" — collapsing a tight allow-list into a blanket grant and leaking `bash`, `write`, `delete`, and every other dangerous tool the delegator had deliberately withheld. Alexi's current implementation does not have the bug (the field is already a `readonly string[] | undefined`), but the suite guarantees that a future refactor — a cast, a convenience `allowedTools: options.allowedTools ?? true` pattern copied from upstream opencode, a serialisation round-trip through a plugin — cannot silently re-introduce the regression.
+
+### Three contracts, pinned individually
+
+**Contract 1 — `TaskTool.buildSubagentConfig` echoes the array verbatim.** Five cases cover the full matrix of shapes a caller can pass:
+
+```typescript
+import { TaskTool } from '../../src/tool/tools/task.js';
+
+const ctx: ToolContext = { workdir: '/tmp/test', sessionId: 'parent-session' };
+
+it("preserves ['bash'] as a string array, NOT a boolean", () => {
+  const config = TaskTool.buildSubagentConfig(ctx, makeAgent(), {
+    allowedTools: ['bash'],
+  });
+
+  expect(Array.isArray(config.allowedTools)).toBe(true);
+  expect(config.allowedTools).toEqual(['bash']);
+  expect(typeof config.allowedTools).toBe('object');
+  // @ts-expect-error — the type says `readonly string[] | undefined`,
+  // but assert at runtime that it is not `true` even after a widening
+  // cast would have slipped through.
+  expect(config.allowedTools === true).toBe(false);
+});
+```
+
+The negative-pin pair (`typeof config.allowedTools === 'object'` plus the `@ts-expect-error` runtime check for `=== true`) is the heart of the regression guard. The compile-time type already rules out a boolean, but a widening cast inside the implementation would silently satisfy TypeScript while producing a value the registry would then misinterpret. Both layers of the shape are pinned.
+
+The `['edit']` case re-runs the same assertions on the exact single-entry list named in Kilocode PR #15254, so a reader bisecting a future failure sees the upstream scenario reproduced by id. The multi-entry case (`['read', 'grep', 'bash']`) and the undefined/empty-array cases round out the surface.
+
+**Contract 2 — `undefined` stays `undefined` (does NOT default to `true`).**
+
+```typescript
+it('leaves allowedTools undefined when not supplied (does NOT default to true)', () => {
+  const config = TaskTool.buildSubagentConfig(ctx, makeAgent(), {});
+
+  expect(config.allowedTools).toBeUndefined();
+  expect(typeof config.allowedTools).not.toBe('boolean');
+});
+```
+
+Downstream code paths distinguish three states: `undefined` (no explicit grant — baseline restricted surface applies), `[]` (empty allow-list — baseline only, every dangerous tool denied), and `[...]` (explicit grant). Any implementation that papered over `undefined` with a default of `true` would collapse the three signals into two and silently restore the Kilocode #15254 bug class.
+
+**Contract 3 — `[]` is preserved as a signal, not re-interpreted.**
+
+```typescript
+it('preserves an empty allow-list verbatim ([], NOT true, NOT undefined)', () => {
+  const config = TaskTool.buildSubagentConfig(ctx, makeAgent(), {
+    allowedTools: [],
+  });
+
+  expect(Array.isArray(config.allowedTools)).toBe(true);
+  expect(config.allowedTools).toEqual([]);
+  expect(config.allowedTools).not.toBeUndefined();
+});
+```
+
+The empty array means "the subagent sees only the read-only baseline — no `write`, no `edit`, no `bash`, no `webfetch`, no `delete`". A normalisation step that re-wrote `[] → undefined` would silently widen the subagent's surface to the baseline-inherit path.
+
+### Derivation-side assertions
+
+The second `describe` block pivots to `deriveSubagentSessionPermission` directly and asserts on the emitted `subagent-deny-*` rules so the pure derivation function is covered independently of the `TaskTool` wrapper:
+
+```typescript
+it('narrows the ruleset using the array contents, not a widened boolean', () => {
+  const rules = deriveSubagentSessionPermission({
+    parentSessionPermission: [],
+    parentAgent: undefined,
+    subagent: makeAgent(),
+    allowedTools: ['bash'],
+  });
+
+  // `bash` is on the allow-list, so no subagent-narrowing deny for it.
+  expect(rules.find((r) => r.id === 'subagent-deny-bash')).toBeUndefined();
+
+  // Every other dangerous tool is denied because the subagent only
+  // has `bash` + baseline read-only tools.
+  expect(
+    rules.find((r) => r.id === 'subagent-deny-write' && r.decision === 'deny')
+  ).toBeDefined();
+  expect(
+    rules.find((r) => r.id === 'subagent-deny-edit' && r.decision === 'deny')
+  ).toBeDefined();
+  expect(
+    rules.find((r) => r.id === 'subagent-deny-delete' && r.decision === 'deny')
+  ).toBeDefined();
+  expect(
+    rules.find((r) => r.id === 'subagent-deny-webfetch' && r.decision === 'deny')
+  ).toBeDefined();
+});
+```
+
+The three cases in this block mirror the three contracts above against the derivation function directly:
+
+1. **Non-empty `allowedTools` → selective denies.** For each dangerous tool not in the allow-list, exactly one rule with `id === 'subagent-deny-<tool>'` is emitted; the allow-listed tool has NO deny.
+2. **`undefined` → no narrowing.** `rules.find((r) => r.id?.startsWith('subagent-deny-'))` is `undefined`. The derivation's narrowing block is guarded by `if (input.allowedTools)` so the `undefined` branch skips it entirely.
+3. **`[]` → every dangerous tool denied.** A `for ... of` loop asserts `rules.some((r) => r.decision === 'deny' && r.tools?.includes(tool))` is `true` for every entry in the full `potentiallyDangerous` list (`write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash`, `shell`, `webfetch`, `delete`). An implementation that fell through the empty-array case to the `undefined` branch would emit zero denies and fail this case loudly.
+
+### Fixture — reuses the shared `makeAgent` shape
+
+```typescript
+import type { Agent } from '../../src/agent/index.js';
+
+function makeAgent(overrides: Partial<Agent> = {}): Agent {
+  return {
+    id: 'code',
+    name: 'Code Agent',
+    description: 'test stub',
+    mode: 'all',
+    systemPrompt: 'stub',
+    canUseTool: () => true,
+    ...overrides,
+  };
+}
+```
+
+The subagent fixture is intentionally permissive (`canUseTool: () => true`) so the suite exercises only the shape-preservation paths — a restrictive subagent would conflate shape regressions with per-agent filtering regressions and make a failure harder to interpret. The same convention is used in [the inheritance suite](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104).
+
+### Patterns worth internalising
+
+1. **Pin BOTH the compile-time type and the runtime shape.** The `@ts-expect-error`-guarded `config.allowedTools === true` assertion is the key defensive pattern: TypeScript rules out the boolean widening at compile time, but a widening cast or a `Record<string, unknown>` round-trip inside the implementation would silently produce a boolean at runtime. The runtime assertion fails loudly in that case even when `tsc` is clean.
+2. **The `undefined` / `[]` / `[...]` trichotomy is a contract, not an implementation detail.** Any test suite that covers an options-bag field with the shape `readonly T[] | undefined` must pin all three branches — the empty-array case is the one most commonly missed, and it is the one that normalisation code usually breaks.
+3. **Parametrise negative pins over the full `potentiallyDangerous` tuple.** The derivation's `for (const tool of potentiallyDangerous) { ... }` loop in `src/agent/subagent-permissions.ts:272-281` is the surface the suite audits. The suite's matching `for (const tool of [...]) { expect(...) }` loop iterates the same tuple so a future addition to the dangerous-tools list (e.g. a new file-mutation primitive) must land with a matching entry here — a silent omission would narrow the audit without failing anything.
+4. **Keep the derivation suite independent of the `TaskTool` wrapper.** The second `describe` block drives `deriveSubagentSessionPermission` directly with inline inputs so a regression in `TaskTool.buildSubagentConfig` (e.g. a wrapper that stops threading `allowedTools` through to the derivation) is distinguishable from a regression in the derivation itself. One failure localises to the wrapper, the other localises to the pure function.
+5. **No `vi.mock`, no global state, no temp directory.** Both `TaskTool.buildSubagentConfig` and `deriveSubagentSessionPermission` are pure in the fields this suite exercises (`options.autoMode` / `options.maxDepth` fall back to defaults; neither hits the filesystem or the permission manager). Running the suite under `vitest --poolOptions.threads.singleThread=false` is safe, and a future refactor that introduces side effects into either entry point should be flagged by this suite's inability to continue running without mocks.
+
+### Related suites
+
+- `tests/agent/inheritance.test.ts` ([issue #2104](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)) is the sibling suite that pins the complementary bug class: parent-session edit allowlists written as `[deny *, allow <path>]` must not be flattened into blanket denies on delegated subagents. Together the two files cover both halves of the Kilocode #15254 regression surface — the `allowedTools` shape (this suite) and the parent-ruleset shape (the inheritance suite).
+- `tests/tool/tools/task-approval-boundary.test.ts` covers the end-to-end approval boundary enforcement at the permission-manager level: once the shape is preserved and the inheritance filters are applied, the manager must still refuse any tool call the derived ruleset denies. The shape-preservation suite is upstream of that boundary — a regression here would feed broken shapes into the approval boundary suite and amplify the failure.
 
 ## Testing the `experimental.todo` flag (`src/config/userConfig.ts`, 2026-10-20 sync)
 

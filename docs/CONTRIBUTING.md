@@ -1830,6 +1830,44 @@ See `docs/TESTING.md#testing-the-kilo_board_write-recipient-state-warning` for t
 
 A second reference example is `tests/agent/inheritance.test.ts` (commit `85ffc171`, issue #2104, 233 lines) which audits `deriveSubagentSessionPermission` + `TaskTool.buildSubagentConfig` against the Kilocode PR #15254 "flattened allowlist baseline" bug class. The suite does not add runtime behaviour — the fix landed in a prior commit via `editAllowlistBaselines` in `src/agent/subagent-permissions.ts:209-222` — but it locks in four regression contracts (allowlist baseline is dropped, true blanket deny still propagates, parent approvals are never forwarded, mixed-shape input still filters correctly) that would otherwise silently rot under a future refactor. The suite parametrises across the full `EDIT_PERMISSION_NAMES` tuple so adding a new edit-family name to the source constant without an accompanying test case leaves a narrower audit than intended — a shape the module docblock explicitly flags. See [docs/TESTING.md — Testing subagent tool allowlist inheritance](TESTING.md#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104) for the full walkthrough and the six patterns the suite exemplifies for any future "audit against upstream bug class" test file.
 
+### Shape-preservation regression suites (pin the type shape, not just the value)
+
+A specialised flavour of verification-only suite is the **shape-preservation suite**: it exists specifically to pin the TypeScript type shape of a field as it flows through two or more module boundaries, so a future refactor that widens, narrows, or collapses the shape (a cast, a convenience `?? true` default, a serialisation round-trip through a plugin) trips CI immediately. These suites are tiny — they tend to be two `describe` blocks around a shared fixture — but they are the strongest regression guard available for options-bag fields whose downstream interpretation branches on their type.
+
+The reference example is `tests/agent/subagent-permissions.test.ts` (commit `f0d0e15d`, issue #2108, 211 lines), the companion to the inheritance suite above. It pins `SubagentOptions.allowedTools` (`readonly string[] | undefined`) through `TaskTool.buildSubagentConfig` (`src/tool/tools/task.ts:216-239`) and `deriveSubagentSessionPermission` (`src/agent/subagent-permissions.ts:246-282`) against the exact Kilocode PR #15254 bug where `allowedTools: ['edit']` was flattened into `allowedTools: true` and reinterpreted by the registry as "grant every tool". The patterns the suite exemplifies — and that any future shape-preservation suite should copy:
+
+1. **Pin both the compile-time type and the runtime shape.** A `@ts-expect-error`-guarded runtime assertion is the key defensive pattern:
+
+   ```typescript
+   it("preserves ['bash'] as a string array, NOT a boolean", () => {
+     const config = TaskTool.buildSubagentConfig(ctx, makeAgent(), {
+       allowedTools: ['bash'],
+     });
+
+     expect(Array.isArray(config.allowedTools)).toBe(true);
+     expect(config.allowedTools).toEqual(['bash']);
+     expect(typeof config.allowedTools).toBe('object');
+     // @ts-expect-error — the type says `readonly string[] | undefined`,
+     // but assert at runtime that it is not `true` even after a widening
+     // cast would have slipped through.
+     expect(config.allowedTools === true).toBe(false);
+   });
+   ```
+
+   TypeScript rules out the boolean widening at compile time, but a widening cast or a `Record<string, unknown>` round-trip inside the implementation would silently produce a boolean at runtime. The runtime assertion fails loudly in that case even when `tsc` is clean.
+
+2. **Cover the full `undefined` / `[]` / `[...]` trichotomy.** Any options-bag field with the shape `readonly T[] | undefined` has three meaningful states, not two: `undefined` ("no explicit grant, inherit the baseline"), `[]` ("empty allow-list, baseline only"), and `[...]` ("explicit grant"). A normalisation step that collapses `[] → undefined` would silently merge two of those signals and reintroduce exactly the bug class the suite guards against. Every shape-preservation suite MUST have a dedicated test case for each of the three branches.
+
+3. **Pair each wrapper assertion with a direct call against the pure derivation.** The subagent suite's two `describe` blocks exercise `TaskTool.buildSubagentConfig` (the wrapper) and `deriveSubagentSessionPermission` (the pure derivation) independently with the same three-branch matrix. A regression in the wrapper that stops threading the field through to the derivation is distinguishable from a regression in the derivation itself — one failure localises to the wrapper, the other to the pure function.
+
+4. **Parametrise negative pins over the exact tuple the implementation iterates.** The derivation's `potentiallyDangerous` list (`write`, `edit`, `multiedit`, `patch`, `apply_patch`, `bash`, `shell`, `webfetch`, `delete`) is the surface the suite audits. The `for (const tool of [...]) { expect(...) }` loop in the empty-array case iterates the same tuple so adding a new entry to the source list without a matching entry here narrows the audit without failing anything — a shape the suite's docblock should flag explicitly.
+
+5. **No `vi.mock`, no global state, no temp directory.** Shape-preservation suites must stay pure: both `TaskTool.buildSubagentConfig` and `deriveSubagentSessionPermission` are pure in the fields this suite exercises, so the suite runs in parallel across workers without ceremony. A future refactor that introduces side effects into either entry point is flagged by the inability to continue running the suite without mocks — which is itself useful feedback.
+
+6. **Cite the paired upstream bug and the sibling suite from the module docblock.** The suite's file-level docblock names Kilocode PR #15254, the audit date (2026-10-19), the issue id (#2108), and the companion suite `tests/agent/inheritance.test.ts` (which covers the complementary parent-ruleset shape). When a future regression trips either suite, the failing module docblock is enough to locate the originating bug class in minutes.
+
+See [docs/TESTING.md — Testing subagent `allowedTools` array-shape preservation](TESTING.md#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108) for the per-case walkthrough. Any future options-bag field whose downstream interpretation branches on its type (e.g. `maxDepth?: number | 'unlimited'`, `recipient?: string | string[]`) should receive a matching shape-preservation suite before the first consumer ships.
+
 ### Abort propagation through delegating tools
 
 Tools that delegate work to a child session (currently only `task`) MUST wire the child's lifetime to the parent's `AbortSignal` so that a Ctrl+C at the CLI immediately stops every descendant subagent — otherwise a runaway subagent chain will keep consuming API quota after the user has given up.
