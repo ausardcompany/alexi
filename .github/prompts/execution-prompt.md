@@ -6,273 +6,280 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-21
+Generated: 2026-10-22
 Based on upstream commits analyzed:
-- `94bc566` - fix(core): keep unsupported MCP media out of tool attachments
-- `aadd4d8` - feat(core): add OPENCODE_DISABLE_FREE_MODELS to hide free models
-- `80b8762` - fix(core): forward retryAfterMs across provider session errors
-- `a9fa57b` - feat(core): typed free-limit error with reset time
-- `d2812d1` - fix(core): tighten session title prompt
-- `5c52626` - fix(core): generate titles at the lowest model variant
-- `15adc3d` - fix(core): send only changed entries in instruction updates
-- `c3b613c` - fix(core): resolve relative directories during V1 migration
-- `d898c04` - feat(core): add experimental.location_idle_timeout
-- `89d996c` - fix(core): keep locations with running sessions or background jobs
-- `e9ac459` - fix(core): build provider variants after package normalization
-- `3b593dd` - fix(codemode): run each job to completion
-- `3fdb13b` - fix(stats): retry failed syncs instead of waiting an hour
+- **kilocode**: 4481e06d8 (PR link ingest), 2f452d7a5 (session host registry), 2e1793154 (MCP prompt content preservation), f18d9006c (session host contracts)
+- **opencode**: c87f6b7 (compaction keepID validation), 3260ec7 (legacy apply_patch → edit), 0c8e7a9 (preserve Permission.Error), 6a5f15a (ignore unsupported agent colors), 6709f56 (compaction output limit), ab249a9 (cache breakpoints), 870ab9d (baseURL override), 93bf002 (shared isRecord/stringify), 9c8e9e4 (remove NamedError/iife), 248bfbe (codemode fetch display args), e441daf (Windows service port), c93aaae (fs.watch graceful fallback)
 
 ## Summary
-- Total changes planned: 10
-- Critical: 1 | High: 4 | Medium: 4 | Low: 1
+- Total changes planned: 14
+- Critical: 2 | High: 5 | Medium: 5 | Low: 2
 
 ## Changes
 
-### 1. Filter unsupported MCP media from tool attachments
-**File**: `src/tool/mcp.ts`
+### 1. Preserve Permission.Error in FileAccess Interface
+**File**: `src/permission/file-access.ts` (or `src/permission/index.ts`)
 **Priority**: critical
 **Type**: bugfix
-**Reason**: Upstream fix (`94bc566`) prevents sending unsupported media types to models, which can crash the model request or lead to provider rejection errors. Important for SAP AI Core which has stricter media payload validation.
+**Reason**: Upstream fix (opencode 0c8e7a9) — the permission error type was being lost at the FileAccess boundary, causing permission errors to surface as generic errors. Critical for correct permission enforcement, especially important in SAP AI Core where permission tracking is auditable.
 
-**Current code** (likely around media/content handling in MCP tool call result):
+**Current code** (likely pattern):
 ```typescript
-// results from an MCP tool call are returned as part of the content array
-const output = result.content.map((item) => {
-  if (item.type === "text") return { type: "text", text: item.text }
-  if (item.type === "image") return { type: "image", data: item.data, mimeType: item.mimeType }
-  if (item.type === "resource") return { type: "resource", resource: item.resource }
-  return item
-})
+export const checkAccess = (path: string): Effect.Effect<void, Error> =>
+  Permission.check(path).pipe(
+    Effect.mapError((e) => new Error(e.message))
+  )
 ```
 
 **New code**:
 ```typescript
-// Supported MIME types for attaching to tool outputs
-const SUPPORTED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"])
-
-const output: Array<ToolOutputPart> = []
-const unsupported: string[] = []
-
-for (const item of result.content) {
-  if (item.type === "text") {
-    output.push({ type: "text", text: item.text })
-    continue
-  }
-  if (item.type === "image") {
-    if (SUPPORTED_IMAGE_MIME.has(item.mimeType)) {
-      output.push({ type: "image", data: item.data, mimeType: item.mimeType })
-    } else {
-      unsupported.push(`image/${item.mimeType}`)
-    }
-    continue
-  }
-  if (item.type === "resource") {
-    // Only attach resources that are text or supported images
-    if (item.resource.mimeType?.startsWith("text/")) {
-      output.push({ type: "text", text: item.resource.text ?? "" })
-    } else if (item.resource.mimeType && SUPPORTED_IMAGE_MIME.has(item.resource.mimeType)) {
-      output.push({ type: "image", data: item.resource.blob, mimeType: item.resource.mimeType })
-    } else {
-      unsupported.push(item.resource.mimeType ?? "unknown")
-    }
-    continue
-  }
-  unsupported.push(item.type)
-}
-
-if (unsupported.length > 0) {
-  output.push({
-    type: "text",
-    text: `[Omitted ${unsupported.length} unsupported attachment(s): ${unsupported.join(", ")}]`,
-  })
-}
+export const checkAccess = (path: string): Effect.Effect<void, Permission.Error> =>
+  Permission.check(path) // propagate Permission.Error unchanged
 ```
 
-### 2. Typed free-limit / rate-limit error with retry/reset time
-**File**: `src/core/errors.ts` (or wherever `SessionError` is defined)
-**Priority**: high
-**Type**: feature
-**Reason**: Upstream commits `a9fa57b` and `80b8762` introduce a typed error carrying `retryAfterMs` / reset time. For SAP AI Core we commonly hit quota (429) and need to surface rate-limit metadata to the UI / caller for retry UX.
+Ensure the `FileAccess.Interface` error channel is typed as `Permission.Error` (or union including it) rather than being flattened.
 
-**New code** (add to session error schema):
-```typescript
-export const SessionRateLimitError = Schema.TaggedStruct("SessionRateLimitError", {
-  message: Schema.String,
-  retryAfterMs: Schema.optional(Schema.Number),
-  resetAt: Schema.optional(Schema.DateFromString),
-  provider: Schema.optional(Schema.String),
-})
-export type SessionRateLimitError = Schema.Schema.Type<typeof SessionRateLimitError>
+---
 
-// In the SessionError union, add this variant alongside existing errors.
-export const SessionError = Schema.Union(
-  // ...existing variants...
-  SessionRateLimitError,
-)
-```
-
-**Translator helper** in `src/providers/sap-ai-core.ts`:
-```typescript
-function toSessionError(err: unknown): SessionError {
-  if (isProviderError(err) && err.status === 429) {
-    const headerRetry = err.headers?.["retry-after"]
-    const retryAfterMs = headerRetry ? Number(headerRetry) * 1000 : undefined
-    return {
-      _tag: "SessionRateLimitError",
-      message: err.message,
-      retryAfterMs,
-      provider: "sap-ai-core",
-    }
-  }
-  // ...existing mapping
-}
-```
-
-### 3. Hide free models via env flag (SAP equivalent: hide non-licensed models)
-**File**: `src/providers/registry.ts` or `src/model.ts`
-**Priority**: medium
-**Type**: feature
-**Reason**: Upstream `aadd4d8` adds `OPENCODE_DISABLE_FREE_MODELS`. For Alexi, mirror this with `ALEXI_DISABLE_FREE_MODELS` and (optionally) a flag to hide non-SAP-licensed models for enterprise deployments.
-
-**New code**:
-```typescript
-const disableFreeModels =
-  process.env.ALEXI_DISABLE_FREE_MODELS === "1" ||
-  process.env.ALEXI_DISABLE_FREE_MODELS === "true"
-
-export function filterModels(models: Model[]): Model[] {
-  if (!disableFreeModels) return models
-  return models.filter((m) => !m.free && !m.id.startsWith("free/"))
-}
-```
-
-### 4. Generate session titles with lowest-cost model variant & tightened prompt
-**File**: `src/core/session/title.ts`
-**Priority**: high
+### 2. Validate Compaction keepID with SessionMessage.ID schema
+**File**: `src/core/session/compaction.ts`
+**Priority**: critical
 **Type**: bugfix
-**Reason**: Upstream `5c52626` + `d2812d1` improve title quality and reduce token cost by picking the smallest variant and tightening the prompt. Important for SAP AI Core where every call is billed/throttled.
+**Reason**: Upstream fix (opencode c87f6b7) — `keepID` was not being validated against the message ID schema, which could produce silent corruption during compaction. Important because Alexi's SAP AI Core sessions must preserve message history consistency.
 
 **Current code**:
 ```typescript
-export async function generateTitle(messages: Message[], model: Model) {
-  const prompt = `Summarize the following conversation in a short title:\n${JSON.stringify(messages)}`
-  return model.generate({ prompt, maxTokens: 50 })
+export const compact = (opts: { keepID?: string; ... }) => {
+  const keep = opts.keepID
+  // ...
 }
 ```
 
 **New code**:
 ```typescript
-const TITLE_PROMPT = `Generate a concise 3-7 word title summarizing the user's request.
-Rules:
-- No quotes, no trailing punctuation, no markdown.
-- Prefer imperative or noun phrases.
-- Do NOT include words like "chat", "conversation", "session".`
+import { SessionMessage } from "../session/message.js"
 
-function selectTitleVariant(model: Model): Model {
-  // Prefer the cheapest/smallest variant if the provider exposes variants.
-  if (!model.variants?.length) return model
-  const sorted = [...model.variants].sort(
-    (a, b) => (a.cost?.input ?? Infinity) - (b.cost?.input ?? Infinity),
-  )
-  return sorted[0] ?? model
-}
-
-export async function generateTitle(messages: Message[], model: Model) {
-  const chosen = selectTitleVariant(model)
-  const userText = extractFirstUserText(messages)
-  return chosen.generate({
-    system: TITLE_PROMPT,
-    prompt: userText,
-    maxTokens: 32,
-    temperature: 0.2,
-  })
+export const compact = (opts: { keepID?: string; ... }) => {
+  const keep = opts.keepID
+    ? SessionMessage.ID.make(opts.keepID) // validate via schema
+    : undefined
+  // ...
 }
 ```
 
-### 5. Instruction updates: send only changed entries
-**File**: `src/core/instructions.ts` (or wherever MCP/skill/reference instructions are composed)
-**Priority**: medium
-**Type**: refactor / bugfix
-**Reason**: Upstream `15adc3d` sends only diffs across MCP, skill, and reference instruction updates. Reduces payload size and avoids spurious re-injections.
+---
 
-**New code**:
+### 3. Give compaction summaries the same output limit as normal turns
+**File**: `src/core/session/compaction.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream fix (opencode 6709f56) — compaction was truncating summaries too aggressively, losing context. Especially impactful for long-running SAP AI Core sessions where compaction is more frequent due to token limits.
+
+**New code** (locate the max-output option when building the compaction generation request):
 ```typescript
-type InstructionEntry = { id: string; content: string }
-
-export function diffInstructions(
-  previous: InstructionEntry[],
-  current: InstructionEntry[],
-): { added: InstructionEntry[]; removed: string[]; updated: InstructionEntry[] } {
-  const prevMap = new Map(previous.map((e) => [e.id, e.content]))
-  const currMap = new Map(current.map((e) => [e.id, e.content]))
-
-  const added: InstructionEntry[] = []
-  const updated: InstructionEntry[] = []
-  const removed: string[] = []
-
-  for (const [id, content] of currMap) {
-    if (!prevMap.has(id)) added.push({ id, content })
-    else if (prevMap.get(id) !== content) updated.push({ id, content })
-  }
-  for (const id of prevMap.keys()) {
-    if (!currMap.has(id)) removed.push(id)
-  }
-  return { added, removed, updated }
-}
-```
-
-Call sites that previously re-sent the entire instruction set should instead compute the diff and only send `added`/`updated`/`removed`.
-
-### 6. Experimental: `location_idle_timeout` config
-**File**: `src/schema/config.ts` and `src/core/location-activity.ts`
-**Priority**: medium
-**Type**: feature
-**Reason**: Upstream `d898c04` + `89d996c` add an idle-timeout for locations, and keep locations alive while sessions / jobs are still running. Useful for long-running SAP AI Core sessions that occasionally stall mid-stream.
-
-**Schema change**:
-```typescript
-export const ConfigExperimental = Schema.Struct({
-  // ...existing fields...
-  location_idle_timeout: Schema.optional(Schema.Number), // milliseconds
+const generation = yield* Generation.create({
+  model,
+  messages: compactionMessages,
+  // BEFORE: maxOutputTokens: COMPACTION_MAX_TOKENS,
+  // AFTER: use the same cap as a normal turn
+  maxOutputTokens: model.limit?.output ?? DEFAULT_MAX_OUTPUT,
 })
 ```
 
-**Location sweeper**:
+---
+
+### 4. Map legacy `apply_patch` permissions to `edit`
+**File**: `src/permission/migrate.ts` (create if missing) or `src/permission/saved.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream fix (opencode 3260ec7) — legacy saved permissions use the removed `apply_patch` tool name; without migration, saved permissions are orphaned and prompt users repeatedly. Alexi inherits saved-permission storage so needs the same migration.
+
+**New code**:
 ```typescript
-export function shouldReleaseLocation(
-  loc: Location,
-  now: number,
-  idleTimeoutMs: number,
-  runningSessions: Set<string>,
-  backgroundJobs: Set<string>,
-): boolean {
-  // Keep locations with any active work regardless of idle time.
-  if (runningSessions.has(loc.id)) return false
-  if ([...backgroundJobs].some((jobId) => jobId.startsWith(loc.id))) return false
-  return now - loc.lastActiveAt > idleTimeoutMs
+// src/permission/saved.ts (loader)
+const LEGACY_TOOL_MAP: Record<string, string> = {
+  apply_patch: "edit",
+}
+
+function migrateToolName(name: string): string {
+  return LEGACY_TOOL_MAP[name] ?? name
+}
+
+// in load():
+const saved = rows.map((row) => ({
+  ...row,
+  tool: migrateToolName(row.tool),
+}))
+```
+
+Add a unit test asserting legacy `apply_patch` rows load as `edit`.
+
+---
+
+### 5. Let configured provider baseURL override catalog model endpoints
+**File**: `src/providers/sap-ai-core.ts` / `src/providers/index.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream fix (opencode 870ab9d) — when a user configures a `baseURL` override for a provider, the catalog's model-specific endpoint was still winning. Highly relevant for Alexi: SAP AI Core deployments **always** need a custom base URL per tenant, so this prevents the catalog from stomping tenant endpoints.
+
+**Current code**:
+```typescript
+function resolveEndpoint(model: Model, provider: Provider) {
+  return model.endpoint ?? provider.baseURL ?? DEFAULT
 }
 ```
 
-### 7. V1 migration: resolve relative session directories against project worktree
-**File**: `src/database/v1-migration.ts` (or wherever Alexi stores/migrates persisted sessions)
+**New code**:
+```typescript
+function resolveEndpoint(model: Model, provider: Provider) {
+  // Explicit provider baseURL (user config) overrides catalog model endpoint
+  return provider.baseURL ?? model.endpoint ?? DEFAULT
+}
+```
+
+Add a test ensuring an SAP AI Core base URL overrides any catalog `endpoint` on the model definition.
+
+---
+
+### 6. Skip non-cacheable content parts when placing cache breakpoints
+**File**: `src/providers/cache-policy.ts` (or wherever cache breakpoint logic lives)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream fix (opencode ab249a9) — cache breakpoints were being placed on non-cacheable content parts (e.g., images, ephemeral tool results), invalidating the cache. Affects token economy on all providers; important for SAP AI Core cost tracking.
+
+**New code**:
+```typescript
+function placeBreakpoint(parts: ContentPart[]) {
+  // Only place on cacheable parts (text, tool-result with text payload)
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]
+    if (p.type === "text" || (p.type === "tool-result" && hasTextOutput(p))) {
+      p.providerOptions = { ...p.providerOptions, cacheControl: { type: "ephemeral" } }
+      return
+    }
+  }
+}
+```
+
+---
+
+### 7. Ignore unsupported agent colors (don't throw on config decode)
+**File**: `src/agent/config.ts` or `src/agent/schema.ts`
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream fix (opencode 6a5f15a) — invalid color values in agent frontmatter crashed agent loading entirely. Agents should load with `color: undefined` instead.
+
+**Current code**:
+```typescript
+export const AgentConfig = Schema.Struct({
+  color: Schema.optional(ColorSchema),
+  // ...
+})
+```
+
+**New code**:
+```typescript
+export const AgentConfig = Schema.Struct({
+  color: Schema.optional(
+    Schema.transform(
+      Schema.Unknown,
+      Schema.UndefinedOr(ColorSchema),
+      {
+        decode: (v) => (isValidColor(v) ? v : undefined),
+        encode: (v) => v,
+      }
+    )
+  ),
+  // ...
+})
+```
+
+---
+
+### 8. Add session host registry + Kilo Cloud adapter (session hosting abstraction)
+**Files**:
+- `src/session-hosting/types.ts` (new)
+- `src/session-hosting/registry.ts` (new)
+- `src/session-hosting/index.ts` (new)
+
+**Priority**: medium
+**Type**: feature
+**Reason**: Upstream feature (kilocode 2f452d7a5, f18d9006c) — introduces a pluggable session host registry. For Alexi, this creates a clean seam to register SAP AI Core as a session host alongside any local/cloud hosts. Enables future SAP-hosted session restore/sync.
+
+**New code** (`src/session-hosting/types.ts`):
+```typescript
+export interface SessionHost {
+  readonly id: string
+  readonly displayName: string
+  readonly supports: (sessionID: string) => boolean
+  readonly restore: (sessionID: string) => Promise<SessionSnapshot | undefined>
+  readonly list?: () => Promise<SessionSummary[]>
+}
+
+export interface SessionSnapshot { /* ... */ }
+export interface SessionSummary { id: string; title: string; updatedAt: number }
+```
+
+**New code** (`src/session-hosting/registry.ts`):
+```typescript
+const hosts = new Map<string, SessionHost>()
+
+export const register = (host: SessionHost) => {
+  hosts.set(host.id, host)
+}
+export const get = (id: string) => hosts.get(id)
+export const list = () => Array.from(hosts.values())
+export const resolveForSession = (sessionID: string): SessionHost | undefined =>
+  list().find((h) => h.supports(sessionID))
+```
+
+Register an SAP AI Core host adapter in `src/providers/sap-ai-core.ts` on module init.
+
+---
+
+### 9. Preserve MCP prompt content (no shell expansion on prompt strings)
+**File**: `src/core/session/prompt.ts` or `src/tool/mcp.ts`
 **Priority**: medium
 **Type**: bugfix
-**Reason**: Upstream `c3b613c` fixes legacy ACP sessions whose `cwd` was stored relative to an unknown process. If Alexi has any legacy session format, apply the same fallback: substitute the project worktree when the stored directory is not absolute.
+**Reason**: Upstream fix (kilocode 2e1793154) — MCP prompt content was being passed through shell expansion, mangling `$VAR` and backticks. Fix preserves the raw content.
 
-**New helper**:
+**Current code**:
 ```typescript
-export function storedAbsolutePath(input: string): string | undefined {
-  const result = storagePath(input)
-  if (nodePath.posix.isAbsolute(result) || isWindowsStoragePath(result)) return result
-  return undefined
+const expanded = shellExpand(mcpPrompt.content)
+```
+
+**New code**:
+```typescript
+// MCP prompts are user content, not shell commands; do not expand.
+const content = mcpPrompt.content
+```
+
+Add a regression test: an MCP prompt containing `$HOME` must remain literal `$HOME`.
+
+---
+
+### 10. Introduce shared `isRecord` and `stringify` helpers; drop redundant decoding
+**File**: `src/util/record.ts` (new), apply across callsites
+**Priority**: medium
+**Type**: refactor
+**Reason**: Upstream refactor (opencode 93bf002, 7012c9d, 6dfc681) — consolidates `isRecord` type guard + `stringify` helper and removes redundant re-decoding of already-branded data. Reduces duplicated runtime validation in hot paths (session inbox, projector, prompt).
+
+**New code** (`src/util/record.ts`):
+```typescript
+export const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v)
+
+export const stringify = (v: unknown): string => {
+  if (typeof v === "string") return v
+  try { return JSON.stringify(v) } catch { return String(v) }
 }
 ```
 
-**Migration logic**
-{"prompt_tokens":12791,"completion_tokens":4096,"total_tokens":16887,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+Then audit `src/core/session/{inbox,projector,prompt}.ts` and `src/providers/*.ts` for inline `typeof x === "object" && x !== null` checks and replace with `isRecord`. Rem
+{"prompt_tokens":15088,"completion_tokens":4096,"total_tokens":19184,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
-[Session: 8d525815-3efa-4224-9b7f-2587f0834ed4]
-[Messages: 2, Tokens: 16887]
+[Session: 3034f6b1-0c6a-4d59-a5e8-d52c6cd91c27]
+[Messages: 2, Tokens: 19184]
 
 ## Execution Instructions
 
