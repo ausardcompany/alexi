@@ -8,17 +8,35 @@ You are a senior software architect analyzing upstream changes from three AI cod
 ## Diff Report
 
 # Upstream Changes Report
-Generated: 2026-10-21 11:18:34
+Generated: 2026-10-22 11:17:17
 
 ## Summary
-- kilocode: 0 commits, 0 files changed
-- opencode: 51 commits, 224 files changed
+- kilocode: 19 commits, 30 files changed
+- opencode: 46 commits, 199 files changed
 
-## kilocode Changes (5cc65d121..5cc65d121)
+## kilocode Changes (5cc65d121..4481e06d8)
 
 ### Commits
 
-(no commits)
+- 4481e06d8 - fix(cli): ingest PR links without remote control (#15350) (Evgeny Shurakov, 2026-10-22)
+- 9e4e3a43c - Merge pull request #14644 from Kilo-Org/docs/codex-instructions-limit (Joshua Lambert, 2026-10-21)
+- 23d6ee8a3 - Merge branch 'main' into docs/codex-instructions-limit (Josh Lambert, 2026-10-21)
+- 56aead645 - Merge pull request #15295 from Kilo-Org/cosmic-zephyr (Kirill Kalishev, 2026-10-21)
+- 016491bf7 - fix(jetbrains): stop following the prompt after manual scroll (kirillk, 2026-10-21)
+- 42530c80e - Merge pull request #15351 from Kilo-Org/mellow-badger (Kirill Kalishev, 2026-10-21)
+- f18d9006c - fix(cli): tighten session host contracts (kirillk, 2026-10-21)
+- 2f452d7a5 - feat(cli): add session host registry and kilo cloud adapter (kirillk, 2026-10-21)
+- ccef5ec13 - Merge pull request #15346 from MihaelaStoica/docs/desktop-0.1.13 (Emilie Lima Schario, 2026-10-21)
+- e23c41fb8 - Merge pull request #15293 from Kilo-Org/fix/mcp-prompt-shell-expansion (Joshua Lambert, 2026-10-21)
+- 3c562c0ad - docs(kilo-docs): address review feedback on Desktop docs (Mihaela Stoica, 2026-10-21)
+- a70cba8a6 - fix(jetbrains): address prompt navigator review feedback (kirillk, 2026-10-21)
+- 857b8e198 - docs(kilo-docs): update Kilo Desktop docs for 0.1.13 (Mihaela Stoica, 2026-10-21)
+- 0cc464f3e - fix(jetbrains): keep prompt navigator in sync with hovered stripe (kirillk, 2026-10-20)
+- 2e1793154 - fix(cli): preserve MCP prompt content (Josh Lambert, 2026-10-20)
+- b84ea31dc - Merge branch 'main' into docs/codex-instructions-limit (Joshua Lambert, 2026-09-28)
+- 466550f0b - Apply suggestion from @lambertjosh (Joshua Lambert, 2026-09-28)
+- ec4dde188 - docs(kilo-docs): simplify Codex limit guidance (Josh Lambert, 2026-09-28)
+- 2d8c27a12 - docs(kilo-docs): note direct Codex instructions size limit (Josh Lambert, 2026-09-28)
 
 ### Changed Files by Category
 
@@ -38,449 +56,506 @@ Generated: 2026-10-21 11:18:34
 (no changes)
 
 #### Other Changes
-(no changes)
+- `.changeset/jetbrains-prompt-rail-hover.md` (+5, -0)
+- `.changeset/mcp-prompt-shell-expansion.md` (+5, -0)
+- `.changeset/restore-session-pr-ingest.md` (+5, -0)
+- `.changeset/session-host-cloud-adapter.md` (+5, -0)
+- `packages/kilo-docs/pages/ai-providers/openai-chatgpt-plus-pro.md` (+3, -0)
+- `packages/kilo-docs/pages/ai-providers/openai.md` (+1, -0)
+- `packages/kilo-docs/pages/desktop/features/environments.md` (+9, -3)
+- `packages/kilo-docs/pages/desktop/features/files.md` (+4, -0)
+- `packages/kilo-docs/pages/desktop/features/git.md` (+6, -4)
+- `packages/kilo-docs/pages/desktop/quickstart.md` (+39, -14)
+- `packages/kilo-docs/pages/desktop/settings/general.md` (+18, -6)
+- `packages/kilo-docs/pages/desktop/troubleshooting.md` (+1, -0)
+- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/rail/PromptRail.kt` (+10, -4)
+- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/session/ui/rail/PromptRailPopup.kt` (+78, -11)
+- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/list/ActiveList.kt` (+9, -0)
+- `packages/kilo-jetbrains/frontend/src/main/kotlin/ai/kilocode/client/ui/list/ActiveListView.kt` (+47, -2)
+- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/PromptRailLayoutTest.kt` (+42, -0)
+- `packages/kilo-jetbrains/frontend/src/test/kotlin/ai/kilocode/client/session/ui/rail/PromptRailPopupTest.kt` (+112, -0)
+- `packages/opencode/src/kilo-sessions/kilo-sessions.ts` (+26, -9)
+- `packages/opencode/src/kilocode/cloud/contracts.ts` (+6, -2)
+- `packages/opencode/src/kilocode/session-hosting/index.ts` (+35, -0)
+- `packages/opencode/src/kilocode/session-hosting/kilo-cloud.ts` (+372, -0)
+- `packages/opencode/src/kilocode/session-hosting/registry.ts` (+53, -0)
+- `packages/opencode/src/kilocode/session-hosting/types.ts` (+202, -0)
+- `packages/opencode/src/session/prompt.ts` (+1, -1)
+- `packages/opencode/test/kilocode/kilo-sessions.test.ts` (+219, -32)
+- `packages/opencode/test/kilocode/mcp-prompt-shell.test.ts` (+99, -0)
+- `packages/opencode/test/kilocode/session-hosting/kilo-cloud.test.ts` (+429, -0)
+- `packages/opencode/test/kilocode/session-hosting/registry.test.ts` (+122, -0)
+- `packages/opencode/test/kilocode/session-hosting/service.test.ts` (+34, -0)
 
 ### Key Diffs
 
 (no key diffs to show)
 
-## opencode Changes (d814879..3a1f9a9)
+## opencode Changes (3a1f9a9..f7d5b6f)
 
 ### Commits
 
-- 3a1f9a9 - docs(go): end Step 5 Preview usage promotion (#57718) (opencode-agent[bot], 2026-10-21)
-- 4d59657 - fix(console): remove free model daily request quota from Go FAQ (#57663) (opencode-agent[bot], 2026-10-21)
-- 79fd806 - feat(server): list experimental voice models (#57194) (Kit Langton, 2026-10-20)
-- a2cb1c4 - refactor(ai): use OpenAIChat assistant hook and drop OpenRouterBody cast (#57616) (Aiden Cline, 2026-10-21)
-- d2812d1 - fix(core): tighten session title prompt (#57648) (Aiden Cline, 2026-10-21)
-- c3b613c - fix(core): resolve relative directories during V1 migration (#57618) (MohammadAlMasalmeh, 2026-10-21)
-- 94bc566 - fix(core): keep unsupported MCP media out of tool attachments (#57640) (Aiden Cline, 2026-10-21)
-- 15adc3d - fix(core): send only changed entries in instruction updates (#57626) (Aiden Cline, 2026-10-20)
-- 17ebb66 - chore(function): remove exchange_github_app_token_with_pat route (#57630) (Dax, 2026-10-21)
-- c9b5a9f - refactor(ai): remove dead option/schema helpers and use knownString (#57607) (Aiden Cline, 2026-10-20)
-- b991ba8 - refactor(ai): remove redundant runtime type checks on schema-decoded values (#57605) (Aiden Cline, 2026-10-20)
-- 8c60f94 - refactor(ai): use typed choice.usage in openai-chat parser (#57596) (Aiden Cline, 2026-10-20)
-- 4b50f5c - sync release versions for v2.1.2 [skip ci] (opencode, 2026-10-21)
-- 35a2cf3 - refactor(ai): replace loose Schema.Unknown and catch-all union checks in protocols (#57606) (Aiden Cline, 2026-10-20)
-- cc996ee - refactor(ai): deduplicate JSON, record, and URL query helpers (#57604) (Aiden Cline, 2026-10-20)
-- 51626ee - refactor(ai): tighten EvaluationRequest typing and deduplicate request normalization (#57601) (Aiden Cline, 2026-10-20)
-- 5c52626 - fix(core): generate titles at the lowest model variant (#51939) (Aiden Cline, 2026-10-20)
-- c600cdd - refactor(ai,core): drop redundant typeof check on endpoint.baseURL (#57597) (Aiden Cline, 2026-10-20)
-- 6843fb7 - refactor(ai): reuse JsonObject, ProviderMetadata, and responseHttp across protocols and gateways (#57615) (Aiden Cline, 2026-10-20)
-- 678e49d - refactor(ai): remove unused WebSocket jsonTransport (#57611) (Aiden Cline, 2026-10-20)
-- aae5214 - chore: update nix node_modules hashes (opencode-agent[bot], 2026-10-21)
-- 0ceeb24 - chore(cli): update opentunnel client (#57287) (Aiden Cline, 2026-10-20)
-- aadd4d8 - feat(core): add OPENCODE_DISABLE_FREE_MODELS to hide free models (#57478) (Dax, 2026-10-20)
-- dbe08dd - fix(tui): only show location unavailable when the server reports it missing (#57594) (Aiden Cline, 2026-10-20)
-- 80b8762 - fix(core): forward retryAfterMs across provider session errors (#57589) (Aiden Cline, 2026-10-20)
-- 7d3752c - fix(core): send legacy console.opencode.ai credentials to opencode.ai/console (#57588) (Dax, 2026-10-20)
-- adcda1b - feat(tui): restore animated Go upsell modal on free usage limit (#57471) (Kit Langton, 2026-10-20)
-- 5fa426f - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-21)
-- 5c3891e - fix(app): restore free-tier usage limit dialog, timeline line, and prompt recall (#57466) (Kit Langton, 2026-10-20)
-- 86a0950 - feat(tui): show free-limit notice, recall prompt, and skip failure toast (#57467) (Kit Langton, 2026-10-20)
-- f2a3414 - chore(infra): delete legacy share storage (#57548) (Dax, 2026-10-20)
-- 552f867 - chore: update nix node_modules hashes (opencode-agent[bot], 2026-10-20)
-- a9fa57b - feat(core): typed free-limit error with reset time (#57146) (Kit Langton, 2026-10-20)
-- db1fbe8 - fix(desktop): upgrade Electron to 44.9.1 (#57533) (opencode-agent[bot], 2026-10-20)
-- 4424391 - fix(install): create ~/.zshrc when it's missing so opencode lands on PATH (#57348) (Kit Langton, 2026-10-20)
-- 2cb963c - docs(console): add Muse Wonder 1.0 (Frank, 2026-10-20)
-- 3fdb13b - fix(stats): retry failed syncs instead of waiting an hour (#57516) (Adam, 2026-10-20)
-- d898c04 - feat(core): add experimental.location_idle_timeout (#57476) (Aiden Cline, 2026-10-20)
-- a13c48b - fix(ai): send expires_after.anchor for OpenAI realtime client secrets (#57514) (Kit Langton, 2026-10-20)
-- 0718864 - feat(console): restore fail-open Jev spam scoring on the enterprise form (#57489) (Victor Navarro, 2026-10-20)
-- 3b593dd - fix(codemode): run each job to completion (#54276) (Rhys Sullivan, 2026-10-20)
-- c8e2e1e - fix(core): reuse recent Console config checks for rejected inference (#57465) (Dax, 2026-10-20)
-- 772e2ae - chore(console): remove legacy Console leftovers from the website (#57434) (Victor Navarro, 2026-10-20)
-- 5916014 - refactor(console): remove Jev spam scoring from enterprise form (#57446) (Victor Navarro, 2026-10-20)
-- a62028d - feat(console): add hCaptcha to enterprise form (#57439) (Victor Navarro, 2026-10-20)
-- 89d996c - fix(core): keep locations with running sessions or background jobs (#57416) (James Long, 2026-10-20)
-- 50c5fce - chore(function): remove remaining share endpoints (#57328) (Dax, 2026-10-20)
-- 133b1eb - sync release versions for v2.1.1 [skip ci] (opencode, 2026-10-20)
-- e9ac459 - fix(core): build provider variants after package normalization (#57075) (Victor Navarro, 2026-10-20)
-- 81b2d7a - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-20)
-- 930c0c8 - docs(console): explain API keys and scoped permissions (#57386) (Victor Navarro, 2026-10-20)
+- f7d5b6f - fix(app): paste plain text when renaming session tabs (#58036) (opencode-agent[bot], 2026-10-22)
+- 4d120d4 - fix(stats): include Go Plus usage (#58075) (Adam, 2026-10-22)
+- c93aaae - fix(tui): degrade gracefully when fs.watch fails (#51536) (ANSH SINGH, 2026-10-21)
+- 248bfbe - refactor(core): validate codemode fetch display args and drop unused catalog schema (#57959) (Aiden Cline, 2026-10-21)
+- d26b612 - refactor(core): tighten publish-llm-event types and hoist NativeWindow decoders (#57958) (Aiden Cline, 2026-10-21)
+- cfcf754 - refactor(core): drop redundant decoding and branding in config, agent, and skill (#57953) (Aiden Cline, 2026-10-21)
+- cef9718 - refactor(core): drop redundant branding and re-validation across session modules (#57952) (Aiden Cline, 2026-10-21)
+- eeb9124 - refactor(core): tighten worktree strategy and pty schemas and decode overlay once (#57950) (Aiden Cline, 2026-10-21)
+- 1b1ad48 - refactor(core): drop dead checks and redundant branding in tool plugins and mcp (#57949) (Aiden Cline, 2026-10-21)
+- 6a5f15a - fix(core): ignore unsupported agent colors (#57910) (Aiden Cline, 2026-10-21)
+- 9496ff8 - refactor(core): replace unused runtime input schemas with types in filesystem and permission (#57961) (Aiden Cline, 2026-10-21)
+- b6c0327 - refactor(core): drop redundant reconstructions in rpc and project (#57948) (Aiden Cline, 2026-10-21)
+- c87f6b7 - fix(core): validate compaction keepID with SessionMessage.ID schema (#57945) (Aiden Cline, 2026-10-21)
+- 7012c9d - refactor(core): avoid redundant payload decoding in session inbox and prompt (#57946) (Aiden Cline, 2026-10-21)
+- 7456ad8 - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-22)
+- f0200df - chore: update nix node_modules hashes (opencode-agent[bot], 2026-10-21)
+- c2736fc - feat(app): highlight code with @pierre/highlights instead of Shiki (#57937) (Luke Parker, 2026-10-22)
+- e441daf - fix(cli): move the Windows service port out of the WSL mirrored range (#57428) (Filip, 2026-10-21)
+- 6709f56 - fix(core): give compaction summaries the same output limit as normal turns (#57564) (Aiden Cline, 2026-10-21)
+- e98ab91 - refactor(core): drop redundant String casts on Model.Ref in to-llm-message (#57887) (Aiden Cline, 2026-10-21)
+- 3260ec7 - fix(core): map legacy apply_patch permissions to edit (#57900) (Aiden Cline, 2026-10-21)
+- 2e5a4de - refactor(core): tighten pty, plugin, question, and snapshot types and checks (#57889) (Aiden Cline, 2026-10-21)
+- a7a508b - refactor(ai-sdk): decode JSON body record in one pass and tighten option types (#57891) (Aiden Cline, 2026-10-21)
+- 6dfc681 - refactor(core): avoid redundant decode and re-branding in session inbox and projector (#57890) (Aiden Cline, 2026-10-21)
+- 863ea41 - refactor(ai): type Bedrock event-stream frames without casts or runtime checks (#57609) (Aiden Cline, 2026-10-21)
+- e37f1a0 - refactor(ai): use Schema Json codec in toolResultText and forward Bedrock stream statusCode (#57612) (Aiden Cline, 2026-10-21)
+- bddf534 - refactor(core): remove redundant DeepMutable wrappers and casts in integration, agent, and plugin host (#57825) (Aiden Cline, 2026-10-21)
+- 0c8e7a9 - fix(core): preserve Permission.Error in FileAccess.Interface (#57823) (Aiden Cline, 2026-10-21)
+- d10692e - docs: describe agent creation without the removed CLI command (#57419) (ANIRUDDHA ADAK, 2026-10-21)
+- 8a360e1 - docs(cli): document the opencode debug subcommands (#57861) (0, 2026-10-21)
+- d75c6b9 - docs(www): fix GPT 6.1 Sol cached read price (#57865) (opencode-agent[bot], 2026-10-21)
+- 3108505 - docs(console): add Flint 40B Free (#57862) (opencode-agent[bot], 2026-10-21)
+- 2fde77c - feat(app): animate the Go upsell hero in the free-limit dialog (#57694) (Kit Langton, 2026-10-21)
+- 9c8e9e4 - refactor(core): remove unused NamedError, ConfigErrorV1, and iife helpers (#57822) (Aiden Cline, 2026-10-21)
+- 93bf002 - refactor(core): reuse shared isRecord and stringify helpers (#57826) (Aiden Cline, 2026-10-21)
+- ab249a9 - fix(ai): skip non-cacheable content parts when placing cache breakpoints (#57610) (Aiden Cline, 2026-10-21)
+- 002d7bd - fix(app): stop following the timeline end while dragging the scrollbar (#57831) (James Long, 2026-10-21)
+- 870ab9d - fix(core): let configured provider baseURL override catalog model endpoints (#57810) (opencode-agent[bot], 2026-10-21)
+- f9098c9 - fix(function): scope GitHub App installation token to the verified repository (#57827) (Dax, 2026-10-21)
+- f7577a1 - feat(server): start hosted GPT-Live on the connected OpenCode Console (#57735) (Adam, 2026-10-21)
+- 0c6be86 - chore(function): remove unauthenticated feishu bridge route (#57792) (opencode-agent[bot], 2026-10-21)
+- b2f83b5 - ci: remove the /oc workflow from this repository (#57798) (James Long, 2026-10-21)
+- c3712e0 - ci: remove the duplicate-issues workflow (#57793) (James Long, 2026-10-21)
+- 9141363 - ci: scope pr-management down to the contributor label (#57795) (James Long, 2026-10-21)
+- 578d422 - ci: remove the /review workflow (#57796) (James Long, 2026-10-21)
+- 681156c - chore(core): refresh bundled models.dev snapshot (opencode-agent[bot], 2026-10-21)
 
 ### Changed Files by Category
 
 #### Tool System (packages/*/src/tool/)
-- `packages/core/src/tool/mcp.ts` (+25, -10)
-- `packages/core/src/tool/plugin/mcp-resource.ts` (+4, -1)
-- `packages/core/src/tool/plugin/webfetch.ts` (+2, -10)
+- `packages/core/src/tool/mcp.ts` (+5, -6)
+- `packages/core/src/tool/plugin/question.ts` (+1, -1)
+- `packages/core/src/tool/plugin/read.ts` (+0, -6)
+- `packages/core/src/tool/plugin/subagent.ts` (+1, -1)
+- `packages/core/src/tool/runtime.ts` (+2, -4)
 
 #### Agent System (packages/*/src/agent/)
-(no changes)
+- `.opencode/agent/duplicate-pr.md` (+0, -26)
 
 #### Permission System (**/permission/)
-(no changes)
+- `packages/core/src/permission/saved.ts` (+14, -17)
+- `packages/core/src/permission/sql.ts` (+1, -1)
 
 #### Event Bus (**/bus/, **/event/)
 (no changes)
 
 #### Core (**/core/)
-- `packages/core/package.json` (+1, -1)
-- `packages/core/src/config/normalize.ts` (+9, -0)
-- `packages/core/src/config/plugin/provider.ts` (+3, -0)
-- `packages/core/src/database/path.ts` (+7, -4)
-- `packages/core/src/database/v1-migration.bun.ts` (+22, -6)
-- `packages/core/src/job.ts` (+11, -0)
-- `packages/core/src/location-activity.ts` (+51, -35)
-- `packages/core/src/mcp/client.ts` (+2, -2)
-- `packages/core/src/mcp/instructions.ts` (+8, -2)
-- `packages/core/src/mime.ts` (+10, -0)
-- `packages/core/src/model.ts` (+6, -0)
+- `packages/core/src/agent.ts` (+6, -9)
+- `packages/core/src/aisdk.ts` (+15, -23)
+- `packages/core/src/codemode/catalog.ts` (+7, -8)
+- `packages/core/src/codemode/web.ts` (+4, -2)
+- `packages/core/src/config/plugin/agent.ts` (+3, -7)
+- `packages/core/src/config/plugin/command.ts` (+3, -7)
+- `packages/core/src/config/plugin/provider.ts` (+8, -1)
+- `packages/core/src/config/plugin/skill-file.ts` (+3, -4)
+- `packages/core/src/database/v1-migration.bun.ts` (+2, -1)
+- `packages/core/src/file-access.ts` (+2, -2)
+- `packages/core/src/filesystem.ts` (+10, -13)
+- `packages/core/src/filesystem/search.ts` (+6, -7)
+- `packages/core/src/filesystem/watcher.ts` (+7, -10)
+- `packages/core/src/formatter/builtins.ts` (+1, -4)
+- `packages/core/src/integration.ts` (+12, -15)
+- `packages/core/src/mcp/index.ts` (+5, -6)
 - `packages/core/src/models-dev/snapshot.txt` (+1, -1)
-- `packages/core/src/plugin/agent.ts` (+20, -44)
-- `packages/core/src/plugin/provider/opencode.ts` (+35, -6)
-- `packages/core/src/reference/instructions.ts` (+8, -2)
-- `packages/core/src/session/context.ts` (+27, -9)
-- `packages/core/src/session/execution.ts` (+3, -6)
-- `packages/core/src/session/model-request.ts` (+1, -1)
-- `packages/core/src/session/run-coordinator.ts` (+3, -25)
-- `packages/core/src/session/title.ts` (+10, -4)
-- `packages/core/src/session/to-session-error.ts` (+10, -1)
-- `packages/core/src/skill/instructions.ts` (+8, -2)
-- `packages/core/src/tool-output.ts` (+9, -0)
-- `packages/core/src/voice.ts` (+37, -5)
-- `packages/core/test/browser-idle.test.ts` (+2, -1)
-- `packages/core/test/config/normalization.test.ts` (+9, -3)
-- `packages/core/test/config/provider.test.ts` (+46, -1)
-- `packages/core/test/location-activity.test.ts` (+180, -113)
-- `packages/core/test/location-layer.test.ts` (+16, -11)
-- `packages/core/test/mcp-instructions.test.ts` (+3, -11)
-- `packages/core/test/mcp.test.ts` (+57, -0)
-- `packages/core/test/model-free.test.ts` (+90, -0)
-- `packages/core/test/plugin/provider-opencode.test.ts` (+147, -14)
-- `packages/core/test/reference-instructions.test.ts` (+36, -0)
-- `packages/core/test/session-error.test.ts` (+61, -2)
-- `packages/core/test/session-runner.test.ts` (+4, -2)
-- `packages/core/test/session-title.test.ts` (+92, -0)
-- `packages/core/test/skill/instructions.test.ts` (+14, -10)
-- `packages/core/test/v1-migration.test.ts` (+38, -2)
-- `packages/core/test/voice.test.ts` (+80, -33)
-- `packages/stats/core/package.json` (+1, -1)
-- `packages/stats/core/src/r2-sql.test.ts` (+50, -1)
-- `packages/stats/core/src/r2-sql.ts` (+9, -3)
+- `packages/core/src/permission.ts` (+14, -27)
+- `packages/core/src/persistent-pty/daemon.ts` (+5, -2)
+- `packages/core/src/persistent-pty/index.ts` (+2, -2)
+- `packages/core/src/plugin.ts` (+2, -2)
+- `packages/core/src/plugin/host.ts` (+4, -4)
+- `packages/core/src/plugin/internal.ts` (+3, -0)
+- `packages/core/src/plugin/provider/cloudflare-workers-ai.ts` (+12, -13)
+- `packages/core/src/plugin/provider/github-copilot.ts` (+13, -16)
+- `packages/core/src/plugin/provider/opencode.ts` (+115, -18)
+- `packages/core/src/project.ts` (+4, -5)
+- `packages/core/src/provider.ts` (+15, -10)
+- `packages/core/src/pty.ts` (+3, -3)
+- `packages/core/src/rpc.ts` (+2, -2)
+- `packages/core/src/session.ts` (+5, -9)
+- `packages/core/src/session/compaction.ts` (+10, -3)
+- `packages/core/src/session/history.ts` (+8, -9)
+- `packages/core/src/session/inbox.ts` (+19, -10)
+- `packages/core/src/session/info.ts` (+8, -12)
+- `packages/core/src/session/message-updater.ts` (+3, -3)
+- `packages/core/src/session/model-request.ts` (+4, -11)
+- `packages/core/src/session/projector.ts` (+11, -18)
+- `packages/core/src/session/prompt.ts` (+6, -8)
+- `packages/core/src/session/revert.ts` (+3, -5)
+- `packages/core/src/session/runner/publish-llm-event.ts` (+11, -18)
+- `packages/core/src/session/runner/to-llm-message.ts` (+4, -4)
+- `packages/core/src/session/session.ts` (+1, -1)
+- `packages/core/src/session/sql.ts` (+2, -1)
+- `packages/core/src/session/store.ts` (+1, -1)
+- `packages/core/src/skill.ts` (+4, -3)
+- `packages/core/src/snapshot.ts` (+5, -6)
+- `packages/core/src/util/error.ts` (+0, -68)
+- `packages/core/src/util/iife.ts` (+0, -3)
+- `packages/core/src/v1/config/error.ts` (+0, -18)
+- `packages/core/src/v1/config/migrate.ts` (+14, -17)
+- `packages/core/src/v1/config/provider-options.ts` (+8, -7)
+- `packages/core/src/v1/config/provider.ts` (+2, -11)
+- `packages/core/src/voice.ts` (+72, -12)
+- `packages/core/src/worktree.ts` (+2, -2)
+- `packages/core/src/worktree/sql.ts` (+2, -1)
+- `packages/core/test/aisdk.test.ts` (+3, -1)
+- `packages/core/test/config/agent.test.ts` (+11, -2)
+- `packages/core/test/config/config.test.ts` (+2, -0)
+- `packages/core/test/config/provider.test.ts` (+32, -0)
+- `packages/core/test/permission.test.ts` (+1, -1)
+- `packages/core/test/persistent-pty-daemon.test.ts` (+1, -1)
+- `packages/core/test/plugin/fixture.ts` (+2, -0)
+- `packages/core/test/plugin/provider-opencode.test.ts` (+145, -0)
+- `packages/core/test/session-compaction.test.ts` (+37, -0)
+- `packages/core/test/session-create.test.ts` (+1, -1)
+- `packages/core/test/session-projector.test.ts` (+1, -1)
+- `packages/core/test/session-runner.test.ts` (+2, -2)
+- `packages/core/test/tool-read.test.ts` (+0, -22)
+- `packages/core/test/v1-migration.test.ts` (+4, -3)
+- `packages/core/test/voice.test.ts` (+102, -10)
+- `packages/core/test/worktree.test.ts` (+9, -3)
+- `packages/stats/core/src/domain/inference.test.ts` (+6, -2)
+- `packages/stats/core/src/domain/inference.ts` (+4, -2)
+- `packages/stats/core/src/domain/model-normalization.ts` (+2, -0)
 
 #### Other Changes
-- `CHANGELOG.md` (+58, -0)
-- `bun.lock` (+38, -38)
-- `github/README.md` (+2, -2)
-- `github/index.ts` (+9, -23)
-- `infra/app.ts` (+4, -14)
-- `infra/console.ts` (+5, -27)
-- `infra/share.ts` (+0, -3)
-- `install` (+17, -0)
+- `.github/workflows/duplicate-issues.yml` (+0, -221)
+- `.github/workflows/opencode.yml` (+0, -34)
+- `.github/workflows/pr-management.yml` (+2, -72)
+- `.github/workflows/review.yml` (+0, -83)
+- `bun.lock` (+22, -14)
+- `bunfig.toml` (+1, -1)
+- `infra/app.ts` (+1, -13)
 - `nix/hashes.json` (+3, -3)
-- `package.json` (+1, -1)
-- `packages/ai/package.json` (+1, -1)
-- `packages/ai/src/experimental.ts` (+1, -0)
-- `packages/ai/src/experimental/evaluation.ts` (+9, -16)
-- `packages/ai/src/experimental/realtime.ts` (+35, -26)
-- `packages/ai/src/experimental/system-one.ts` (+12, -9)
-- `packages/ai/src/llm.ts` (+4, -8)
-- `packages/ai/src/media.ts` (+3, -3)
-- `packages/ai/src/promise.ts` (+3, -7)
-- `packages/ai/src/protocols/alibaba-chat.ts` (+3, -5)
-- `packages/ai/src/protocols/alibaba-messages.ts` (+1, -1)
-- `packages/ai/src/protocols/anthropic-messages.ts` (+10, -12)
-- `packages/ai/src/protocols/bedrock-converse.ts` (+2, -2)
-- `packages/ai/src/protocols/cohere-chat.ts` (+2, -2)
-- `packages/ai/src/protocols/gemini.ts` (+14, -16)
-- `packages/ai/src/protocols/google-interactions.ts` (+20, -9)
-- `packages/ai/src/protocols/mistral-chat.ts` (+1, -4)
-- `packages/ai/src/protocols/open-responses.ts` (+3, -3)
-- `packages/ai/src/protocols/openai-chat.ts` (+4, -5)
-- `packages/ai/src/protocols/utils/open-responses-options.ts` (+4, -12)
-- `packages/ai/src/protocols/utils/openai-options.ts` (+0, -25)
-- `packages/ai/src/protocols/utils/partial-json.ts` (+5, -4)
-- `packages/ai/src/protocols/utils/tool-schema.ts` (+0, -5)
-- `packages/ai/src/protocols/venice-chat.ts` (+6, -6)
-- `packages/ai/src/protocols/xai-images.ts` (+3, -4)
-- `packages/ai/src/provider-error.ts` (+4, -6)
-- `packages/ai/src/providers/cloudflare-ai-gateway.ts` (+3, -4)
-- `packages/ai/src/providers/openai-options.ts` (+6, -3)
-- `packages/ai/src/providers/openrouter.ts` (+58, -47)
-- `packages/ai/src/providers/vercel-ai-gateway.ts` (+7, -6)
-- `packages/ai/src/route/client.ts` (+1, -11)
-- `packages/ai/src/route/executor-service.ts` (+12, -2)
-- `packages/ai/src/route/executor.ts` (+7, -15)
-- `packages/ai/src/route/media-protocol.ts` (+3, -5)
-- `packages/ai/src/route/transport/http.ts` (+5, -11)
-- `packages/ai/src/route/transport/websocket.ts` (+1, -82)
-- `packages/ai/src/schema/errors.ts` (+8, -4)
-- `packages/ai/test/executor.test.ts` (+8, -0)
-- `packages/ai/test/provider/openrouter.test.ts` (+1, -0)
-- `packages/ai/test/realtime.test.ts` (+4, -1)
-- `packages/app/e2e/regression/composer.spec.ts` (+173, -1)
-- `packages/app/package.json` (+1, -1)
-- `packages/app/src/session/composer/region.tsx` (+38, -1)
-- `packages/app/src/session/revert.ts` (+4, -1)
-- `packages/app/src/session/screen.tsx` (+4, -1)
-- `packages/app/src/session/usage-exceeded-dialogs.tsx` (+100, -40)
-- `packages/cli/package.json` (+2, -2)
-- `packages/client/package.json` (+1, -1)
-- `packages/client/src/effect/api/api.ts` (+17, -0)
-- `packages/client/src/effect/generated/client.ts` (+13, -1)
-- `packages/client/src/promise/generated/client.ts` (+12, -0)
-- `packages/client/src/promise/generated/types.ts` (+16, -1)
+- `package.json` (+2, -2)
+- `packages/ai/src/cache-policy.ts` (+11, -6)
+- `packages/ai/src/generation.ts` (+1, -1)
+- `packages/ai/src/image.ts` (+9, -2)
+- `packages/ai/src/media-model.ts` (+9, -2)
+- `packages/ai/src/protocols/bedrock-converse.ts` (+2, -1)
+- `packages/ai/src/protocols/bedrock-event-stream.ts` (+13, -10)
+- `packages/ai/src/schema/errors.ts` (+1, -1)
+- `packages/ai/src/schema/messages.ts` (+5, -6)
+- `packages/ai/src/speech.ts` (+9, -2)
+- `packages/ai/src/transcription.ts` (+2, -2)
+- `packages/ai/src/video.ts` (+9, -2)
+- `packages/ai/test/cache-policy.test.ts` (+26, -1)
+- `packages/ai/test/generation.test.ts` (+9, -0)
+- `packages/ai/test/provider/bedrock-converse.test.ts` (+15, -3)
+- `packages/ai/test/schema.test.ts` (+32, -0)
+- `packages/app/e2e/performance/timeline/session-timeline-stream-probe.ts` (+33, -22)
+- `packages/app/e2e/regression/session-header.spec.ts` (+2, -2)
+- `packages/app/e2e/regression/tabs.spec.ts` (+1, -1)
+- `packages/app/src/providers/connect/go-upsell-hero-art.test.ts` (+151, -0)
+- `packages/app/src/providers/connect/go-upsell-hero-art.ts` (+679, -0)
+- `packages/app/src/providers/connect/go-upsell-hero.tsx` (+17, -0)
+- `packages/app/src/providers/connect/usage-exceeded.tsx` (+13, -2)
+- `packages/app/src/session/timeline/virtualizer.tsx` (+8, -2)
+- `packages/app/src/session/usage-exceeded-dialogs.tsx` (+2, -0)
+- `packages/app/src/shell/commands/search-keydown.ts` (+1, -1)
+- `packages/app/src/shell/titlebar/tab-nav.tsx` (+1, -1)
+- `packages/app/src/shell/titlebar/tab-strip.tsx` (+1, -1)
+- `packages/app/vite.js` (+1, -1)
+- `packages/cli/src/services/service-config.ts` (+5, -4)
+- `packages/cli/test/service.test.ts` (+7, -7)
+- `packages/client/src/effect/api/api.ts` (+10, -0)
+- `packages/client/src/effect/generated/client.ts` (+11, -0)
+- `packages/client/src/promise/generated/client.ts` (+14, -0)
+- `packages/client/src/promise/generated/types.ts` (+16, -2)
 - `packages/client/test/promise.test.ts` (+1, -1)
-- `packages/codemode/interpreter-support.md` (+3, -0)
-- `packages/codemode/package.json` (+1, -1)
-- `packages/codemode/src/interpreter/execute.ts` (+15, -10)
-- `packages/codemode/src/interpreter/extensions.ts` (+1, -1)
-- `packages/codemode/src/interpreter/interpreter.ts` (+38, -15)
-- `packages/codemode/src/interpreter/promises.ts` (+239, -32)
-- `packages/codemode/test/promise.test.ts` (+58, -0)
-- `packages/console/app/package.json` (+1, -1)
-- `packages/console/app/script/dev-enterprise.ts` (+2, -26)
-- `packages/console/app/src/component/go-models.ts` (+2, -11)
-- `packages/console/app/src/i18n/ar.ts` (+2, -1)
-- `packages/console/app/src/i18n/br.ts` (+2, -1)
-- `packages/console/app/src/i18n/da.ts` (+2, -1)
-- `packages/console/app/src/i18n/de.ts` (+2, -1)
-- `packages/console/app/src/i18n/en.ts` (+2, -1)
-- `packages/console/app/src/i18n/es.ts` (+2, -1)
-- `packages/console/app/src/i18n/fr.ts` (+2, -1)
-- `packages/console/app/src/i18n/it.ts` (+2, -1)
-- `packages/console/app/src/i18n/ja.ts` (+2, -1)
-- `packages/console/app/src/i18n/ko.ts` (+2, -1)
-- `packages/console/app/src/i18n/no.ts` (+2, -1)
-- `packages/console/app/src/i18n/pl.ts` (+2, -1)
-- `packages/console/app/src/i18n/ru.ts` (+2, -1)
-- `packages/console/app/src/i18n/th.ts` (+2, -1)
-- `packages/console/app/src/i18n/tr.ts` (+2, -1)
-- `packages/console/app/src/i18n/uk.ts` (+2, -1)
-- `packages/console/app/src/i18n/zh.ts` (+2, -1)
-- `packages/console/app/src/i18n/zht.ts` (+2, -1)
-- `packages/console/app/src/lib/console-account.ts` (+0, -31)
-- `packages/console/app/src/lib/console-signup.test.ts` (+0, -159)
-- `packages/console/app/src/lib/console-signup.ts` (+0, -19)
-- `packages/console/app/src/lib/enterprise-spam.test.ts` (+7, -55)
-- `packages/console/app/src/lib/enterprise-spam.ts` (+3, -9)
-- `packages/console/app/src/lib/enterprise.test.ts` (+51, -0)
-- `packages/console/app/src/lib/enterprise.ts` (+15, -12)
-- `packages/console/app/src/lib/hcaptcha.test.ts` (+98, -0)
-- `packages/console/app/src/lib/hcaptcha.ts` (+44, -0)
-- `packages/console/app/src/lib/inference-proxy.ts` (+0, -61)
-- `packages/console/app/src/lib/salesforce.test.ts` (+2, -9)
-- `packages/console/app/src/lib/salesforce.ts` (+0, -114)
-- `packages/console/app/src/middleware.ts` (+2, -3)
-- `packages/console/app/src/routes/api/console-signup.ts` (+0, -8)
-- `packages/console/app/src/routes/api/enterprise.ts` (+9, -0)
-- `packages/console/app/src/routes/enterprise/index.tsx` (+59, -3)
-- `packages/console/app/src/routes/zen/go/v1/chat/completions.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/go/v1/messages.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/go/v1/models.ts` (+0, -11)
-- `packages/console/app/src/routes/zen/go/v1/responses.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/go/v1/systemone.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/go/v1/usage.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/util/modelsHandler.ts` (+0, -10)
-- `packages/console/app/src/routes/zen/v1/chat/completions.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/v1/messages.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/v1/models.ts` (+0, -11)
-- `packages/console/app/src/routes/zen/v1/models/[model].ts` (+0, -6)
-- `packages/console/app/src/routes/zen/v1/responses.ts` (+0, -6)
-- `packages/console/app/src/routes/zen/v1/systemone.ts` (+0, -6)
-- `packages/desktop/package.json` (+2, -2)
-- `packages/function/package.json` (+1, -1)
-- `packages/function/src/api.ts` (+2, -196)
-- `packages/gui-extensions/package.json` (+2, -2)
-- `packages/http-recorder/package.json` (+1, -1)
-- `packages/httpapi-codegen/package.json` (+1, -1)
-- `packages/latex/package.json` (+1, -1)
-- `packages/merman/package.json` (+1, -1)
-- `packages/plugin-browser/package.json` (+1, -1)
-- `packages/plugin/package.json` (+1, -1)
-- `packages/plugins/figma/package.json` (+1, -1)
-- `packages/protocol/openapi.json` (+129, -0)
-- `packages/protocol/package.json` (+1, -1)
-- `packages/protocol/src/groups/voice.ts` (+29, -0)
-- `packages/schema/package.json` (+1, -1)
-- `packages/schema/src/config/experimental.ts` (+6, -0)
-- `packages/schema/src/session-error.ts` (+3, -1)
-- `packages/schema/test/session-error.test.ts` (+2, -1)
-- `packages/sdk/package.json` (+1, -1)
-- `packages/server/package.json` (+1, -1)
-- `packages/server/src/handlers/voice.ts` (+34, -21)
-- `packages/server/test/voice.test.ts` (+27, -1)
-- `packages/session-ui/package.json` (+1, -1)
-- `packages/session-ui/src/timeline/projection.ts` (+31, -1)
-- `packages/session-ui/src/timeline/rows-current.test.ts` (+57, -0)
-- `packages/session-ui/src/timeline/session-timeline-row.tsx` (+28, -1)
-- `packages/session-ui/src/timeline/timeline-row.ts` (+7, -1)
-- `packages/simulation/package.json` (+1, -1)
-- `packages/stats/app/package.json` (+1, -1)
-- `packages/stats/server/package.json` (+1, -1)
-- `packages/stats/server/src/stat-sync.ts` (+5, -1)
-- `packages/theme/package.json` (+1, -1)
-- `packages/tui/package.json` (+1, -1)
-- `packages/tui/src/component/dialog-go-upsell.tsx` (+461, -0)
-- `packages/tui/src/component/go-upsell-art.ts` (+336, -0)
-- `packages/tui/src/context/location.tsx` (+8, -2)
-- `packages/tui/src/feature-plugins/system/notifications.ts` (+9, -2)
-- `packages/tui/src/routes/session/index.tsx` (+157, -3)
-- `packages/tui/test/app-lifecycle.test.tsx` (+981, -2)
-- `packages/tui/test/cli/cmd/tui/notifications.test.ts` (+13, -0)
-- `packages/tui/test/component/go-upsell-art.test.tsx` (+87, -0)
-- `packages/ui/package.json` (+1, -1)
-- `packages/ui/src/i18n/en.ts` (+3, -0)
-- `packages/util/package.json` (+1, -1)
-- `packages/web/package.json` (+1, -1)
-- `salesforce/README.md` (+6, -7)
-- `sdks/vscode/package.json` (+1, -1)
-- `services/update/package.json` (+1, -1)
-- `services/www/openapi.json` (+129, -0)
-- `services/www/public/openapi.json` (+129, -0)
-- `services/www/src/docs/content/config.mdx` (+55, -14)
-- `services/www/src/docs/content/console/api/budgets.mdx` (+3, -2)
-- `services/www/src/docs/content/console/api/index.mdx` (+97, -132)
-- `services/www/src/docs/content/console/go.mdx` (+4, -4)
-- `services/www/src/docs/content/console/members.mdx` (+2, -2)
-- `services/www/src/docs/content/console/models.mdx` (+4, -0)
-- `services/www/src/docs/content/models.mdx` (+18, -0)
-- `services/www/src/docs/content/permissions.mdx` (+2, -1)
-- `sst-env.d.ts` (+0, -2)
+- `packages/function/src/api.ts` (+1, -54)
+- `packages/function/src/github.ts` (+2, -0)
+- `packages/function/test/github.test.ts` (+13, -0)
+- `packages/protocol/openapi.json` (+124, -2)
+- `packages/protocol/src/groups/voice.ts` (+24, -3)
+- `packages/schema/src/config/agent.ts` (+6, -2)
+- `packages/schema/src/session-event.ts` (+1, -1)
+- `packages/server/src/handlers/voice.ts` (+23, -10)
+- `packages/server/test/voice.test.ts` (+42, -8)
+- `packages/session-ui/component-tests/markdown.spec.ts` (+1, -1)
+- `packages/session-ui/package.json` (+1, -2)
+- `packages/session-ui/src/components/markdown.css` (+2, -2)
+- `packages/session-ui/src/components/markdown.tsx` (+1, -1)
+- `packages/session-ui/src/components/markdown.worker.ts` (+49, -45)
+- `packages/session-ui/src/components/message-file.ts` (+74, -6)
+- `packages/session-ui/src/pierre/index.ts` (+15, -2)
+- `packages/session-ui/src/pierre/worker.ts` (+4, -20)
+- `packages/storybook/.storybook/preview.tsx` (+14, -17)
+- `packages/tui/src/config/index.tsx` (+2, -2)
+- `packages/tui/src/context/storage.tsx` (+12, -21)
+- `packages/tui/src/model-preference.ts` (+4, -5)
+- `packages/tui/src/plugin/watch.ts` (+7, -3)
+- `packages/tui/src/util/watch.ts` (+24, -0)
+- `packages/ui/package.json` (+1, -2)
+- `packages/ui/src/context/highlight-theme.tsx` (+66, -0)
+- `packages/ui/src/context/marked-parser.test.ts` (+15, -4)
+- `packages/ui/src/context/marked-parser.tsx` (+21, -3)
+- `packages/ui/src/context/marked-theme-register.tsx` (+0, -10)
+- `packages/ui/src/context/marked-theme.tsx` (+0, -372)
+- `packages/ui/src/context/marked.tsx` (+0, -31)
+- `packages/web/src/content/docs/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/ar/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/ar/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/bs/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/bs/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/cli.mdx` (+36, -44)
+- `packages/web/src/content/docs/da/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/da/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/de/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/de/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/es/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/es/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/fr/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/fr/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/it/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/it/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/ja/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/ja/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/ko/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/ko/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/nb/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/nb/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/pl/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/pl/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/pt-br/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/pt-br/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/ru/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/ru/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/th/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/th/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/tr/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/tr/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/zh-cn/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/zh-cn/cli.mdx` (+0, -32)
+- `packages/web/src/content/docs/zh-tw/agents.mdx` (+2, -12)
+- `packages/web/src/content/docs/zh-tw/cli.mdx` (+0, -32)
+- `script/duplicate-pr.ts` (+0, -81)
+- `services/www/openapi.json` (+124, -2)
+- `services/www/public/openapi.json` (+124, -2)
+- `services/www/src/docs/content/cli/web.mdx` (+3, -2)
+- `services/www/src/docs/content/console/models.mdx` (+6, -6)
+- `sst-env.d.ts` (+0, -16)
 
 ### Key Diffs
 
-#### packages/core/package.json
+#### .opencode/agent/duplicate-pr.md
 ```diff
-diff --git a/packages/core/package.json b/packages/core/package.json
-index 40b920c..7cad834 100644
---- a/packages/core/package.json
-+++ b/packages/core/package.json
-@@ -1,6 +1,6 @@
- {
-   "$schema": "https://json.schemastore.org/package.json",
--  "version": "2.1.0",
-+  "version": "2.1.2",
-   "name": "@opencode/core",
-   "type": "module",
-   "license": "MIT",
+diff --git a/.opencode/agent/duplicate-pr.md b/.opencode/agent/duplicate-pr.md
+deleted file mode 100644
+index c9c932e..0000000
+--- a/.opencode/agent/duplicate-pr.md
++++ /dev/null
+@@ -1,26 +0,0 @@
+----
+-mode: primary
+-hidden: true
+-model: opencode/claude-haiku-4-5
+-color: "#E67E22"
+-tools:
+-  "*": false
+-  "github-pr-search": true
+----
+-
+-You are a duplicate PR detection agent. When a PR is opened, your job is to search for potentially duplicate or related open PRs.
+-
+-Use the github-pr-search tool to search for PRs that might be addressing the same issue or feature.
+-
+-IMPORTANT: The input will contain a line `CURRENT_PR_NUMBER: NNNN`. This is the current PR number, you should not mark that the current PR as a duplicate of itself.
+-
+-Search using keywords from the PR title and description. Try multiple searches with different relevant terms.
+-
+-If you find potential duplicates:
+-
+-- List them with their titles and URLs
+-- Briefly explain why they might be related
+-
+-If no duplicates are found, say so clearly. BUT ONLY SAY "No duplicate PRs found" (don't say anything else if no dups)
+-
+-Keep your response concise and actionable.
 ```
 
-#### packages/core/src/config/normalize.ts
+#### packages/core/src/agent.ts
 ```diff
-diff --git a/packages/core/src/config/normalize.ts b/packages/core/src/config/normalize.ts
-index 35d702a..4ef02b9 100644
---- a/packages/core/src/config/normalize.ts
-+++ b/packages/core/src/config/normalize.ts
-@@ -485,6 +485,15 @@ function normalizeExperimental(
-         )
-         if (value !== undefined) result.subagent_depth = value
-       }
-+      if (own(experimental, "location_idle_timeout")) {
-+        const value = decodeEncoded(
-+          ConfigExperimental.Info.fields.location_idle_timeout,
-+          experimental.location_idle_timeout,
-+          ["experimental", "location_idle_timeout"],
-+          diagnostics,
-+        )
-+        if (value !== undefined) result.location_idle_timeout = value
-+      }
-     }
-   }
-   if (Object.keys(result).length || (isRecord(input.experimental) && !Object.keys(input.experimental).length))
-```
-
-#### packages/core/src/config/plugin/provider.ts
-```diff
-diff --git a/packages/core/src/config/plugin/provider.ts b/packages/core/src/config/plugin/provider.ts
-index 0c485c4..5ea1c70 100644
---- a/packages/core/src/config/plugin/provider.ts
-+++ b/packages/core/src/config/plugin/provider.ts
-@@ -131,6 +131,9 @@ export const Plugin = define({
-             if (config.capabilities !== undefined)
-               model.capabilities = Model.mergeCapabilities(config.capabilities, model.capabilities)
-             if (config.limit !== undefined) model.limit = { ...model.limit, ...config.limit }
-+          })
-+          // Variants are spelled for the final package, which the update above normalizes from `aisdk:*`.
-+          models.update(providerID, id, (model) => {
-             // Configured reasoning replaces the base variants; configured variants still overlay them below.
-             if (config.capabilities?.reasoning !== undefined)
-               model.variants = [
-```
-
-#### packages/core/src/database/path.ts
-```diff
-diff --git a/packages/core/src/database/path.ts b/packages/core/src/database/path.ts
-index 66a130b..8ddef89 100644
---- a/packages/core/src/database/path.ts
-+++ b/packages/core/src/database/path.ts
-@@ -12,12 +12,15 @@ function isWindowsStoragePath(input: string) {
-   return /^[A-Za-z]:\//.test(input) || input.startsWith("//")
+diff --git a/packages/core/src/agent.ts b/packages/core/src/agent.ts
+index 14732fd..d574e75 100644
+--- a/packages/core/src/agent.ts
++++ b/packages/core/src/agent.ts
+@@ -30,8 +30,8 @@ type Data = {
  }
  
--function absolute(input: string) {
-+export function storedAbsolutePath(input: string) {
-   const result = storagePath(input)
-   // Persisted projects and sessions can move between operating systems during migration.
--  if (!nodePath.posix.isAbsolute(result) && !isWindowsStoragePath(result)) {
--    throw new Error(`Path is not absolute: ${input}`)
--  }
-+  if (nodePath.posix.isAbsolute(result) || isWindowsStoragePath(result)) return result
+ export type Editor = {
+-  list: () => readonly Info[]
+-  get: (id: ID) => Info | undefined
++  list: () => readonly Types.DeepMutable<Info>[]
++  get: (id: ID) => Types.DeepMutable<Info> | undefined
+   default: (id: ID | undefined) => void
+   update: (id: ID, fn: (agent: Types.DeepMutable<Info>) => void) => void
+   remove: (id: ID) => void
+@@ -40,7 +40,7 @@ export type Editor = {
+ export interface Interface extends State.Transformable<Editor> {
+   readonly get: (id: ID) => Effect.Effect<Info | undefined>
+   readonly resolve: (id?: ID | string) => Effect.Effect<Info | undefined>
+-  readonly select: (id?: ID | string) => Effect.Effect<Selection>
++  readonly select: (id?: ID) => Effect.Effect<Selection>
+   readonly list: () => Effect.Effect<Info[]>
+ }
+ 
+@@ -54,7 +54,7 @@ const layer = Layer.effect(
+       name: "agent",
+       initial: () => ({ agents: new Map() }),
+       editor: (editor) => ({
+-        list: () => Array.fromIterable(editor.agents.values()) as Info[],
++        list: () => Array.fromIterable(editor.agents.values()),
+         get: (id) => editor.agents.get(id),
+         default: (id) => {
+           editor.default = id
+@@ -77,7 +77,7 @@ const layer = Layer.effect(
+       const data = state.get()
+       const configured = data.default ? selectable(data.agents.get(data.default)) : undefined
+       if (configured) return configured
+-      const build = selectable(data.agents.get(ID.make("build")))
++      const build = selectable(data.agents.get(defaultID))
+       if (build) return build
+       for (const agent of data.agents.values()) {
+         const fallback = selectable(agent)
+@@ -96,10 +96,7 @@ const layer = Layer.effect(
+         return selectedDefault()
+       }),
+       select: Effect.fn("Agent.select")(function* (id) {
+-        if (id !== undefined) {
+-          const selected = ID.make(id)
+-          return { id: selected, info: state.get().agents.get(selected) }
+-        }
+```
+
+#### packages/core/src/aisdk.ts
+```diff
+diff --git a/packages/core/src/aisdk.ts b/packages/core/src/aisdk.ts
+index a392273..4904eed 100644
+--- a/packages/core/src/aisdk.ts
++++ b/packages/core/src/aisdk.ts
+@@ -32,6 +32,7 @@ import {
+ } from "@opencode/ai"
+ import { Auth, Endpoint, RequestExecutor, type AnyRoute, type HttpMiddleware } from "@opencode/ai/route"
+ import { ProviderShared } from "@opencode/ai/protocols/shared"
++import { isRecord } from "@opencode/ai/utils/record"
+ import { Cause, Context, Effect, Layer, Option, Schema, Scope, Stream } from "effect"
+ import { makeParser } from "effect/encoding/Sse"
+ import { HttpClientRequest, HttpClientResponse } from "effect/http"
+@@ -39,25 +40,26 @@ import { AsyncLocalStorage } from "node:async_hooks"
+ import type { ID, RuntimeInfo } from "./model.js"
+ import { Provider } from "./provider.js"
+ import { State } from "./state.js"
++import { stringify } from "./tool/runtime.js"
+ 
+ type SDK = any
+ type UserContent = Extract<LanguageModelV3Message, { role: "user" }>["content"]
+ type AssistantContent = Extract<LanguageModelV3Message, { role: "assistant" }>["content"]
+ type ToolResultContent = Extract<AssistantContent[number], { type: "tool-result" }>
+ 
+-const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
++const decodeJsonRecord = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json)))
+ 
+ export interface SDKEvent {
+   readonly model: RuntimeInfo
+   readonly package: string
+-  readonly options: Record<string, any>
++  readonly options: Record<string, unknown>
+   sdk?: SDK
+ }
+ 
+ export interface LanguageEvent {
+   readonly model: RuntimeInfo
+   readonly sdk: SDK
+-  readonly options: Record<string, any>
++  readonly options: Record<string, unknown>
+   language?: LanguageModelV3
+ }
+ 
+@@ -120,7 +122,7 @@ function wrapSSE(res: Response, ms: number, ctl: AbortController) {
+ 
+ function prepareOptions(model: RuntimeInfo, pkg: string) {
+   const projected = mapBodyToProviderOptions(model, pkg)
+-  const options: Record<string, any> = {
++  const options: Record<string, unknown> = {
+     name: model.canonical ?? model.providerID,
+     ...(model.settings ?? {}),
+```
+
+#### packages/core/src/codemode/catalog.ts
+```diff
+diff --git a/packages/core/src/codemode/catalog.ts b/packages/core/src/codemode/catalog.ts
+index 3c8f2b9..07dfe59 100644
+--- a/packages/core/src/codemode/catalog.ts
++++ b/packages/core/src/codemode/catalog.ts
+@@ -2,14 +2,13 @@ export * as CodeModeCatalog from "./catalog.js"
+ 
+ import { Schema } from "effect"
+ 
+-export const Tool = Schema.Struct({
+-  type: Schema.Literal("tool"),
+-  name: Schema.String,
+-  description: Schema.String,
+-  signature: Schema.String,
+-  pinned: Schema.optionalKey(Schema.Boolean),
+-})
+-export type Tool = typeof Tool.Type
++export type Tool = {
++  readonly type: "tool"
++  readonly name: string
++  readonly description: string
++  readonly signature: string
++  readonly pinned?: boolean
 +}
-+
-+function absolute(input: string) {
-+  const result = storedAbsolutePath(input)
-+  if (result === undefined) throw new Error(`Path is not absolute: ${input}`)
-   return result
- }
  
+ export type Namespace = {
+   readonly type: "namespace"
 ```
 
-#### packages/core/src/database/v1-migration.bun.ts
+#### packages/core/src/codemode/web.ts
 ```diff
-diff --git a/packages/core/src/database/v1-migration.bun.ts b/packages/core/src/database/v1-migration.bun.ts
-index 591c792..b13aee5 100644
---- a/packages/core/src/database/v1-migration.bun.ts
-+++ b/packages/core/src/database/v1-migration.bun.ts
-@@ -2,6 +2,7 @@ export * as V1Migration from "./v1-migration.js"
+diff --git a/packages/core/src/codemode/web.ts b/packages/core/src/codemode/web.ts
+index 0a6b5b8..fb7dc4e 100644
+--- a/packages/core/src/codemode/web.ts
++++ b/packages/core/src/codemode/web.ts
+@@ -1,6 +1,7 @@
+ export * as CodeModeWeb from "./web.js"
  
- import { Cause, Effect, Layer, Option, Schema, Semaphore } from "effect"
- import { Database } from "./database.js"
-+import { storedAbsolutePath } from "./path.js"
- import { SessionMessageTable, SessionTable } from "../session/sql.js"
- import { SessionV1 } from "@opencode/schema/session-v1"
- import { SessionMessage } from "../session/message.js"
-@@ -580,16 +581,19 @@ export function run(options: Options = {}): Effect.Effect<RunResult, never, Data
-         updateProgress({ label: "Migrating sessions", numerator: migrated + completed, denominator })
-       })
-       updateProgress({ label: "Migrating sessions", numerator: migrated + sourceTotal, denominator })
--      const projects = new Set(
--        (yield* db.all<{ id: string }>(sql`SELECT id FROM project`)).map((project) => project.id),
-+      const projects = new Map(
-+        (yield* db.all<{ id: string; worktree: string }>(sql`SELECT id, worktree FROM project`)).map((project) => [
-+          project.id,
-+          project.worktree,
-+        ]),
-       )
-       while (true) {
-         const state = yield* readState(db)
-         const cursorValue = state?.phase === "sessions" ? state.cursor : undefined
--        const nextID = yield* db.get<{ id: string; project_id: string }>(
-+        const nextID = yield* db.get<{ id: string; project_id: string; directory: string }>(
-           cursorValue === undefined
--            ? sql`SELECT id, project_id FROM session ORDER BY id DESC LIMIT 1`
--            : sql`SELECT id, project_id FROM session WHERE id < ${cursorValue} ORDER BY id DESC LIMIT 1`,
-+            ? sql`SELECT id, project_id, directory FROM session ORDER BY id DESC LIMIT 1`
-+            : sql`SELECT id, project_id, directory FROM session WHERE id < ${cursorValue} ORDER BY id DESC LIMIT 1`,
-         )
-         if (!nextID) break
-         yield* db
-@@ -609,6 +613,18 @@ export function run(options: Options = {}): Effect.Effect<RunResult, never, Data
-                   sessionID: nextID.id,
-                   projectID: nextID.project_id,
-                 })
-+              // Legacy ACP sessions can store a cwd relative to an unknown process directory.
-+              // Use the project worktree instead, and leave the original V1 row intact.
-+              const directory =
-+                !nextID.directory || storedAbsolutePath(nextID.directory)
-+                  ? nextID.directory
-+                  : (storedAbsolutePath(projects.get(projectID) ?? path.parse(global.data).root) ?? "")
-+              if (directory !== nextID.directory)
-+                yield* Effect.logWarning("Replaced relative V1 session directory", {
-+                  sessionID: nextID.id,
+ import { Extension } from "@opencode/codemode"
++import { isRecord } from "@opencode/ai/utils/record"
+ 
+ const TIMEOUT_MS = 30_000
+ 
+@@ -43,6 +44,7 @@ export const extension = Extension.make({ name: "web", globals: { fetch } })
+ 
+ /** What to show for a fetch call: its method and URL. */
+ export const display = (args: ReadonlyArray<unknown>) => {
+-  const [input, init] = args as [string | URL, Init | undefined]
+-  return { method: init?.method?.toUpperCase() ?? "GET", url: String(input) }
++  const [input, init] = args
++  const method = isRecord(init) && typeof init.method === "string" ? init.method.toUpperCase() : "GET"
++  return { method, url: String(input) }
+ }
 ```
 
 
@@ -490,9 +565,12 @@ index 591c792..b13aee5 100644
 
 Based on the changes, the following files in Alexi should be reviewed:
 
-- `src/tool/mcp-resource.ts` - update based on opencode packages/core/src/tool/plugin/mcp-resource.ts changes
+- `src/agent/index.ts` - incorporate patterns from opencode .opencode/agent/duplicate-pr.md
 - `src/tool/mcp.ts` - update based on opencode packages/core/src/tool/mcp.ts changes
-- `src/tool/webfetch.ts` - update based on opencode packages/core/src/tool/plugin/webfetch.ts changes
+- `src/tool/question.ts` - update based on opencode packages/core/src/tool/plugin/question.ts changes
+- `src/tool/read.ts` - update based on opencode packages/core/src/tool/plugin/read.ts changes
+- `src/tool/runtime.ts` - update based on opencode packages/core/src/tool/runtime.ts changes
+- `src/tool/subagent.ts` - update based on opencode packages/core/src/tool/plugin/subagent.ts changes
 
 ## Your Task
 
