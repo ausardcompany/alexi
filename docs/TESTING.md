@@ -36,6 +36,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
+- [Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)](#testing-the-mcp-output-schema-normaliser-srcmcp__tests__normalizeoutputschematestts)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -13607,3 +13608,70 @@ afterEach(() => {
 - **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
 - **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
 - **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
+
+## Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)
+
+Added in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). A 57-line pure-function test suite that pins the six shape contracts enforced by `normalizeOutputSchema` (`src/mcp/client.ts:717-734`), the normaliser that lets MCP servers advertise tools whose `outputSchema` is not a root object. Co-located with the module under `src/mcp/__tests__/` so it ships alongside the implementation and runs under the same `vitest` sweep as the rest of the MCP suite.
+
+### Why normalise at all
+
+MCP servers in the wild emit a mix of `outputSchema` shapes: root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: 'string'`, `type: 'number'`), or no schema at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object — a `{ type: 'array', items: ... }` schema would be filtered out at registration time with no actionable error. The normaliser wraps non-object roots into a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape; the suite audits that six distinct input shapes produce the right six outputs.
+
+### Minimum coverage (the six-case shape audit)
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { normalizeOutputSchema } from '../client.js';
+
+describe('normalizeOutputSchema', () => {
+  it('returns undefined for non-object input', () => {
+    expect(normalizeOutputSchema(undefined)).toBeUndefined();
+    expect(normalizeOutputSchema(null)).toBeUndefined();
+    expect(normalizeOutputSchema('string')).toBeUndefined();
+    expect(normalizeOutputSchema(42)).toBeUndefined();
+  });
+
+  it('passes root object schemas through unchanged', () => {
+    const schema = { type: 'object', properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('passes schemas with properties through even without explicit type', () => {
+    const schema = { properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('wraps array schemas under properties.result', () => {
+    const schema = { type: 'array', items: { type: 'string' } };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+
+  it('wraps primitive schemas under properties.result', () => {
+    expect(normalizeOutputSchema({ type: 'string' })).toEqual({
+      type: 'object',
+      properties: { result: { type: 'string' } },
+      required: ['result'],
+    });
+  });
+
+  it('wraps union (anyOf) schemas under properties.result', () => {
+    const schema = { anyOf: [{ type: 'string' }, { type: 'number' }] };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+});
+```
+
+### Pitfalls
+
+- **Do NOT drop the "passes-with-properties-only" case.** The `{ properties: {...} }` without explicit `type: 'object'` branch is a real-world shape — some MCP servers omit `type` when `properties` is present, assuming the JSON Schema default. The normaliser treats that branch as a root object and returns the schema verbatim; a regression that normalised it would wrap a perfectly valid root schema under `properties.result` and break downstream tooling.
+- **Do NOT replace the primitive case with a parametrised loop over every primitive.** A single `{ type: 'string' }` case is enough to pin the wrap path; iterating over `['string', 'number', 'boolean', 'integer']` just inflates the suite without exercising a different code path (the normaliser's dispatch does not care about the primitive's own `type` string).
+- **`undefined` vs `null` vs primitive are the same branch.** The suite covers all four values in a single `it` block because the module's guard `if (!schema || typeof schema !== 'object')` collapses them. Splitting them into four `it` blocks is noise.
+- **Assert `.toEqual(...)` not `.toMatchObject(...)` for the wrap cases.** `toMatchObject` would silently accept extra keys on the output; `toEqual` pins the exact `{ type, properties, required }` triple so a future addition (e.g. `description` or `title`) surfaces as a test failure that forces the author to decide whether the addition is intentional.

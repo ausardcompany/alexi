@@ -598,12 +598,24 @@ flowchart TB
 When the LLM returns a context-length error, the agentic chat detects it via pattern matching and triggers reactive compaction:
 
 ```typescript
-// Error patterns detected:
+// Error patterns detected (curated — see src/core/contextOverflow.ts):
 const CONTEXT_OVERFLOW_PATTERNS = [
-  /context.length/i,
+  /context_length_exceeded/i,
+  /max_tokens_exceeded/i,
+  /too_many_tokens/i,
+  /context[\s_]window/i,
+  /context[\s_]limit/i,
+  /maximum[\s_]context([\s_]length)?/i,
+  /exceeds[\s_]the[\s_]context/i,
   /context.*exceeded/i,
   /token.*limit.*exceeded/i,
-  /max_tokens_exceeded/i,
+  /input.*too.long/i,
+  /request.*too.*large/i,
+  /prompt.*too.*long/i,
+  // Added 2026-10-23 (opencode `09a1db3`): some providers surface
+  // overflow as "please reduce the length of ..." in free-form error
+  // messages instead of a structured code.
+  /reduce the length/i,
   // ...
 ];
 
@@ -9894,4 +9906,97 @@ flowchart TD
 ### Resource embed shape
 
 The embedded `resource` field in the formatter's input type was widened to `{ uri?: string; mimeType?: string; text?: string }` so the formatter can inline a `text/*` resource's body directly when the server supplies it. Non-text, non-image resources (e.g. `application/pdf`) render as a placeholder — the model knows the file exists without the orchestration layer rejecting the whole request.
+
+## MCP Output-Schema Normalisation (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). MCP servers in the wild emit a mix of `outputSchema` shapes — root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: "string"`, `type: "number"`), or no `outputSchema` at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object. `normalizeOutputSchema` wraps non-object roots in a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape so the runtime always has a `.properties` field to inspect, regardless of what the server declared.
+
+### Signature
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+### Dispatch
+
+```mermaid
+flowchart TD
+    In["schema: unknown"] --> NotObj{"typeof schema === 'object' && schema !== null?"}
+    NotObj -- no --> Undef["return undefined"]
+    NotObj -- yes --> AlreadyObject{"type === 'object'<br/>OR properties !== undefined?"}
+    AlreadyObject -- yes --> Passthrough["return schema verbatim"]
+    AlreadyObject -- no --> Wrap["return { type: 'object',<br/>properties: { result: schema },<br/>required: ['result'] }"]
+```
+
+### Why return `undefined` for non-object input
+
+Returning `undefined` for `null` / `string` / `number` / `undefined` input is deliberate: it lets call sites spread the result safely onto a tool definition — `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing, never a bogus wrapper. A `{}` fallback would misleadingly advertise an empty object schema to the model.
+
+### Why wrap under `properties.result` instead of `properties.value` or `properties.data`
+
+The literal key `result` was chosen to match opencode `c41c3a0` so a cross-project operator reading an MCP log sees the same wrapper on both sides. A matching `required: ['result']` is emitted alongside so JSON Schema consumers that treat `required` as the source of truth for mandatory fields see the wrapper as a non-optional field, not an opt-in extension.
+
+## MCP Client Connect De-duplication (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `8ecd6ad` for the dedup and `7b14ad4` for the parallel teardown). The `McpClientManager` kept a `connections: Map<string, McpConnection>` but had no guard against two concurrent `connect(config)` calls for the same server name — a config-change event that fired while `connectFromConfig()` was still running could spawn a second stdio child for the same server, resulting in zombie processes and double-register notifications. The fix adds an in-flight promise map keyed by server name; a second caller joins the first promise instead of spawning a parallel transport.
+
+### Internal state
+
+```typescript
+class McpClientManager {
+  private connections: Map<string, McpConnection> = new Map();
+  private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * In-flight connect() promises keyed by server name. Entry lifecycle:
+   * added when connect() begins, removed in its finally block regardless
+   * of outcome (resolve, reject, cancel).
+   */
+  private pendingConnects: Map<string, Promise<McpConnection>> = new Map();
+  // ...
+}
+```
+
+### `connect()` dispatch
+
+```mermaid
+sequenceDiagram
+    participant A as Caller A (startup)
+    participant B as Caller B (config observer)
+    participant Mgr as McpClientManager
+    participant Impl as connectImpl (handshake)
+
+    A->>Mgr: connect({ name: 'playwright', ... })
+    Mgr->>Mgr: pendingConnects.get('playwright') -> undefined
+    Mgr->>Impl: connectImpl(config, options)
+    Mgr->>Mgr: pendingConnects.set('playwright', task)
+    Mgr-->>A: Promise<McpConnection> (pending)
+
+    B->>Mgr: connect({ name: 'playwright', ... }) (concurrent)
+    Mgr->>Mgr: pendingConnects.get('playwright') -> inFlight
+    Mgr-->>B: return inFlight (SAME promise)
+
+    Impl-->>Mgr: resolves / rejects
+    Mgr->>Mgr: pendingConnects.delete('playwright') (finally)
+    Mgr-->>A: McpConnection
+    Mgr-->>B: McpConnection (same instance)
+```
+
+The public `connect()` method keeps its existing signature; the handshake body was extracted into a private `connectImpl(config, options)` so the dedup bookkeeping is a single-screen read instead of a nested `if` wrapped around ~400 lines of handshake. A `.finally()` block in the public method removes the pending entry on resolve, reject, and cancel paths alike, so a failed connect does not leave a stale cache entry.
+
+### `disconnectAll()` parallel teardown
+
+A sequential `for ... await disconnect(name)` loop was observed to add multi-second latency on exit when any one stdio child was slow to acknowledge `SIGTERM` — one hung server blocked every other server's teardown behind it. The loop is now:
+
+```typescript
+async disconnectAll(): Promise<void> {
+  const names = Array.from(this.connections.keys());
+  await Promise.allSettled(names.map((name) => this.disconnect(name)));
+}
+```
+
+`Promise.allSettled` is deliberate: a per-server teardown error should NOT propagate as a top-level rejection, because the caller is almost always on the shutdown path and surfacing a stray server misbehaviour there would mask the process exit code. Per-server errors are still logged by `disconnect()` itself; this layer is pure best-effort.
 

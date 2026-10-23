@@ -1160,6 +1160,28 @@ const targetSummaryTokens = Math.max(
 // Instruction: "Keep your summary under approximately N tokens."
 ```
 
+### Context overflow detection patterns
+
+Detection lives in `src/core/contextOverflow.ts` and runs a curated list of case-insensitive regexes against the thrown error message. Operators do not configure the list — it is a module-level `readonly` constant — but understanding what it matches helps diagnose why a given provider error does or does not trigger reactive compaction:
+
+| Pattern | Matches |
+|---------|---------|
+| `/context_length_exceeded/i` | OpenAI-family structured error code |
+| `/max_tokens_exceeded/i` | OpenAI-family structured error code |
+| `/too_many_tokens/i` | OpenAI-family structured error code |
+| `/context[\s_]window/i` | `context window`, `context_window` |
+| `/context[\s_]limit/i` | `context limit`, `context_limit` |
+| `/maximum[\s_]context([\s_]length)?/i` | `maximum context`, `maximum context length`, `maximum_context_length` |
+| `/exceeds[\s_]the[\s_]context/i` | `exceeds the context`, `exceeds_the_context` |
+| `/context.*exceeded/i` | catch-all for `context ... exceeded` phrasing |
+| `/token.*limit.*exceeded/i` | catch-all for `token ... limit ... exceeded` phrasing |
+| `/input.*too.long/i` | free-form provider error |
+| `/request.*too.*large/i` | free-form provider error |
+| `/prompt.*too.*long/i` | free-form provider error |
+| `/reduce the length/i` | **added 2026-10-23** — some providers return `please reduce the length of ...` instead of a structured code (opencode `09a1db3`) |
+
+A match triggers reactive compaction in `src/core/agenticChat.ts` and rewrites the user-facing error in `src/core/orchestrator.ts` so the CLI shows `Context window exceeded. Reduce context size or use a model with a larger window.` instead of the raw provider payload. A miss falls through to the generic error path — if a legitimate overflow slips past, add the new phrase to `CONTEXT_OVERFLOW_PATTERNS` and a regression case to `src/core/contextOverflow.test.ts`.
+
 ### Chunked Compaction
 
 Large contexts are split into chunks at natural boundaries before compaction:
