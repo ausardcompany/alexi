@@ -4353,6 +4353,66 @@ If you extend `parseSchedule` (e.g. add `"weekly on Monday at 9am"`):
 
 See [docs/TESTING.md — Testing the todowrite scheduled-todo promotion hook](TESTING.md#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets) for the regression surface.
 
+## MCP client manager (`src/mcp/client.ts`)
+
+The `McpClientManager` is the only path by which Alexi talks to third-party MCP servers over stdio / HTTP. Three invariants ride on top of the raw SDK; keep them in place.
+
+### Concurrent-connect dedup is a correctness guard, not an optimisation
+
+`McpClientManager.connect(config, options)` keeps an in-flight promise map keyed by `config.name`:
+
+```typescript
+async connect(config: McpServerConfig, options?: McpConnectOptions): Promise<McpConnection> {
+  const inFlight = this.pendingConnects.get(config.name);
+  if (inFlight) {
+    return inFlight;
+  }
+  const task = this.connectImpl(config, options).finally(() => {
+    this.pendingConnects.delete(config.name);
+  });
+  this.pendingConnects.set(config.name, task);
+  return task;
+}
+```
+
+- **Do NOT remove the `pendingConnects` lookup to "simplify" the method.** A config observer that fires concurrently with the startup `connectFromConfig()` will spawn a second stdio child for the same server, resulting in zombie processes and double-register notifications on the server list. The dedup is the only guard against that race.
+- **Keep the handshake in `connectImpl` (private).** The public `connect` owns dedup bookkeeping; moving the handshake back into `connect` turns a one-screen method into a ~400-line method with a nested `if` wrapped around the actual connect logic, and the dedup `.finally()` has to be re-threaded through every early return. Keep the pure split.
+- **The `.finally()` is unconditional.** `pendingConnects.delete(config.name)` must run on resolve, reject, and cancel paths alike. Replacing `.finally()` with `.then().catch()` creates a hole on the cancel path — if the task is garbage-collected or the handshake throws before the first `await`, the entry sticks and every subsequent `connect(sameName)` returns a settled-rejected promise forever.
+- **Do NOT key dedup by anything other than `config.name`.** The connection cache (`this.connections`) is keyed by name, so the dedup map MUST use the same key. Keying by a config-hash would allow two "logically identical" configs to race on the same name entry.
+
+### Parallel teardown in `disconnectAll` is deliberate
+
+```typescript
+async disconnectAll(): Promise<void> {
+  const names = Array.from(this.connections.keys());
+  await Promise.allSettled(names.map((name) => this.disconnect(name)));
+}
+```
+
+- **Keep `Promise.allSettled`, not `Promise.all`.** A per-server teardown error must NOT propagate as a top-level rejection. Shutdown is almost always the caller, and surfacing a stray MCP-server misbehaviour here would mask the process exit code — the caller wants a best-effort teardown, not an atomic one.
+- **Snapshot the keys with `Array.from(...)` before dispatching.** Each `disconnect(name)` removes the entry from `this.connections`, so iterating directly via `this.connections.keys()` after the map starts shrinking would skip entries. The snapshot pins the "disconnect everyone currently connected" semantics.
+- **Do NOT add a per-server timeout here.** `disconnect()` already handles its own slow-child case; adding another timeout layer in `disconnectAll` just lets a slow-but-eventually-successful disconnect race against two cancellation sources.
+
+### Output schema normalisation is not optional
+
+`normalizeOutputSchema` (`src/mcp/client.ts:717-734`) is called by the tool-registration path for every MCP tool. Keep three contracts:
+
+- **`undefined` on non-object input is the API.** Call sites spread the result onto a tool definition: `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }`. Returning `{}` (an empty schema) would misleadingly advertise an empty object schema to the model; returning `null` would break the spread (`...null` is a no-op but linter-flagged). Keep the `undefined` sentinel.
+- **Pass-through on `{ properties }` without `type` is intentional.** Some MCP servers omit `type` when `properties` is present. The guard `s.type === 'object' || s.properties !== undefined` treats that branch as a root object. Collapsing it to `s.type === 'object'` would wrap a perfectly valid root schema under `properties.result` and break downstream tooling that already handles the `properties`-only shape.
+- **The wrap key is `result`, not `value` / `data`.** The literal `result` matches opencode `c41c3a0` so a cross-project operator reading an MCP log sees the same wrapper on both sides. Renaming it would silently break any dashboard / schema consumer that depends on the wrapper name.
+
+See [docs/TESTING.md — Testing the MCP output-schema normaliser](TESTING.md#testing-the-mcp-output-schema-normaliser-srcmcp__tests__normalizeoutputschematestts) for the six-case audit and [docs/ARCHITECTURE.md — MCP Client Connect De-duplication](ARCHITECTURE.md#mcp-client-connect-de-duplication-srcmcpclientts) for the full dispatch sequence.
+
+## Context overflow detection (`src/core/contextOverflow.ts`)
+
+The `CONTEXT_OVERFLOW_PATTERNS` list in `src/core/contextOverflow.ts:27-50` is the single source of truth for "this error means the model's context window was blown". A match triggers reactive compaction in `src/core/agenticChat.ts` AND rewrites the user-facing error to the canonical `CONTEXT_OVERFLOW_USER_MESSAGE` in `src/core/orchestrator.ts`. Keep three invariants:
+
+- **The list is curated, not generated.** Each pattern is a case-insensitive regex that was observed on a real provider surface (OpenAI, Anthropic, SAP AI Core orchestration). Do NOT add a pattern "just in case" — a false positive here converts a transient provider error into reactive compaction, which rewrites the message history. A false negative is strictly safer than a false positive.
+- **Order does not matter, but new entries belong at the bottom with a comment pointing to the upstream commit / provider surface that justified the addition.** Example from the 2026-10-23 sync: `/reduce the length/i` is tagged "Added from upstream opencode `09a1db3`". Reviewers rely on that provenance to decide whether a future removal is safe.
+- **Prefer narrow, distinctive phrases over generic catch-alls.** `/reduce the length/i` is distinctive enough to be low-false-positive; something like `/too long/i` would match thousands of unrelated error messages and start triggering compaction on validation errors. If a candidate phrase feels like it would match generic validation output, do NOT merge it.
+
+Companion contract: `maxTokensRecovery` (`src/core/maxTokensRecovery.ts`) handles the complementary case where the overflow is caused by the response budget, not the prompt. Free-form phrases like `prompt too long` are deliberately routed through `isContextOverflowError` (compaction), NOT through `maxTokensRecovery` (which only handles `413` / `max_tokens_exceeded` / `context_length_exceeded` structural markers). Do not add free-form patterns to the maxTokens classifier.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
