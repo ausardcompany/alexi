@@ -4,282 +4,318 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
+```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-22
+Generated: 2026-10-23
 Based on upstream commits analyzed:
-- **kilocode**: 4481e06d8 (PR link ingest), 2f452d7a5 (session host registry), 2e1793154 (MCP prompt content preservation), f18d9006c (session host contracts)
-- **opencode**: c87f6b7 (compaction keepID validation), 3260ec7 (legacy apply_patch → edit), 0c8e7a9 (preserve Permission.Error), 6a5f15a (ignore unsupported agent colors), 6709f56 (compaction output limit), ab249a9 (cache breakpoints), 870ab9d (baseURL override), 93bf002 (shared isRecord/stringify), 9c8e9e4 (remove NamedError/iife), 248bfbe (codemode fetch display args), e441daf (Windows service port), c93aaae (fs.watch graceful fallback)
+- kilocode: 4481e06d8..4130f7a6e (56 commits)
+- opencode: f7d5b6f..2a3e7c0 (74 commits)
 
 ## Summary
-- Total changes planned: 14
-- Critical: 2 | High: 5 | Medium: 5 | Low: 2
+- Total changes planned: 12
+- Critical: 2 | High: 4 | Medium: 4 | Low: 2
+
+## Key Themes Identified
+
+1. **Security hardening** — URL scheme validation for `open()` calls (kilocode CVE fix for `ms-msdt:`, `file://`, `javascript:` URLs via `open` package)
+2. **MCP improvements** — OAuth telemetry, OAuth callback hardening, parallel shutdown, idle-timeout handling, non-object output schemas, duplicate server dedup, elicitation forms
+3. **Session compaction** — Background (precompute) compaction, buffer safeguards, oldest-first shortening
+4. **Session runner** — Fallback to agent's model when session lacks one, context overflow error detection
+5. **Provider refactors** — ChatGPT context caps extracted into separate plugin, Codex model filtering
+6. **Agent file parsing** — V2 field detection, better unsupported-field warnings
+
+---
 
 ## Changes
 
-### 1. Preserve Permission.Error in FileAccess Interface
-**File**: `src/permission/file-access.ts` (or `src/permission/index.ts`)
+### 1. Add URL scheme validation helper for browser `open()` calls
+**File**: `src/core/open.ts` (new file)
 **Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 0c8e7a9) — the permission error type was being lost at the FileAccess boundary, causing permission errors to surface as generic errors. Critical for correct permission enforcement, especially important in SAP AI Core where permission tracking is auditable.
-
-**Current code** (likely pattern):
-```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Error> =>
-  Permission.check(path).pipe(
-    Effect.mapError((e) => new Error(e.message))
-  )
-```
+**Type**: security
+**Reason**: Backport of kilocode security fix (commit `82926fb30`, upstream also hardens `open` to v11.0.4). Prevents attackers from supplying `file://`, `javascript:`, `ms-msdt:`, or UNC-style payloads that would execute via the browser-opener protocol handler. Any place in Alexi that passes external URLs (OAuth callbacks, MCP sign-in redirects, docs links) to `open` must route through this helper.
 
 **New code**:
 ```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Permission.Error> =>
-  Permission.check(path) // propagate Permission.Error unchanged
-```
+// src/core/open.ts
+// Backport of upstream browser URL validation (kilocode #15383, opencode mcp/browser.ts).
+import open from "open"
 
-Ensure the `FileAccess.Interface` error channel is typed as `Permission.Error` (or union including it) rather than being flattened.
-
----
-
-### 2. Validate Compaction keepID with SessionMessage.ID schema
-**File**: `src/core/session/compaction.ts`
-**Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode c87f6b7) — `keepID` was not being validated against the message ID schema, which could produce silent corruption during compaction. Important because Alexi's SAP AI Core sessions must preserve message history consistency.
-
-**Current code**:
-```typescript
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-  // ...
+export function openUrl(input: string): Promise<ReturnType<typeof open>> {
+  const url = URL.canParse(input) ? new URL(input) : undefined
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return Promise.reject(
+      new Error(`Only http and https links can be opened in the browser: ${input}`),
+    )
+  }
+  return open(url.href)
 }
 ```
 
-**New code**:
+**Test file**: `src/core/open.test.ts`
 ```typescript
-import { SessionMessage } from "../session/message.js"
+import { describe, expect, test } from "bun:test"
+import { openUrl } from "./open"
 
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-    ? SessionMessage.ID.make(opts.keepID) // validate via schema
-    : undefined
-  // ...
-}
-```
+describe("openUrl", () => {
+  test("rejects values that are not URLs", async () => {
+    for (const input of ["not a url", ""]) {
+      const err = await openUrl(input).catch((e: unknown) => e)
+      expect(err).toMatchObject({ message: expect.stringContaining("Only http and https links") })
+    }
+  })
 
----
-
-### 3. Give compaction summaries the same output limit as normal turns
-**File**: `src/core/session/compaction.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 6709f56) — compaction was truncating summaries too aggressively, losing context. Especially impactful for long-running SAP AI Core sessions where compaction is more frequent due to token limits.
-
-**New code** (locate the max-output option when building the compaction generation request):
-```typescript
-const generation = yield* Generation.create({
-  model,
-  messages: compactionMessages,
-  // BEFORE: maxOutputTokens: COMPACTION_MAX_TOKENS,
-  // AFTER: use the same cap as a normal turn
-  maxOutputTokens: model.limit?.output ?? DEFAULT_MAX_OUTPUT,
+  test("rejects non-http schemes", async () => {
+    for (const input of [
+      "file:///etc/hosts",
+      "javascript:alert(1)",
+      "ms-msdt:/id PCWDiagnostic",
+      "\\\\server\\share\\file.html",
+    ]) {
+      const err = await openUrl(input).catch((e: unknown) => e)
+      expect(err).toMatchObject({ message: expect.stringContaining("Only http and https links") })
+    }
+  })
 })
 ```
 
 ---
 
-### 4. Map legacy `apply_patch` permissions to `edit`
-**File**: `src/permission/migrate.ts` (create if missing) or `src/permission/saved.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 3260ec7) — legacy saved permissions use the removed `apply_patch` tool name; without migration, saved permissions are orphaned and prompt users repeatedly. Alexi inherits saved-permission storage so needs the same migration.
+### 2. Route all existing `open()` call sites through `openUrl`
+**File**: `src/cli/**/*.ts`, `src/mcp/**/*.ts`, any other callers of the `open` package
+**Priority**: critical
+**Type**: security
+**Reason**: Companion to change #1. The helper is useless unless every `import open from "open"` is replaced. Audit all call sites with `rg "from \"open\"" src/`.
+
+**Current code** (example pattern):
+```typescript
+import open from "open"
+// ...
+await open(authorizationUrl)
+```
 
 **New code**:
 ```typescript
-// src/permission/saved.ts (loader)
-const LEGACY_TOOL_MAP: Record<string, string> = {
-  apply_patch: "edit",
-}
-
-function migrateToolName(name: string): string {
-  return LEGACY_TOOL_MAP[name] ?? name
-}
-
-// in load():
-const saved = rows.map((row) => ({
-  ...row,
-  tool: migrateToolName(row.tool),
-}))
+import { openUrl } from "../core/open"
+// ...
+await openUrl(authorizationUrl)
 ```
 
-Add a unit test asserting legacy `apply_patch` rows load as `edit`.
+**Audit checklist**:
+- MCP OAuth sign-in redirect (`src/mcp/oauth-provider.ts` or equivalent)
+- Browser-based auth flows (`src/cli/auth.ts`)
+- Any "open docs" / "open dashboard" commands
+- SAP AI Core login redirect if applicable (verify SAP SSO URL ultimately resolves to https:)
 
 ---
 
-### 5. Let configured provider baseURL override catalog model endpoints
-**File**: `src/providers/sap-ai-core.ts` / `src/providers/index.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 870ab9d) — when a user configures a `baseURL` override for a provider, the catalog's model-specific endpoint was still winning. Highly relevant for Alexi: SAP AI Core deployments **always** need a custom base URL per tenant, so this prevents the catalog from stomping tenant endpoints.
+### 3. Bump `open` dependency to 11.0.4
+**File**: `package.json`
+**Priority**: critical
+**Type**: security
+**Reason**: Transitive-dep vulnerability fix (kilocode #15383, commits `44b21a719`, `ca265eef5`). Older `open` versions did not validate URL schemes.
 
 **Current code**:
-```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  return model.endpoint ?? provider.baseURL ?? DEFAULT
-}
+```json
+"open": "^10.x.x"  // or whatever the current pin is
 ```
 
 **New code**:
-```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  // Explicit provider baseURL (user config) overrides catalog model endpoint
-  return provider.baseURL ?? model.endpoint ?? DEFAULT
-}
+```json
+"open": "11.0.4"
 ```
 
-Add a test ensuring an SAP AI Core base URL overrides any catalog `endpoint` on the model definition.
-
----
-
-### 6. Skip non-cacheable content parts when placing cache breakpoints
-**File**: `src/providers/cache-policy.ts` (or wherever cache breakpoint logic lives)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode ab249a9) — cache breakpoints were being placed on non-cacheable content parts (e.g., images, ephemeral tool results), invalidating the cache. Affects token economy on all providers; important for SAP AI Core cost tracking.
-
-**New code**:
-```typescript
-function placeBreakpoint(parts: ContentPart[]) {
-  // Only place on cacheable parts (text, tool-result with text payload)
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const p = parts[i]
-    if (p.type === "text" || (p.type === "tool-result" && hasTextOutput(p))) {
-      p.providerOptions = { ...p.providerOptions, cacheControl: { type: "ephemeral" } }
-      return
-    }
+Also add an override to force transitive dependencies to the fixed version:
+```json
+"overrides": {
+  "open": "11.0.4"
+},
+"pnpm": {
+  "overrides": {
+    "open": "11.0.4"
   }
 }
 ```
 
 ---
 
-### 7. Ignore unsupported agent colors (don't throw on config decode)
-**File**: `src/agent/config.ts` or `src/agent/schema.ts`
+### 4. Use agent's model when session has none
+**File**: `src/session/runner/model.ts` (or equivalent runner)
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream fix (opencode 6a5f15a) — invalid color values in agent frontmatter crashed agent loading entirely. Agents should load with `color: undefined` instead.
+**Reason**: Upstream opencode fix `4d30794` — when a session was created without an explicit model (e.g. created via API), subsequent runs crashed. Fallback to the agent's configured model. Important for SAP AI Core integration where sessions may be created programmatically.
 
-**Current code**:
+**Current code** (approximate):
 ```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(ColorSchema),
-  // ...
+const model = session.model
+if (!model) throw new Error("Session has no model")
+```
+
+**New code**:
+```typescript
+const model = session.model ?? agent.model
+if (!model) {
+  throw new Error(`Session ${session.id} and agent ${agent.name} both lack a model`)
+}
+```
+
+---
+
+### 5. Recognize additional context-overflow error patterns
+**File**: `src/providers/*/error-handling.ts` (or wherever context errors are mapped)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream opencode `09a1db3` broadens error detection so compaction triggers correctly on more providers. Relevant for SAP AI Core which may surface overflow with provider-specific wording.
+
+**New code** (add to context-overflow matcher):
+```typescript
+const CONTEXT_OVERFLOW_PATTERNS = [
+  /context[_ ]length/i,
+  /maximum context/i,
+  /token.{0,20}limit/i,
+  /prompt is too long/i,
+  /input is too long/i,
+  // Added from upstream:
+  /exceeds.{0,20}context window/i,
+  /request.{0,20}too large/i,
+  /reduce the length/i,
+]
+
+export function isContextOverflow(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return CONTEXT_OVERFLOW_PATTERNS.some((re) => re.test(msg))
+}
+```
+
+---
+
+### 6. MCP server shutdown — parallelize + dedup on initial reconciliation
+**File**: `src/mcp/index.ts` (or server registry)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream opencode fixes `7b14ad4` (parallel shutdown) and `8ecd6ad` (prevent duplicate-start during initial reconciliation). Avoids multi-second shutdowns and duplicated MCP processes when config observers fire during startup.
+
+**Current code** (approximate):
+```typescript
+async function shutdown() {
+  for (const server of servers.values()) {
+    await server.stop()
+  }
+}
+```
+
+**New code**:
+```typescript
+async function shutdown() {
+  await Promise.allSettled(
+    Array.from(servers.values()).map((s) => s.stop()),
+  )
+}
+
+// Dedup starts during reconciliation:
+const starting = new Map<string, Promise<MCPServer>>()
+async function ensureStarted(id: string, config: MCPConfig): Promise<MCPServer> {
+  const existing = servers.get(id)
+  if (existing) return existing
+  let pending = starting.get(id)
+  if (pending) return pending
+  pending = startServer(id, config).finally(() => starting.delete(id))
+  starting.set(id, pending)
+  return pending
+}
+```
+
+---
+
+### 7. Keep MCP OAuth login waiting after stray callback requests
+**File**: `src/mcp/oauth-callback.ts` (or equivalent)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Upstream opencode `309522f`. Stray/favicon requests to the callback server were resolving the login promise prematurely. Only resolve on a request that actually contains `code` or `error` query parameters.
+
+**Current code** (approximate):
+```typescript
+server.on("request", (req, res) => {
+  const url = new URL(req.url!, "http://localhost")
+  resolve(url.searchParams.get("code"))
+  res.end("ok")
 })
 ```
 
 **New code**:
 ```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(
-    Schema.transform(
-      Schema.Unknown,
-      Schema.UndefinedOr(ColorSchema),
-      {
-        decode: (v) => (isValidColor(v) ? v : undefined),
-        encode: (v) => v,
-      }
-    )
-  ),
-  // ...
+server.on("request", (req, res) => {
+  const url = new URL(req.url!, "http://localhost")
+  const code = url.searchParams.get("code")
+  const error = url.searchParams.get("error")
+  if (!code && !error) {
+    // Stray request (favicon, probe, prefetch) — ignore, keep waiting.
+    res.writeHead(404)
+    res.end()
+    return
+  }
+  if (error) {
+    reject(new Error(`OAuth error: ${error}`))
+  } else {
+    resolve(code!)
+  }
+  res.writeHead(200, { "content-type": "text/html" })
+  res.end("<html><body>You can close this tab.</body></html>")
 })
 ```
 
 ---
 
-### 8. Add session host registry + Kilo Cloud adapter (session hosting abstraction)
-**Files**:
-- `src/session-hosting/types.ts` (new)
-- `src/session-hosting/registry.ts` (new)
-- `src/session-hosting/index.ts` (new)
-
-**Priority**: medium
-**Type**: feature
-**Reason**: Upstream feature (kilocode 2f452d7a5, f18d9006c) — introduces a pluggable session host registry. For Alexi, this creates a clean seam to register SAP AI Core as a session host alongside any local/cloud hosts. Enables future SAP-hosted session restore/sync.
-
-**New code** (`src/session-hosting/types.ts`):
-```typescript
-export interface SessionHost {
-  readonly id: string
-  readonly displayName: string
-  readonly supports: (sessionID: string) => boolean
-  readonly restore: (sessionID: string) => Promise<SessionSnapshot | undefined>
-  readonly list?: () => Promise<SessionSummary[]>
-}
-
-export interface SessionSnapshot { /* ... */ }
-export interface SessionSummary { id: string; title: string; updatedAt: number }
-```
-
-**New code** (`src/session-hosting/registry.ts`):
-```typescript
-const hosts = new Map<string, SessionHost>()
-
-export const register = (host: SessionHost) => {
-  hosts.set(host.id, host)
-}
-export const get = (id: string) => hosts.get(id)
-export const list = () => Array.from(hosts.values())
-export const resolveForSession = (sessionID: string): SessionHost | undefined =>
-  list().find((h) => h.supports(sessionID))
-```
-
-Register an SAP AI Core host adapter in `src/providers/sap-ai-core.ts` on module init.
-
----
-
-### 9. Preserve MCP prompt content (no shell expansion on prompt strings)
-**File**: `src/core/session/prompt.ts` or `src/tool/mcp.ts`
+### 8. Accept MCP tools with non-root-object output schemas
+**File**: `src/mcp/client.ts` or tool-schema normalizer
 **Priority**: medium
 **Type**: bugfix
-**Reason**: Upstream fix (kilocode 2e1793154) — MCP prompt content was being passed through shell expansion, mangling `$VAR` and backticks. Fix preserves the raw content.
-
-**Current code**:
-```typescript
-const expanded = shellExpand(mcpPrompt.content)
-```
+**Reason**: Upstream opencode `c41c3a0`. Some MCP servers return union/array/primitive output schemas; previous code required a root `type: "object"`. This broke tool loading entirely for those servers.
 
 **New code**:
 ```typescript
-// MCP prompts are user content, not shell commands; do not expand.
-const content = mcpPrompt.content
-```
-
-Add a regression test: an MCP prompt containing `$HOME` must remain literal `$HOME`.
-
----
-
-### 10. Introduce shared `isRecord` and `stringify` helpers; drop redundant decoding
-**File**: `src/util/record.ts` (new), apply across callsites
-**Priority**: medium
-**Type**: refactor
-**Reason**: Upstream refactor (opencode 93bf002, 7012c9d, 6dfc681) — consolidates `isRecord` type guard + `stringify` helper and removes redundant re-decoding of already-branded data. Reduces duplicated runtime validation in hot paths (session inbox, projector, prompt).
-
-**New code** (`src/util/record.ts`):
-```typescript
-export const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v)
-
-export const stringify = (v: unknown): string => {
-  if (typeof v === "string") return v
-  try { return JSON.stringify(v) } catch { return String(v) }
+function normalizeOutputSchema(schema: unknown): JSONSchema | undefined {
+  if (!schema || typeof schema !== "object") return undefined
+  // Previously: required (schema as any).type === "object"
+  // Now: accept any valid JSON schema node; wrap non-object roots so
+  // downstream code that expects .properties can still function.
+  const s = schema as JSONSchema
+  if (s.type === "object" || s.properties) return s
+  // Wrap unions/arrays/primitives so our runtime has a stable shape.
+  return { type: "object", properties: { result: s }, required: ["result"] }
 }
 ```
 
-Then audit `src/core/session/{inbox,projector,prompt}.ts` and `src/providers/*.ts` for inline `typeof x === "object" && x !== null` checks and replace with `isRecord`. Rem
-{"prompt_tokens":15088,"completion_tokens":4096,"total_tokens":19184,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+---
 
-[Session: 3034f6b1-0c6a-4d59-a5e8-d52c6cd91c27]
-[Messages: 2, Tokens: 19184]
+### 9. Keep remote MCP requests open past Bun's fetch idle timeout
+**File**: `src/mcp/client.ts` (HTTP transport)
+**Priority**: medium
+**Type**: bugfix
+**Reason**: Upstream opencode `e49157b`. Bun 1.4.x enforces a fetch idle timeout that kills long-running MCP streaming requests. Set `signal`/`idleTimeout: 0` or use a persistent abort controller.
+
+**New code**:
+```typescript
+async function callRemoteMcp(url: string, body: unknown) {
+  return fetch(url, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+    // Bun-specific: disable idle timeout for streaming MCP sessions.
+    // @ts-expect-error — Bun extension
+    idleTimeout: 0,
+  })
+}
+```
+
+---
+
+### 10. Compaction — oldest-first shortening and empty-buffer guard
+**
+{"prompt_tokens":32961,"completion_tokens":4096,"total_tokens":37057,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: 4000bf53-4ccc-49a9-b5f5-f7031c41469a]
+[Messages: 2, Tokens: 37057]
 
 ## Execution Instructions
 

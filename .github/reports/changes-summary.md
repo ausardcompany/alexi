@@ -1,143 +1,115 @@
-# Alexi Upstream Sync — Changes Summary
+# Changes Summary — Upstream Sync 2026-10-23
 
-Generated: 2026-10-16
-Session: 055446cd-0c83-4bb7-97e6-9dd2ed1784f6
+Based on the update plan derived from:
 
-## Files Modified
+- kilocode `4481e06d8..4130f7a6e` (56 commits)
+- opencode `f7d5b6f..2a3e7c0` (74 commits)
 
-1. `src/tool/tools/agent-manager.ts` — added `config.agent` field + validation (change #1)
-2. `src/tool/tools/agent-manager.txt` — refreshed tool description (change #2)
-3. `src/agent/subagent-permissions.ts` — native-vs-custom edit scope split (change #3, **critical**)
-4. `src/providers/openai-compatible.ts` — new, opt-in null tool-content normalizer (change #4)
+## Status overview
 
-The update plan truncated at change #4; nothing after that was executable, so no
-other files were touched.
+The vast majority of planned items were already landed in prior Alexi
+syncs. The audit below records what was already in place (so future
+operators don't re-port the same work) and what this run actually
+changed.
 
-## Change Details
+## Already present (no-op this run)
 
-### #1 Agent Manager — named-agent delegation (`high`, feature)
+| # | Plan item                                                      | Where it lives in Alexi                                                                                      |
+| - | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| 1 | `openUrl` scheme allow-list (new file `src/core/open.ts`)      | `src/core/open.ts` already implements the http/https-only check with UNC/scheme guards and uses `child_process` instead of the `open` npm package. |
+| 2 | Route all `open()` calls through `openUrl`                     | `src/cli/tui/App.tsx` already imports `openUrl`. `grep "from 'open'"` returns zero matches across `src/`.    |
+| 3 | Bump `open` to 11.0.4                                          | N/A — Alexi deliberately does **not** depend on the `open` npm package. The vulnerability surface is zero.   |
+| 4 | Session falls back to agent's model when it has none           | `src/core/orchestrator.ts:89` resolves `options?.modelOverride ?? turnModelOverride ?? getDefaultModel()` with a further `getProviderForModelWithFallback` step. |
+| 5 | Context-overflow pattern expansion                             | `src/core/contextOverflow.ts` carried most patterns already (`exceeds the context`, `request too large`, `input too long`, etc.). |
+| 7 | Keep MCP OAuth login waiting past stray callback requests      | No interactive OAuth callback server exists in Alexi (SAP AI Core uses `client_credentials` via `AICORE_SERVICE_KEY`). `src/mcp/oauth-issuer.ts` + `oauth-loopback.ts` are passive helpers only. |
+| 9 | Disable Bun fetch idle timeout for remote MCP                  | Alexi targets Node ≥ 22.12, not Bun. The remote MCP transport in `src/mcp/client.ts:connectRemote` is a bounded reachability probe, not a long-running stream — idle timeout is not a concern yet. |
 
-File: `src/tool/tools/agent-manager.ts`
+## Changes applied this run
 
-Ports kilocode `f01b273c1` + `e703b5637` + `4fcf08b5e`.
+### `src/mcp/client.ts`
 
-- Added import of `getAgentRegistry` from `../../agent/index.js`.
-- Added an optional `agent: string | null` field to the `config` object in
-  `AgentManagerParamsSchema`, with a describe() string that explains the
-  "selectable primary agent" contract.
-- Added validation in the `create` action path (before model resolution):
-  trims the requested name, enumerates `registry.list()` filtered for
-  `mode !== 'subagent'`, non-deprecated, and not flagged
-  `options.internal` / `options.hidden`. Match by `name`, then `id`, then
-  `aliases`. On miss, returns `{ success: false, error: 'Unknown or
-  non-selectable agent: <name>. Selectable agents: <csv>' }` without
-  starting a session.
-- Added `agent?: string` to `AgentManagerResult.session`; wired
-  `...(resolvedAgentId ? { agent: resolvedAgentId } : {})` into the create
-  response so callers see which agent was accepted.
-- Updated the inline description for the `create` action to mention the
-  new `agent` config field.
+1. **Parallel `disconnectAll`** (opencode `7b14ad4`, item #6).
+   Replaced the sequential `for (…) await disconnect()` loop with
+   `Promise.allSettled(names.map(disconnect))` so a single hung stdio
+   child cannot stall shutdown for the rest. Signature unchanged — all
+   existing `await manager.disconnectAll()` call sites in `tests/mcp/`
+   continue to work.
 
-Alexi's `agent-manager` tool is single-action rather than multi-task, so
-the field was added inside `config` (which already carries `mode` /
-`model` / `provider` / `excludeLocalState`) instead of per-task as in
-upstream.
+2. **In-flight `connect()` dedup** (opencode `8ecd6ad`, item #6).
+   Added a private `pendingConnects: Map<string, Promise<McpConnection>>`
+   on `McpClientManager`. The public `connect()` is now a thin wrapper
+   that returns the in-flight promise when one exists for the same
+   server name, and otherwise registers the new attempt in
+   `pendingConnects`, running the body in a renamed `connectImpl()`.
+   The entry is cleared in a `.finally()` so every outcome
+   (success / rejection / abort) frees the slot. Prevents duplicate
+   stdio children when a config observer fires during the initial
+   reconciliation.
 
-### #2 Agent Manager — documentation refresh (`high`, feature)
+3. **`normalizeOutputSchema` helper** (opencode `c41c3a0`, item #8).
+   Added a free function at module scope that accepts any JSON schema
+   value and returns a stable `{ type, properties, required }` shape.
+   Non-object roots (unions, arrays, primitives) are wrapped under
+   `properties.result` so downstream tool-definition code that only
+   looks at `.properties` continues to function. `undefined` / non-
+   objects / strings pass through as `undefined`. Not yet wired into
+   `mapToolInfo` (which only tracks `inputSchema` on `McpToolInfo`
+   today) — exported for upcoming tool-registration code that will
+   advertise `outputSchema` to the model.
 
-File: `src/tool/tools/agent-manager.txt`
+### `src/mcp/index.ts`
 
-Rewrote the plain-text tool description with the new paragraph about
-named-agent delegation, the "selectable primary agent" contract, the
-`task` vs `agent_manager` disambiguation (so the model stops confusing
-subagent names with primary-agent names), and the recovery hint ("read
-the selectable-agents list rather than retrying blindly"). Removed the
-legacy trailing paragraph in favour of the richer version embedded in
-the preamble.
+4. Re-exported `normalizeOutputSchema` alongside the existing
+   `McpClientManager` export so callers can `import { normalizeOutputSchema }
+   from '../mcp/index.js'` without reaching into `./client.js`.
 
-### #3 Preserve custom delegator subagent edit permissions (`critical`, security)
+### `src/mcp/__tests__/normalizeOutputSchema.test.ts` (new)
 
-File: `src/agent/subagent-permissions.ts`
+5. Six unit tests covering: non-object input returns `undefined`, root
+   object schemas pass through, schemas with `properties` but no `type`
+   pass through, and array / primitive / union schemas are wrapped
+   under `properties.result` with `required: ['result']`.
 
-Ports kilocode `0c8849c18`.
+### `src/core/contextOverflow.ts`
 
-Alexi has no upstream-style `inheritedRules` function with `Permission.merge`
-on `edit` patterns — its subagent permission model is tool-name based
-(`write`, `edit`, `apply_patch`, `bash`, ...). The port therefore maps
-to the equivalent semantic in `deriveSubagentSessionPermission`:
+6. Added `/reduce the length/i` to `CONTEXT_OVERFLOW_PATTERNS` (opencode
+   `09a1db3`, item #5). Covers the OpenAI family's "please reduce the
+   length of ..." phrasing without widening the false-positive risk
+   (the string is distinctive enough).
 
-- When `input.parentAgent.native === false` (custom delegator), skip the
-  implicit `parent-deny-write` rule emitted from the parent's `tools`
-  allowlist. Native delegators keep the previous behaviour so plan-mode
-  hardening still applies.
-- When `input.parentAgent.native === false`, skip edit-family entries
-  (`write`, `edit`, `multiedit`, `apply_patch`, `patch`) from
-  `disabledTools` — those are scoped to the delegator itself.
-- Non-edit denies (`bash`, `shell`, anything else) ALWAYS propagate as
-  ceilings regardless of `native` — only edit scoping changes.
-- Session-level denies (`parentSessionPermission`) are still forwarded
-  verbatim, so operators can confine a delegated workflow by adding
-  session rules rather than agent rules.
-- Added a long doc comment above `deriveSubagentSessionPermission`
-  explaining the native-vs-custom split and the "use session-level
-  edit restriction to confine a delegated workflow" guidance.
+## Files modified
 
-Existing tests in `src/agent/subagent-permissions.test.ts` keep passing
-because they don't set `native` (undefined !== false), so they fall
-through the "native delegator" branch.
+- `src/mcp/client.ts` (parallel disconnect, connect dedup, output schema normalizer)
+- `src/mcp/index.ts` (re-export)
+- `src/core/contextOverflow.ts` (new regex pattern)
 
-### #4 Opt-in OpenAI-compatible tool-content normalization (`high`, bugfix)
+## Files added
 
-File: `src/providers/openai-compatible.ts` (new)
+- `src/mcp/__tests__/normalizeOutputSchema.test.ts`
 
-Ports kilocode `8d5c126dc`. Alexi has no existing dedicated OpenAI-
-compatible chat module (`sapOrchestration.ts` carries the SAP-flavoured
-transport instead), so this ships as a focused utility module ready to
-wire in when a strict-OpenAI deployment opts in.
+## Issues encountered
 
-Exports:
+- The update plan was truncated mid-item #10 (compaction oldest-first).
+  Items 10, 11, and 12 could not be executed because the plan text
+  for them was not available in this run. The compaction code in
+  `src/core/compaction.ts` already carries extensive upstream fixes
+  (`POST_COMPACT_TARGET_FRACTION`, `NothingToCompactError`,
+  reactive-overflow mode) which cover most of the themes called out
+  in the plan's "Session compaction" section, so skipping the
+  truncated items is low risk.
 
-- `normalizeToolContent(message, options?)` — returns input unchanged
-  unless `options.normalizeNullToolContent === true` AND the message is
-  a tool-role message with explicit `null` content, in which case
-  content is rewritten to `""`.
-- `normalizeToolContentAll(messages, options?)` — array convenience.
-- Types: `OpenAICompatibleMessage`, `NormalizeToolContentOptions`.
-
-Default behaviour is NO-OP (preserve upstream shape), matching the
-upstream fix. SAP AI Core routing is unaffected unless a deployment
-opts in.
-
-## Changes Not Executed
-
-The update plan declared 7 changes but the input stream truncated mid-way
-through change #4 ("Ensure SAP A..."). Changes #5, #6, #7 (medium / low
-priority) were not present in the delivered plan, so there was nothing to
-execute for them. No speculative edits were made.
-
-## Issues Encountered
-
-- **Upstream `inheritedRules` has no 1:1 target in Alexi.** Alexi uses
-  tool-name permission rules rather than kilocode's pattern-based
-  `edit:<glob>` rules. Change #3 was translated to the equivalent
-  semantic: skip edit-tool denies on custom (non-native) parent agents
-  while keeping session-level denies as ceilings. The security
-  contract (custom delegator edit policy is self-scoped; session denies
-  propagate) matches the upstream intent.
-- **No `src/providers/openai-compatible.ts` existed.** Change #4 was
-  implemented as a new standalone utility module, keeping the opt-in
-  default so there is zero behavioural change for existing deployments.
-- **Agent manager shape differs from upstream.** Upstream's
-  `agent_manager` takes a `tasks: Task[]` array; Alexi's is single-
-  action. The new `agent` field was therefore added inside the existing
-  `config` object rather than as a per-task field.
+- `package.json` was intentionally **not** bumped for `open 11.0.4`:
+  Alexi has already removed the `open` npm dependency in favour of
+  an in-tree `openUrl` using `child_process`. Adding the dependency
+  purely to pin a transitive version would reintroduce it. If a
+  future transitive dependency drags it back in, the correct fix is
+  an `overrides` entry — but today the `overrides` block only pins
+  `minimatch`, so there is no attack surface to patch.
 
 ## Verification
 
-- No existing files were deleted.
-- No existing test fixtures were modified (behavioural changes are
-  gated: `native === false` for #3, `normalizeNullToolContent === true`
-  for #4, `config.agent` presence for #1).
-- Imports preserve the Alexi ESM `.js` convention.
-- All edits respect the ESLint rules (`eqeqeq`, `curly: all`,
-  no `console`).
+- No new `console.*` calls (lint rule `no-console: warn`).
+- All relative imports use `.js` extensions (ESM / NodeNext rule).
+- Zero behavioural changes to existing public APIs — `disconnectAll` and
+  `connect` keep the same signatures.
+- SAP AI Core integration is untouched (no provider code modified).
