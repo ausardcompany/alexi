@@ -2,6 +2,8 @@
 
 This document provides guidelines and instructions for contributing to the project.
 
+> **Version:** applies to Alexi `1.22.54` and later. The 2026-10-24 upstream sync (commit `5f20f92b`, `1.22.53` → `1.22.54`) carried a security-only dependency pin — `open: 11.0.4` added to `package.json`'s `overrides` block, matching upstream kilocode `44b21a71` / `ca265eef5` — and no new source code. Branching rules, commit scope-enum (`cli, core, providers, config, server, agent, tools, ci, deps, tests`), ESLint and Prettier settings, husky pre-commit hooks, and CI gate order (`lint → typecheck → format:check → test:coverage → build`) continue to apply unchanged. Dependency changes to `package.json`'s `overrides` block MUST use the `deps` scope (e.g. `chore(deps): pin open to 11.0.4`); never land them under `core` or `config`, which are reserved for runtime behaviour.
+
 ## Table of Contents
 
 - [Getting Started](#getting-started)

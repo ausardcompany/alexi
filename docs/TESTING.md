@@ -2,6 +2,8 @@
 
 This document provides comprehensive testing guidelines for Alexi, including testing strategies, test commands, coverage expectations, and best practices.
 
+> **Version:** applies to Alexi `1.22.54` and later. The 2026-10-24 upstream sync (commit `5f20f92b`, `1.22.53` → `1.22.54`) carried a single dependency-side change — the `open` npm package pinned to `11.0.4` via the `package.json` `overrides` block (see [docs/CONFIGURATION.md — Dependency overrides](CONFIGURATION.md#dependency-overrides-packagejson-overrides)) — with NO new test surface, NO changed test commands, and NO changed coverage thresholds. The existing [Testing subagent `allowedTools` array-shape preservation](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108) suite (211 lines, pinned in commit `f0d0e15d`) continues to protect the delegation path against the Kilocode PR #15254 regression class, and the sibling [Testing subagent tool allowlist inheritance](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104) suite (233 lines, issue #2104) still covers allowlist baselines. Nothing below needs re-reading because of the sync; every test command, mocking convention, temp-directory pattern, and coverage threshold documented here continues to apply unchanged.
+
 ## Table of Contents
 
 - [Testing Strategy](#testing-strategy)
