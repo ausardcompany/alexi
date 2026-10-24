@@ -303,6 +303,112 @@ export function _resetFallbackWarningCache(): void {
   warnedFor.clear();
 }
 
+// ============================================================================
+// Provider-specific content-policy detection (issue #2134)
+// ============================================================================
+//
+// Each provider family surfaces moderation / safety filter blocks with a
+// slightly different shape; these thin wrappers isolate the structural
+// pattern per provider so callers do not have to re-derive it. The
+// generic cross-provider check `isContentPolicyError` from
+// `src/core/error-backoff.ts` already consumes all of these shapes — the
+// helpers below exist for telemetry/logging paths that want to attribute
+// a block to a specific provider.
+
+/**
+ * Return true when `err` looks like an OpenAI moderation / content-policy
+ * rejection. Shapes covered:
+ *   - `{ error: { type: 'moderation' } }` (moderation API).
+ *   - `{ error: { code: 'content_policy_violation' } }`.
+ *   - HTTP 451 (OpenAI reuses this for content-blocked requests).
+ *
+ * See upstream opencode PR #58544 for the original image-moderation case.
+ */
+export function isOpenAIContentPolicyError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as {
+    status?: unknown;
+    statusCode?: unknown;
+    error?: unknown;
+  };
+  const status =
+    typeof candidate.status === 'number'
+      ? candidate.status
+      : typeof candidate.statusCode === 'number'
+        ? candidate.statusCode
+        : undefined;
+  if (status === 451) {
+    return true;
+  }
+  if (candidate.error && typeof candidate.error === 'object') {
+    const nested = candidate.error as { type?: unknown; code?: unknown };
+    if (nested.type === 'moderation' || nested.code === 'content_policy_violation') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Return true when `err` looks like a Google (Gemini / Vertex) safety
+ * filter rejection. Shapes covered:
+ *   - `{ finishReason: 'SAFETY' }` on a generation response surfaced as
+ *     an error by the caller.
+ *   - `{ promptFeedback: { blockReason: 'SAFETY' } }` on a prompt-level
+ *     block (the model never ran).
+ */
+export function isGoogleSafetyError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { finishReason?: unknown; promptFeedback?: unknown };
+  if (candidate.finishReason === 'SAFETY') {
+    return true;
+  }
+  if (candidate.promptFeedback && typeof candidate.promptFeedback === 'object') {
+    const blockReason = (candidate.promptFeedback as { blockReason?: unknown }).blockReason;
+    if (blockReason === 'SAFETY') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Return true when `err` looks like an Anthropic content-policy block.
+ * Shapes covered:
+ *   - `{ error_type: 'content_policy' }` (older SDK envelope).
+ *   - `{ type: 'invalid_request_error', message: '... content policy ...' }`.
+ */
+export function isAnthropicContentPolicyError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as { error_type?: unknown; type?: unknown; message?: unknown };
+  if (candidate.error_type === 'content_policy') {
+    return true;
+  }
+  if (
+    candidate.type === 'invalid_request_error' &&
+    typeof candidate.message === 'string' &&
+    /content[_\s-]policy/i.test(candidate.message)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+// Re-export the cross-provider helper so callers importing from this
+// module (the canonical providers surface) get a single entry point.
+export {
+  isContentPolicyError,
+  classifyError,
+  type ErrorClassification,
+  type ErrorType,
+} from '../core/error-backoff.js';
+
 /**
  * Get the default model.
  *
