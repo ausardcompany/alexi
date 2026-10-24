@@ -2440,6 +2440,106 @@ The orchestrator's settle behaviour that depends on these rules is in
 `src/core/streamingOrchestrator.ts` (around the for-await loop), with
 the equivalent non-stream path in `src/core/agenticChat.ts`.
 
+## Streaming Chunk Forward-Compatibility (`src/providers/protocols/stream-events.ts`)
+
+Introduced in commit `a482d950 feat(core): handle unknown streaming events gracefully` (ports the discipline from SST OpenCode PRs #58596 image events, #58609 speech events, #58608 custom finish reasons). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock). Each one occasionally surfaces a new SDK event kind that reaches the normalised `StreamChunk` shape before Alexi's renderer learns about it. The provider and the streaming orchestrator cooperate so a forward-rolled upstream never crashes an in-flight turn.
+
+### Two guard layers
+
+1. **Provider getter dispatch (`src/providers/sapOrchestration.ts:1997-2019`).** `chunk.getDeltaContent()` and `chunk.getDeltaToolCalls()` are SDK methods that dispatch internally on `event.type`. When the SDK version does not recognise the event, those getters throw. The provider wraps both calls in a per-chunk `try/catch`:
+
+    ```typescript
+    let deltaContent: unknown;
+    let deltaToolCalls: SdkToolCallChunk[] | undefined;
+    try {
+      deltaContent = chunk.getDeltaContent();
+      deltaToolCalls = chunk.getDeltaToolCalls();
+    } catch (decodeErr) {
+      logger.warn(
+        `Unknown streaming event, skipping chunk (${this.config.modelName}): ` +
+          `${formatError(decodeErr)}`
+      );
+      continue;
+    }
+    ```
+
+    One new event kind cannot abort the whole turn. Caller-visible errors (rate limit, auth, network) still escape via the outer `try/catch` because they surface on the iterator pull itself, not on getter dispatch. The subsequent tool-call branch additionally guards `if (hasToolCalls && deltaToolCalls)` so a successful `getDeltaContent` paired with a thrown-and-recovered `getDeltaToolCalls` cannot leak an `undefined` into `deltaToolCalls.map(...)`.
+
+2. **Consumer-level recognised-chunk guard (`src/core/streamingOrchestrator.ts:546-561`).** When the SDK succeeds at normalising a chunk but the normalised shape carries only fields the orchestrator does not yet understand (e.g. a future `audio` channel widening of `StreamChunk`), the orchestrator falls back:
+
+    ```typescript
+    if (!isRecognizedStreamChunk(chunk)) {
+      logger.warn(`Unknown streaming chunk shape, skipping: ${JSON.stringify(chunk)}`, {
+        modelUsed: modelId,
+      });
+      return { value: { text: '' }, done: false };
+    }
+    ```
+
+### Known chunk fields
+
+The authoritative snapshot of fields the orchestrator can act on lives at `src/providers/protocols/stream-events.ts`:
+
+```typescript
+export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string> = new Set([
+  'text',
+  'toolCalls',
+  'finishReason',
+  'usage',
+  'images',
+]);
+
+export function isRecognizedStreamChunk(chunk: unknown): boolean;
+```
+
+Must be kept in sync with the `StreamChunk` interface:
+
+```typescript
+// src/providers/sapOrchestration.ts
+export interface StreamChunk {
+  text: string;
+  toolCalls?: ToolCallChunk[];
+  finishReason?: string;
+  usage?: TokenUsage;
+  images?: NormalizedImageChunk[];
+}
+```
+
+Adding a new normalised channel (e.g. `audio`, `reasoning`) requires updating BOTH the interface AND `KNOWN_STREAM_CHUNK_FIELDS`. The regression suite at `tests/core/streaming-events.test.ts` snapshots the set so forgetting one half of the update surfaces as a test failure, not a silent miss.
+
+### Sequence
+
+```mermaid
+sequenceDiagram
+    participant SDK as SAP AI SDK stream
+    participant Provider as SapOrchestrationProvider.streamComplete
+    participant Orch as streamChat
+    participant Caller as useStreamChat / interactive.ts
+
+    SDK->>Provider: yield SdkChunk
+    Provider->>Provider: try getDeltaContent / getDeltaToolCalls
+    alt getters throw (unknown event kind)
+        Provider->>Provider: logger.warn('Unknown streaming event...')
+        Provider->>SDK: continue
+    else getters return
+        Provider->>Orch: yield StreamChunk
+        Orch->>Orch: isRecognizedStreamChunk(chunk)
+        alt no known field (forward-rolled shape)
+            Orch->>Orch: logger.warn('Unknown streaming chunk shape...')
+            Orch->>Caller: yield { text: '' }
+        else at least one known field
+            Orch->>Orch: fullText += chunk.text; finalUsage ||= chunk.usage
+            Orch->>Caller: yield chunk
+        end
+    end
+```
+
+### Design notes
+
+- Both guards are deliberately `warn` (not `error`): a forward-rolled server is a soft failure that only matters until the renderer learns the new channel. Operators who need to triage can grep `Unknown streaming event, skipping chunk` or `Unknown streaming chunk shape, skipping` in the agent log.
+- The `return { value: { text: '' }, done: false }` branch in `streamChat` is intentional. Returning an empty-text yield lets any `for await` consumer advance to the next pull without special-casing a null yield; appending `''` to `fullText` is a no-op; cost telemetry sees no synthetic usage because the orchestrator reads `chunk.usage` only on known chunks.
+- Pin the regression suite before extending `StreamChunk`: `tests/core/streaming-events.test.ts` asserts `[...KNOWN_STREAM_CHUNK_FIELDS].sort() === ['finishReason', 'images', 'text', 'toolCalls', 'usage'].sort()`, so widening the interface without updating the snapshot fails CI immediately.
+
 ## Streaming Abort Semantics
 
 User-initiated cancellation of an in-flight streaming turn (Ctrl+C in the
