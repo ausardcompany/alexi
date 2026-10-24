@@ -8481,6 +8481,85 @@ Invariants the suite pins:
 
 When adding a new transient classifier to `isRetryableError`, extend this block with one positive case (budget exhaustion flips the new shape) and one negative case (budget still available keeps it transient). The retry-budget exhaustion path shares its classifier with every other transient driver — a false positive here flows into `NetworkManager`, `retryProviderCall`, and the agent-workflow `KILO_RETRIES` loop.
 
+### Testing content-policy classification (issue #2134)
+
+`tests/core/error-classification.test.ts` (294 lines, 32 cases across four describe blocks) pins the non-retry contract for the broader `isContentPolicyError` detector, the stateless `classifyError` taxonomy, the three provider-attribution helpers, and the `ErrorBackoff` integration. The suite is pure state-assertion — no fake timers, no mocked network, no provider-SDK stubs — so it composes with any future upstream shape added to the detector.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+
+import { classifyError, isContentPolicyError, ErrorBackoff } from '../../src/core/error-backoff.js';
+import {
+  isOpenAIContentPolicyError,
+  isGoogleSafetyError,
+  isAnthropicContentPolicyError,
+} from '../../src/providers/index.js';
+```
+
+**Block 1 — `classifyError` taxonomy (12 cases).** Every HTTP-status branch (`401`, `403`, `400`, `422`, `429`, `451`, `502`, `503`, plus unknown 4xx and 5xx), plus `ECONNRESET` code, `ETIMEDOUT` message, `NoRefreshTokenError` by name, free-tier rate-limit code, xAI capacity message, unknown errors, and `null` / `undefined`. Reference assertion shape:
+
+```typescript
+it('classifies ECONNRESET as transient network', () => {
+  const err = Object.assign(new Error('socket hang up (ECONNRESET)'), { code: 'ECONNRESET' });
+  const c = classifyError(err);
+  expect(c.type).toBe('network');
+  expect(c.fatal).toBe(false);
+  expect(c.retryable).toBe(true);
+});
+
+it('classifies HTTP 451 as content_policy with statusCode preserved', () => {
+  const c = classifyError({ status: 451, message: 'Unavailable For Legal Reasons' });
+  expect(c.type).toBe('content_policy');
+  expect(c.fatal).toBe(true);
+  expect(c.statusCode).toBe(451);
+});
+```
+
+**Block 2 — content-policy detection (8 cases).** Every message substring (`moderation`, `content_filter`, `content policy`, `safety`), HTTP `451`, the `ContentFilterError` class-name path (cross-module safe — a cross-worker vitest re-import that defeats `instanceof` still trips the `name` check), the `content_filter` code marker, and negative cases (`new Error('request failed')`, `{ status: 500 }`, `null`, `undefined`, `42`). Reference:
+
+```typescript
+it('detects a message containing "moderation"', () => {
+  const err = new Error('Request blocked by moderation');
+  expect(isContentPolicyError(err)).toBe(true);
+  const c = classifyError(err);
+  expect(c.type).toBe('content_policy');
+  expect(c.fatal).toBe(true);
+  expect(c.retryable).toBe(false);
+});
+```
+
+**Block 3 — provider-specific helpers (9 cases).** OpenAI moderation API shape, `content_policy_violation` code, HTTP `451` on an OpenAI envelope, negative OpenAI shapes; Google `finishReason: 'SAFETY'`, Google `promptFeedback.blockReason: 'SAFETY'`, negative Google reasons (`'STOP'`, `'OK'`); Anthropic `error_type: 'content_policy'`, Anthropic `invalid_request_error` + content-policy message, negative Anthropic message (`'missing field'`). Each positive case double-asserts that `classifyError(err).type === 'content_policy'` — so a future refactor that de-syncs the per-provider helpers from the generic detector trips immediately.
+
+**Block 4 — `ErrorBackoff` integration (7 cases).** Pins that a content-policy error from any provider family flips `isFatal()` through the record-then-ask path:
+
+```typescript
+describe('ErrorBackoff + content-policy integration (issue #2134)', () => {
+  it('does not retry an OpenAI moderation error', () => {
+    const b = new ErrorBackoff({ maxRetries: 5, initialDelayMs: 10 });
+    const err = { error: { type: 'moderation' }, message: 'blocked' };
+    b.recordError(undefined, err);
+    expect(b.isFatal()).toBe(true);
+  });
+
+  it('still retries a transient 503 error (not fatal)', () => {
+    const b = new ErrorBackoff({ maxRetries: 5, initialDelayMs: 10 });
+    const err = { status: 503, message: 'service unavailable' };
+    b.recordError(503, err);
+    expect(b.isFatal()).toBe(false);
+  });
+
+  it('isFatal(err) short-circuits for content-policy without recordError', () => {
+    const b = new ErrorBackoff();
+    const err = { error: { type: 'moderation' } };
+    expect(b.isFatal(err)).toBe(true);
+  });
+});
+```
+
+The transient-vs-permanent guard is the load-bearing invariant: a Google `SAFETY` shape, an OpenAI nested `moderation` shape, an Anthropic `content_policy` shape, an HTTP `451`, AND a bare message substring all flip `isFatal()`; a transient `503` or an `ECONNRESET` do NOT. Without the negative cases a future refactor that over-broadens the detector would silently stop retrying real transient failures. The final case pins the no-record short-circuit — `isFatal(err)` must return `true` for a staged content-policy payload *without* a prior `recordError` call, so CLI renderers can render the user-facing message synchronously.
+
+When adding a new upstream content-policy shape (e.g. a new provider family in a future `providers.<id>` adapter), extend Block 2 with one positive detection case, Block 3 with the per-provider helper if one is added, and Block 4 with one integration case that pins `ErrorBackoff.isFatal` through both the record-then-ask and the no-record paths.
+
 ### Hook `contextModification` persistence tests
 
 `tests/orchestrator-hooks.test.ts` gained a persistence test asserting that hook `contextModification` payloads are written to the session with `displayRole: 'system'`. The pattern:
