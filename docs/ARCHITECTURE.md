@@ -3688,6 +3688,127 @@ class EnhancedToolRegistry {
 
 This allows tools to be dynamically resolved based on session context, agent permissions, and prompt characteristics.
 
+### Plugin Activation Gate (`src/plugin/index.ts`, `src/tool/registry.ts`)
+
+Added by commit `14b15b42 fix(core): add plugin activation gate before tool dispatch` (ports upstream opencode PR #51133, "activation gate before tool dispatch"). The gate closes a race between the agent loop and any plugin whose async `onLoad` lifecycle hook has not yet settled when the first tool call fires. Pre-fix symptom: the model emits a tool call for a plugin-provided tool (MCP command, hook-registered script, or any entry in `plugin.tools[]`), the registry has the entry live-but-unactivated, and the dispatcher returns a bare `tool not found` string. The model has no way to tell this apart from an actual typo, so it retries or hallucinates a different tool instead of waiting the few milliseconds the plugin needs to finish starting up.
+
+The fix layers three cooperating pieces so the loop never observes the half-initialised state:
+
+1. **Per-plugin activation metadata.** `interface PluginState` (`src/plugin/index.ts`) carries two internal fields:
+
+   ```typescript
+   interface PluginState {
+     // ...
+     activating: boolean;              // true while onLoad is awaited
+     activationPromise?: Promise<void>; // in-flight hook promise, shared across callers
+   }
+   ```
+
+   `PluginManager.load()` flips `activating = true` before awaiting `plugin.onLoad(state.context)` and clears the flag in a `finally` block regardless of outcome. The promise is wrapped so a thrown `onLoad` cannot leave the plugin stuck in a perpetually-activating state. `load()`'s own catch block removes the plugin from `this.plugins`, so no stale state leaks when a hook rejects.
+
+2. **Global gate at the top of the agent loop.** `src/core/agenticChat.ts` calls `await ensurePluginsActivated()` after `registerBuiltInTools()` and before entering the dispatch loop:
+
+   ```typescript
+   // src/core/agenticChat.ts
+   logger.debug('agenticChat: waiting for plugin activation');
+   await ensurePluginsActivated();
+   ```
+
+   The thin wrapper calls through to `PluginManager.ensureActivated()`:
+
+   ```typescript
+   async ensureActivated(): Promise<void> {
+     const pending: Promise<void>[] = [];
+     for (const state of this.plugins.values()) {
+       if (!state.enabled) {
+         continue; // disabled plugins are not advertised to the model
+       }
+       if (state.activating && state.activationPromise) {
+         pending.push(state.activationPromise);
+       }
+     }
+     if (pending.length === 0) {
+       return; // fast path for the common post-startup case
+     }
+     // allSettled: one failing onLoad must not block the gate for others.
+     await Promise.allSettled(pending);
+   }
+   ```
+
+   Disabled plugins are skipped — their tools are never advertised, so blocking on their activation would be a dead stall. `Promise.allSettled` (not `all`) is intentional: `load()`'s catch block has already removed a failing plugin from the registry, so the gate just needs every in-flight hook to *settle*, not to succeed.
+
+3. **Per-dispatch guard.** `executeToolCall` in `src/core/agenticChat.ts` calls `await checkToolActivation(toolCall.function.name)` before parsing arguments or invoking `tool.execute`:
+
+   ```typescript
+   // src/tool/registry.ts
+   export async function checkToolActivation(toolName: string): Promise<string | null> {
+     try {
+       const { getPluginManager } = await import('../plugin/index.js'); // lazy
+       const manager = getPluginManager();
+       const owner = manager.findPluginForTool(toolName);
+       if (!owner) {
+         return null; // built-in tool, nothing to gate on
+       }
+       if (!owner.activating) {
+         return null;
+       }
+       await manager.ensureActivated();
+       const settled = manager.findPluginForTool(toolName);
+       if (!settled || !settled.activating) {
+         return null;
+       }
+       return `Tool '${toolName}' is not ready (plugin '${owner.pluginName}' still activating)`;
+     } catch {
+       return null; // plugin module unavailable: degrade to open
+     }
+   }
+   ```
+
+   On a non-null return the dispatcher emits a `tool_end` progress event with `{ success: false, error: activationError }` so the model sees an actionable "plugin X still activating" message instead of a bogus "command not found". The plugin module is lazy-imported inside the function so the tool registry stays usable in minimal environments (unit tests, one-shot scripts) that never initialise the plugin system — the fail-safe is "do not block dispatch".
+
+**Ownership resolution.** `PluginManager.findPluginForTool(toolName)` iterates enabled plugins and matches on BOTH `state.registeredTools` (runtime registration complete) AND `state.plugin.tools?.some(t => t.name === toolName)` (declared in the manifest but awaiting registration). The second branch is exactly the race the gate guards against: the model knows the tool name because the plugin advertised it in its manifest, but the registry entry is not yet live.
+
+**Flow:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as agenticChat
+    participant Mgr as PluginManager
+    participant Plugin as plugin.onLoad()
+    participant Exec as executeToolCall
+    participant Reg as checkToolActivation
+
+    Agent->>Mgr: registerBuiltInTools()
+    Agent->>Mgr: ensurePluginsActivated()
+    Mgr->>Plugin: await state.activationPromise (allSettled)
+    Plugin-->>Mgr: resolve / reject
+    Mgr-->>Agent: gate open
+    Agent->>Exec: tool call arrives
+    Exec->>Reg: checkToolActivation(toolName)
+    Reg->>Mgr: findPluginForTool(toolName)
+    alt built-in or no owner
+        Mgr-->>Reg: undefined
+        Reg-->>Exec: null (safe to dispatch)
+    else owner still activating
+        Reg->>Mgr: ensureActivated() (bounded wait)
+        Mgr-->>Reg: settled
+        Reg->>Mgr: findPluginForTool(toolName) (re-check)
+        alt still activating
+            Reg-->>Exec: "Tool 'X' is not ready (plugin 'Y' still activating)"
+            Exec-->>Agent: tool_end { success: false, error }
+        else now ready
+            Reg-->>Exec: null (safe to dispatch)
+        end
+    end
+```
+
+**Non-goals.**
+
+- The gate does NOT serialise tool dispatch after activation completes — once every enabled plugin's hook has settled, `ensurePluginsActivated()` is a `Promise.allSettled([])` no-op and the hot path is zero overhead.
+- The gate does NOT retry a failed `onLoad`. The plugin's `load()` catch block already removes the plugin from the registry, so the next `findPluginForTool` returns `undefined` and dispatch proceeds as if the plugin had never existed.
+- The gate does NOT emit permission prompts. It is a readiness check, not an authorisation check — the existing `getPermissionManager()` surface still gates every tool call independently.
+
 ## Session Replay
 
 The `SessionReplay` class (`src/cli/session-replay.ts`) enables replaying session history when resuming interactive sessions:

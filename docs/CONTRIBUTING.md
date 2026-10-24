@@ -4353,6 +4353,32 @@ If you extend `parseSchedule` (e.g. add `"weekly on Monday at 9am"`):
 
 See [docs/TESTING.md — Testing the todowrite scheduled-todo promotion hook](TESTING.md#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets) for the regression surface.
 
+## Plugin activation gate contract (`PluginManager.ensureActivated` / `checkToolActivation`)
+
+Added by commit `14b15b42 fix(core): add plugin activation gate before tool dispatch` (ports upstream opencode PR #51133). Before this change, a plugin whose async `onLoad` lifecycle hook had not yet settled could have one of its advertised tools dispatched by the agent loop — the registry entry was live-but-unactivated and the dispatcher returned a bare `tool not found`. The model, with no way to tell this apart from a typo, retried or hallucinated a different tool instead of waiting a few milliseconds. The fix is a three-piece gate; a refactor that drops any piece must still preserve the public contract documented below.
+
+### Invariants a reviewer must preserve
+
+1. **`PluginState.activating` tracks the hook, not the registration.** `activating` is `true` iff `plugin.onLoad` is currently being awaited by `load()`. Flipping it earlier (e.g. before context construction) or later (e.g. after `registeredTools` is populated) widens the race window the gate was built to close. The paired `activationPromise` is the actual in-flight promise, shared across concurrent `ensureActivated` callers so one `onLoad` is awaited once.
+2. **The flag MUST be cleared in a `finally` block.** A thrown `onLoad` cannot leave the plugin in a perpetually-activating state. `load()`'s own catch block removes the plugin from `this.plugins`, so no stale `PluginState` entry survives — but the `finally` is the belt-and-braces guarantee that even a mid-cleanup error path cannot deadlock the gate. Any refactor that moves the flag clear OUTSIDE a `finally` is a correctness regression.
+3. **`ensureActivated` uses `Promise.allSettled`, not `Promise.all`.** One failing plugin MUST NOT block the gate for the other plugins — the failing plugin is already removed from the registry by `load()`'s catch, so the gate just needs every in-flight hook to *settle*. Switching to `Promise.all` would make a single thrown `onLoad` propagate out through every `ensurePluginsActivated()` call at the top of every agent turn.
+4. **Disabled plugins are skipped.** `ensureActivated` and `isActivated` MUST both `continue` on `!state.enabled`. Disabled plugins are not advertised to the model, so blocking on their activation would be a dead stall — the operator disabled them specifically to keep them out of the dispatch path.
+5. **`findPluginForTool` considers BOTH `state.registeredTools` AND `state.plugin.tools?.some(...)`.** The second branch is the actual race surface: the model knows the tool name because the plugin advertised it in its manifest, but the registry entry is not yet live. A refactor that drops the manifest-level fallback would make the gate silently open the dispatch window it was supposed to close.
+6. **`checkToolActivation` lazy-imports `getPluginManager`.** The tool registry MUST stay usable in minimal environments (unit tests, one-shot scripts) that never initialise the plugin system. A top-level `import { getPluginManager } from '../plugin/index.js'` would create a hard dependency and break the "fast-path null return" semantics for every call site that runs without plugins loaded.
+7. **The guard's fail-safe is "do not block dispatch".** Any thrown error inside `checkToolActivation` (plugin module unavailable, lazy import failure) must `return null`, not propagate. The gate is a readiness check, not an authorisation check — a bug in the gate itself must not take down the agent loop.
+8. **The error string names the plugin, not just the tool.** `Tool '<name>' is not ready (plugin '<pluginName>' still activating)` is the actionable form. Dropping the plugin name degrades the fix to the pre-change state (model sees a bare "tool not ready" and cannot distinguish it from an actual registry miss).
+
+### What a new call site needs
+
+If you add a new entry point that dispatches tools (a new agent harness, a background job runner, a REPL extension), it MUST honour the gate the same way `agenticChat` does:
+
+1. Call `await ensurePluginsActivated()` from `src/plugin/index.js` AFTER `registerBuiltInTools()` and BEFORE entering the dispatch loop. The call is idempotent and zero-cost after startup, so there is no reason to skip it.
+2. In the dispatch helper, call `await checkToolActivation(toolCall.function.name)` from `src/tool/registry.js` BEFORE JSON-parsing the arguments and BEFORE calling `tool.execute`. On a non-null return, surface the error string straight to the model (same `tool_end` progress event shape `agenticChat` uses) and skip the rest of the dispatch.
+3. Do NOT re-implement the gate inline. The two helpers are the public surface; a hand-rolled scan over `PluginManager.plugins.values()` from a new call site freezes the current internal shape into a second place that must be kept in sync with every refactor.
+4. Do NOT emit a permission prompt from the gate. The gate is a readiness check; `getPermissionManager()` still runs independently afterwards.
+
+See [docs/ARCHITECTURE.md — Plugin Activation Gate (`src/plugin/index.ts`, `src/tool/registry.ts`)](ARCHITECTURE.md#plugin-activation-gate-srcpluginindexts-srctoolregistryts) for the sequence diagram and [docs/TESTING.md — Testing the plugin activation gate (`tests/plugin/activation-race.test.ts`)](TESTING.md#testing-the-plugin-activation-gate-testspluginactivation-racetestts) for the seven invariants pinned by the regression suite.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
