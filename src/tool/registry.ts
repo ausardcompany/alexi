@@ -165,6 +165,46 @@ export class ToolResolutionError extends Error {
 }
 
 /**
+ * Check that any plugin owning `toolName` has finished activating. Returns
+ * an error string describing which plugin is still activating when the tool
+ * is not ready, or `null` when it is safe to dispatch.
+ *
+ * Mirrors upstream opencode PR #51133 ("activation gate before tool
+ * dispatch"). The lookup is lazy (import inside the function) so that the
+ * tool registry does not take a hard dependency on the plugin system —
+ * callers that run without plugins loaded get a clean fast-path null
+ * return and no activation stall.
+ */
+export async function checkToolActivation(toolName: string): Promise<string | null> {
+  try {
+    // Lazy-import so the registry stays usable in minimal environments
+    // (tests, one-shot scripts) that never initialise the plugin system.
+    const { getPluginManager } = await import('../plugin/index.js');
+    const manager = getPluginManager();
+    const owner = manager.findPluginForTool(toolName);
+    if (!owner) {
+      // Built-in tool or no plugin ownership — nothing to gate on.
+      return null;
+    }
+    if (!owner.activating) {
+      return null;
+    }
+    // The plugin is still activating. Wait for it (bounded by the plugin's
+    // own activation promise, which is cleared regardless of outcome).
+    await manager.ensureActivated();
+    // Re-check: if activation finished successfully we're ready now.
+    const settled = manager.findPluginForTool(toolName);
+    if (!settled || !settled.activating) {
+      return null;
+    }
+    return `Tool '${toolName}' is not ready (plugin '${owner.pluginName}' still activating)`;
+  } catch {
+    // Plugin module unavailable in this environment — degrade to open.
+    return null;
+  }
+}
+
+/**
  * Enhanced tool registry with dynamic tool resolution
  * Supports both static and prompt-based dynamic tool resolution
  */
