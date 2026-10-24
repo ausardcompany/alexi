@@ -36,6 +36,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
+- [Testing subagent edit-tool configuration inheritance (`tests/agent/subagent-tool-inheritance.test.ts`, issue #2123)](#testing-subagent-edit-tool-configuration-inheritance-testsagentsubagent-tool-inheritancetestts-issue-2123)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -12977,6 +12978,196 @@ The subagent fixture is intentionally permissive (`canUseTool: () => true`) so t
 
 - `tests/agent/inheritance.test.ts` ([issue #2104](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)) is the sibling suite that pins the complementary bug class: parent-session edit allowlists written as `[deny *, allow <path>]` must not be flattened into blanket denies on delegated subagents. Together the two files cover both halves of the Kilocode #15254 regression surface — the `allowedTools` shape (this suite) and the parent-ruleset shape (the inheritance suite).
 - `tests/tool/tools/task-approval-boundary.test.ts` covers the end-to-end approval boundary enforcement at the permission-manager level: once the shape is preserved and the inheritance filters are applied, the manager must still refuse any tool call the derived ruleset denies. The shape-preservation suite is upstream of that boundary — a regression here would feed broken shapes into the approval boundary suite and amplify the failure.
+
+## Testing subagent edit-tool configuration inheritance (`tests/agent/subagent-tool-inheritance.test.ts`, issue #2123)
+
+Added in commit `4bee04a4 test(agent): audit subagent edit-tool config inheritance (#2123)`. A 383-line **verification-only** regression suite that pins the edit-family corner of Alexi's subagent permission derivation. The audit confirmed BOTH Kilocode upstream fixes referenced by issue #2123 are already ported — PR #15254 (allowlist-baseline unflattening) at `src/agent/subagent-permissions.ts:209-223` via the `editAllowlistBaselines: Set<PermissionRule>` filter, and commit `0c8849c18` (custom delegator edit scoping) at `src/agent/subagent-permissions.ts:143-194` via the `parentIsCustom` branch. The suite does not add runtime behaviour — the fix landed in prior commits — but it closes a specific coverage gap the two sibling suites did not cover: cross-session isolation of the derived ruleset.
+
+### Why the suite exists even though no runtime change ships
+
+Alexi's `edit` tool (`src/tool/tools/edit.ts`) is stateless at the tool level — there is no mutable per-session edit-tool config (no `diffStrategy`, no indentation preference, no approval policy) the way Kilocode has. The policy surface that actually drives whether a subagent can `edit` is therefore the SESSION PERMISSION RULESET derived by `deriveSubagentSessionPermission` and threaded through `TaskTool.buildSubagentConfig`. That is what this file pins:
+
+- Subagent inherits the parent's edit-family deny rules (ceilings).
+- Subagent does NOT inherit the parent's edit-family allow rules (approvals, per the cline #14225 contract).
+- A caller-supplied `allowedTools: ['edit']` DOES propagate verbatim to the derived config.
+- Parent-side mutations after `buildSubagentConfig` returns do NOT bleed into the subagent's derived ruleset (isolation A → B).
+- Subagent-side mutations of the derived ruleset do NOT bleed back into the parent's session permission (isolation B → A).
+
+The last two are the specific gap this issue called out (`"deep copy, not reference, to prevent cross-session pollution"`). They were not covered by `inheritance.test.ts` (which focuses on allowlist shape) nor by `subagent-permissions.test.ts` (which focuses on the `allowedTools` array shape).
+
+### Four `describe` blocks, ten pinned contracts
+
+**Block 1 — Inheritance: edit-family ceilings propagate from parent to subagent.** Three cases:
+
+```typescript
+it('parent edit deny on a specific path is forwarded to the subagent as a ceiling', () => {
+  const subagent = makeAgent();
+  const parentSessionPermission: PermissionRule[] = [
+    {
+      id: 'parent-edit-deny-env',
+      tools: ['edit'],
+      paths: ['**/.env'],
+      decision: 'deny',
+      priority: 100,
+    },
+  ];
+
+  const result = deriveSubagentSessionPermission({
+    parentSessionPermission,
+    parentAgent: undefined,
+    subagent,
+    allowedTools: ['edit'],
+  });
+
+  const forwarded = result.find((r) => r.id === 'parent-edit-deny-env');
+  expect(forwarded).toBeDefined();
+  expect(forwarded?.decision).toBe('deny');
+  expect(forwarded?.tools).toEqual(['edit']);
+  expect(forwarded?.paths).toEqual(['**/.env']);
+});
+```
+
+1. Parent `deny edit` on `**/.env` is forwarded to the subagent verbatim as a ceiling (a true deny, not an allowlist baseline, must survive derivation).
+2. Caller-supplied `allowedTools: ['edit']` is echoed to `SubagentConfig.allowedTools` with no `subagent-deny-edit` synthesised — the subagent is permitted to invoke `edit`.
+3. Parent `allow edit` on `src/**` is dropped (cline #14225 contract: approvals never inherit) AND the derivation emits an explicit `deny edit` when `edit` is absent from the caller's `allowedTools` so the subagent fails closed.
+
+**Block 2 — Allowlist-baseline unflattening (Kilocode PR #15254) + custom-vs-native delegator split.** Three cases pin the exact Kilocode scenario alongside the two delegator shapes:
+
+```typescript
+it('catch-all edit deny followed by a path-specific allow is treated as a baseline', () => {
+  const subagent = makeAgent();
+  const parentSessionPermission: PermissionRule[] = [
+    { id: 'parent-edit-baseline-deny', tools: ['edit'], paths: ['*'], decision: 'deny', priority: 10 },
+    { id: 'parent-edit-path-allow', tools: ['edit'], paths: ['src/**'], decision: 'allow', priority: 20 },
+  ];
+
+  const result = deriveSubagentSessionPermission({
+    parentSessionPermission,
+    parentAgent: undefined,
+    subagent,
+    allowedTools: ['edit'],
+  });
+
+  // Baseline deny dropped — subagent is NOT edit-denied by it.
+  expect(result.find((r) => r.id === 'parent-edit-baseline-deny')).toBeUndefined();
+  // Parent allow is dropped too (approvals not inherited).
+  expect(result.find((r) => r.id === 'parent-edit-path-allow')).toBeUndefined();
+  // And the derivation does NOT synthesise a wildcard edit deny (that is exactly the pre-fix bug).
+  expect(hasDenyFor(result, 'edit')).toBe(false);
+});
+```
+
+4. Parent `[deny edit *, allow edit src/**]` baseline is dropped, the path allow is dropped (approvals not inherited), and no synthetic wildcard edit deny appears. This is the regression guard for the Kilocode PR #15254 bug class.
+5. A CUSTOM (non-native) delegator with `disabledTools: ['edit', 'write']` does NOT ceiling the subagent — the delegator's edit scope stays on the delegator itself (Kilocode `0c8849c18`). Verified end-to-end through `TaskTool.buildSubagentConfig` so the integration path is covered alongside the unit path.
+6. A NATIVE delegator with the same `disabledTools: ['edit', 'write']` DOES ceiling the subagent even when the caller lists `edit` on `allowed_tools`. Native delegator edit restrictions are part of the hardening contract (e.g. plan-mode read-only ceiling) and must flow down to spawned subagents.
+
+**Block 3 — Isolation: parent → subagent (post-hoc mutation does NOT bleed).** Two cases:
+
+```typescript
+it('mutating the parent session rules after buildSubagentConfig does not affect the subagent', () => {
+  const subagent = makeAgent();
+  const parentSessionPermission: PermissionRule[] = [
+    { id: 'parent-edit-deny-env', tools: ['edit'], paths: ['**/.env'], decision: 'deny', priority: 100 },
+  ];
+
+  const config = TaskTool.buildSubagentConfig(ctx, subagent, {
+    parentSessionPermission,
+    allowedTools: ['edit'],
+  });
+  const subagentRuleCount = config.permission.length;
+
+  // Parent later tightens its own policy (e.g. interactive deny).
+  parentSessionPermission.push({
+    id: 'parent-added-later',
+    tools: ['edit'],
+    paths: ['src/**'],
+    decision: 'deny',
+    priority: 200,
+  });
+
+  // Subagent's derived ruleset is unaffected by the post-hoc push.
+  expect(config.permission.length).toBe(subagentRuleCount);
+  expect(config.permission.find((r) => r.id === 'parent-added-later')).toBeUndefined();
+});
+```
+
+7. Mutating `parentSessionPermission` after `buildSubagentConfig` returns does NOT retroactively tighten the derived ruleset. The derivation materialises a NEW array, so a parent-side `.push(...)` after the subagent was spawned cannot leak into the subagent's view.
+8. The derivation stores the ORIGINAL rule objects by reference (`config.permission !== parentSessionPermission`, but `config.permission[i] === parentSessionPermission[j]` for forwarded rules). This test documents the current contract: the ARRAY is a fresh allocation (so push/splice are isolated), while the RULE OBJECTS are shared references and should be treated as immutable value objects by convention.
+
+**Block 4 — Isolation: subagent → parent (reverse direction) + sibling isolation.** Two cases:
+
+```typescript
+it('two sibling subagents derived from the same parent get independent arrays', () => {
+  const parentSessionPermission: PermissionRule[] = [
+    { id: 'parent-edit-deny-env', tools: ['edit'], paths: ['**/.env'], decision: 'deny', priority: 100 },
+  ];
+
+  const siblingA = TaskTool.buildSubagentConfig(ctx, makeAgent({ id: 'code' }), {
+    parentSessionPermission,
+    allowedTools: ['edit'],
+  });
+  const siblingB = TaskTool.buildSubagentConfig(ctx, makeAgent({ id: 'code' }), {
+    parentSessionPermission,
+    allowedTools: ['edit'],
+  });
+
+  expect(siblingA.permission).not.toBe(siblingB.permission);
+
+  // Mutating sibling A must not touch sibling B.
+  siblingA.permission.push({
+    id: 'sibling-a-added',
+    tools: ['edit'],
+    decision: 'deny',
+    priority: 999,
+  });
+  expect(siblingB.permission.find((r) => r.id === 'sibling-a-added')).toBeUndefined();
+});
+```
+
+9. Pushing a rule into the derived subagent ruleset does NOT touch `parentSessionPermission` — symmetric to invariant 7. Any runtime plugin or test harness that mutates the subagent's derived ruleset must not retroactively tighten the parent's session.
+10. Two sibling subagents derived from the same parent snapshot get independent `config.permission` allocations. A mutation on sibling A cannot reach sibling B, so parallel subagent fan-out does not share mutable state through the permission ruleset.
+
+### Fixture helpers
+
+The suite reuses the same `makeAgent` + `hasDenyFor` convention as the two sibling suites, and adds a module-level `ctx` so every `TaskTool.buildSubagentConfig` call reads from the same `ToolContext`:
+
+```typescript
+import { TaskTool } from '../../src/tool/tools/task.js';
+import type { ToolContext } from '../../src/tool/index.js';
+
+function makeAgent(overrides: Partial<Agent> = {}): Agent {
+  return {
+    id: 'code',
+    name: 'Code Agent',
+    description: 'test stub',
+    mode: 'all',
+    systemPrompt: 'stub',
+    canUseTool: () => true,
+    ...overrides,
+  };
+}
+
+function hasDenyFor(rules: readonly PermissionRule[], tool: string): boolean {
+  return rules.some((r) => r.decision === 'deny' && r.tools?.includes(tool));
+}
+
+const ctx: ToolContext = { workdir: '/tmp/test', sessionId: 'parent-session' };
+```
+
+### Patterns worth internalising
+
+1. **Audit the inheritance surface, not the tool-level config, when the tool is stateless.** Alexi's `edit` tool has no mutable per-session config, so the question "did the subagent inherit the parent's edit configuration?" collapses to "did it inherit the parent's edit permission rules?". Pinning the permission-ruleset shape is the audit; a test that searched for a non-existent `editToolConfig` field would catch nothing.
+2. **Pin BOTH array identity AND array contents separately.** `config.permission !== parentSessionPermission` catches the "aliased by reference" bug class; `config.permission.length === subagentRuleCount` after a parent-side push catches the "copy made, but still shares the backing array" bug class (which would not surface on an identity check alone because the backing array shape would be masked by the length comparison). Both assertions are cheap and target different implementation mistakes.
+3. **Cover the reverse-isolation direction explicitly.** Most "no bleed" tests only cover parent → subagent; the suite also covers subagent → parent because a future runtime plugin or test harness that mutates the derived ruleset must not retroactively tighten the parent's session. The symmetric guard catches a class of bugs that an asymmetric audit misses.
+4. **Pin the custom-vs-native delegator split in the same `describe` block as the baseline-unflattening test.** Both derivations gate on `parentIsCustom = input.parentAgent?.native === false`, so a refactor that collapses the two branches would need to pass both the baseline-unflattening case AND both delegator-shape cases. Keeping them adjacent in the file makes the gate's role obvious to a future reader.
+5. **Use `TaskTool.buildSubagentConfig` AND `deriveSubagentSessionPermission` interchangeably across the blocks.** The derivation is the pure function; the wrapper threads `parentSessionPermission` / `parentAgent` into it. Blocks 1 and 2 exercise the derivation directly for the inheritance invariants; blocks 3 and 4 exercise the wrapper because the array-identity contract is a property of the wrapper's return value, not the pure function. Picking the right entry point per invariant localises the failure.
+6. **Keep the subagent fixture `canUseTool: () => true`.** The subagent's own `canUseTool` is deliberately permissive so the suite exercises only the parent-side filtering and the derived-array shape. A test that gave the subagent restrictive `tools: [...]` would conflate parent-filter regressions with subagent-config regressions, making a failure harder to interpret. Same convention as the two sibling suites.
+
+### Related suites
+
+- `tests/agent/inheritance.test.ts` ([issue #2104](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)) is the sibling suite that pins the allowlist-baseline-unflattening contract across the full `EDIT_PERMISSION_NAMES` tuple (`['edit', 'write', 'multiedit', 'apply_patch', 'patch']`). It covers the "which rules are dropped" axis; this suite covers the "do mutations leak across derived instances" axis.
+- `tests/agent/subagent-permissions.test.ts` ([issue #2108](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)) pins the TypeScript array shape of `SubagentOptions.allowedTools` through the delegation path. It covers the "shape of the explicit grant" axis; this suite covers the "shape of the derived ruleset after inheritance filtering" axis. Together the three suites close the Kilocode PR #15254 regression surface in full.
+- `tests/permission/task-approval-boundary.test.ts` covers the task-tool approval boundary at the permission-manager level — the integration surface that consumes the derived ruleset pinned here.
 
 ## Testing the `experimental.todo` flag (`src/config/userConfig.ts`, 2026-10-20 sync)
 
