@@ -4,282 +4,207 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
+```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-22
+Generated: 2026-10-24
 Based on upstream commits analyzed:
-- **kilocode**: 4481e06d8 (PR link ingest), 2f452d7a5 (session host registry), 2e1793154 (MCP prompt content preservation), f18d9006c (session host contracts)
-- **opencode**: c87f6b7 (compaction keepID validation), 3260ec7 (legacy apply_patch → edit), 0c8e7a9 (preserve Permission.Error), 6a5f15a (ignore unsupported agent colors), 6709f56 (compaction output limit), ab249a9 (cache breakpoints), 870ab9d (baseURL override), 93bf002 (shared isRecord/stringify), 9c8e9e4 (remove NamedError/iife), 248bfbe (codemode fetch display args), e441daf (Windows service port), c93aaae (fs.watch graceful fallback)
+- 44b21a719 - fix(deps): override transitive open versions
+- 82926fb30 - fix(cli): restrict browser and MCP OAuth URLs to HTTP(S)
+- ca265eef5 - chore(deps): bump open to 11.0.4
+- eb11204e8 - release: v7.8.17
+- e4e347a0e - release: v7.8.16
 
 ## Summary
-- Total changes planned: 14
-- Critical: 2 | High: 5 | Medium: 5 | Low: 2
+- Total changes planned: 5
+- Critical: 1 | High: 2 | Medium: 2 | Low: 0
 
 ## Changes
 
-### 1. Preserve Permission.Error in FileAccess Interface
-**File**: `src/permission/file-access.ts` (or `src/permission/index.ts`)
+### 1. Add secure URL opener utility (SSRF/scheme-injection hardening)
+**File**: `src/core/open.ts` (new file)
 **Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 0c8e7a9) — the permission error type was being lost at the FileAccess boundary, causing permission errors to surface as generic errors. Critical for correct permission enforcement, especially important in SAP AI Core where permission tracking is auditable.
-
-**Current code** (likely pattern):
-```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Error> =>
-  Permission.check(path).pipe(
-    Effect.mapError((e) => new Error(e.message))
-  )
-```
+**Type**: security
+**Reason**: Upstream security fix (`82926fb30`) restricts browser URL opening to HTTP(S) schemes only. Without this, attackers could trigger `file://`, `javascript:`, `ms-msdt:`, or UNC path handlers via crafted URLs in OAuth callbacks, MCP server metadata, or AI-provider-returned links. This is a defense-in-depth security hardening against local file disclosure, protocol-handler-based RCE (e.g., ms-msdt follina-style), and credential theft. The equivalent in Alexi protects SAP AI Core integration since any model-generated URLs opened via the CLI would otherwise be vulnerable.
 
 **New code**:
 ```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Permission.Error> =>
-  Permission.check(path) // propagate Permission.Error unchanged
-```
+// src/core/open.ts
+// Backported from kilocode upstream (82926fb30): restrict browser URL opening to HTTP(S)
+import open from "open"
 
-Ensure the `FileAccess.Interface` error channel is typed as `Permission.Error` (or union including it) rather than being flattened.
-
----
-
-### 2. Validate Compaction keepID with SessionMessage.ID schema
-**File**: `src/core/session/compaction.ts`
-**Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode c87f6b7) — `keepID` was not being validated against the message ID schema, which could produce silent corruption during compaction. Important because Alexi's SAP AI Core sessions must preserve message history consistency.
-
-**Current code**:
-```typescript
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-  // ...
+/**
+ * Opens a URL in the user's default browser, but only if the URL uses an
+ * http(s) scheme. All other schemes (file:, javascript:, ms-msdt:, UNC paths, etc.)
+ * are rejected to prevent protocol-handler abuse and local file disclosure.
+ */
+export function openUrl(input: string): Promise<ReturnType<typeof open> extends Promise<infer T> ? T : never> {
+  const url = URL.canParse(input) ? new URL(input) : undefined
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return Promise.reject(
+      new Error(`Only http and https links can be opened in the browser: ${input}`),
+    )
+  }
+  return open(url.href)
 }
 ```
 
-**New code**:
-```typescript
-import { SessionMessage } from "../session/message.js"
-
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-    ? SessionMessage.ID.make(opts.keepID) // validate via schema
-    : undefined
-  // ...
-}
-```
-
----
-
-### 3. Give compaction summaries the same output limit as normal turns
-**File**: `src/core/session/compaction.ts`
+### 2. Add tests for `openUrl`
+**File**: `test/core/open.test.ts` (new file)
 **Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 6709f56) — compaction was truncating summaries too aggressively, losing context. Especially impactful for long-running SAP AI Core sessions where compaction is more frequent due to token limits.
+**Type**: security
+**Reason**: Mirrors upstream test coverage (`packages/core/test/kilocode/open.test.ts`) to assert the critical-path scheme restriction is enforced. Regression protection against accidental re-exposure.
 
-**New code** (locate the max-output option when building the compaction generation request):
+**New code**:
 ```typescript
-const generation = yield* Generation.create({
-  model,
-  messages: compactionMessages,
-  // BEFORE: maxOutputTokens: COMPACTION_MAX_TOKENS,
-  // AFTER: use the same cap as a normal turn
-  maxOutputTokens: model.limit?.output ?? DEFAULT_MAX_OUTPUT,
+// test/core/open.test.ts
+import { describe, expect, test } from "bun:test"
+import { openUrl } from "../../src/core/open"
+
+describe("openUrl", () => {
+  test("rejects values that are not URLs", async () => {
+    for (const input of ["not a url", ""]) {
+      const err = await openUrl(input).catch((e: unknown) => e)
+      expect(err).toMatchObject({
+        message: expect.stringContaining("Only http and https links"),
+      })
+    }
+  })
+
+  test("rejects non-http schemes", async () => {
+    for (const input of [
+      "file:///etc/hosts",
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "ms-msdt:/id PCWDiagnostic",
+      "\\\\server\\share\\file.html",
+      "data:text/html,<script>alert(1)</script>",
+      "vbscript:msgbox(1)",
+    ]) {
+      const err = await openUrl(input).catch((e: unknown) => e)
+      expect(err).toMatchObject({
+        message: expect.stringContaining("Only http and https links"),
+      })
+    }
+  })
+
+  test("accepts http and https URLs (shape check only)", () => {
+    // We don't actually call open() here; just assert URL.canParse paths.
+    expect(URL.canParse("https://example.com")).toBe(true)
+    expect(URL.canParse("http://localhost:8080/path?q=1")).toBe(true)
+  })
 })
 ```
 
----
-
-### 4. Map legacy `apply_patch` permissions to `edit`
-**File**: `src/permission/migrate.ts` (create if missing) or `src/permission/saved.ts`
+### 3. Migrate callers of `open()` to `openUrl()`
+**File**: `src/cli/**/*.ts`, `src/providers/**/oauth*.ts`, `src/router/**/*.ts` (grep & replace)
 **Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 3260ec7) — legacy saved permissions use the removed `apply_patch` tool name; without migration, saved permissions are orphaned and prompt users repeatedly. Alexi inherits saved-permission storage so needs the same migration.
+**Type**: security
+**Reason**: The new utility only provides value when all `open(...)` call sites are routed through it. Audit all direct imports of `open` and replace with `openUrl` from the new module. Pay special attention to:
+- OAuth callback flows (MCP, SAP AI Core auth)
+- "Open docs in browser" CLI commands
+- Any model-generated clickable links in the TUI
 
-**New code**:
+**Current code (example pattern to find)**:
 ```typescript
-// src/permission/saved.ts (loader)
-const LEGACY_TOOL_MAP: Record<string, string> = {
-  apply_patch: "edit",
-}
-
-function migrateToolName(name: string): string {
-  return LEGACY_TOOL_MAP[name] ?? name
-}
-
-// in load():
-const saved = rows.map((row) => ({
-  ...row,
-  tool: migrateToolName(row.tool),
-}))
-```
-
-Add a unit test asserting legacy `apply_patch` rows load as `edit`.
-
----
-
-### 5. Let configured provider baseURL override catalog model endpoints
-**File**: `src/providers/sap-ai-core.ts` / `src/providers/index.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 870ab9d) — when a user configures a `baseURL` override for a provider, the catalog's model-specific endpoint was still winning. Highly relevant for Alexi: SAP AI Core deployments **always** need a custom base URL per tenant, so this prevents the catalog from stomping tenant endpoints.
-
-**Current code**:
-```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  return model.endpoint ?? provider.baseURL ?? DEFAULT
-}
+import open from "open"
+// ...
+await open(someUrl)
 ```
 
 **New code**:
 ```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  // Explicit provider baseURL (user config) overrides catalog model endpoint
-  return provider.baseURL ?? model.endpoint ?? DEFAULT
-}
+import { openUrl } from "@/core/open"   // adjust path per project aliasing
+// ...
+await openUrl(someUrl)
 ```
 
-Add a test ensuring an SAP AI Core base URL overrides any catalog `endpoint` on the model definition.
+**Grep command to locate**:
+```bash
+rg -n 'from ["'\'']open["'\'']|require\(["'\'']open["'\'']\)' src/
+```
 
----
+### 4. Pin `open` dependency to 11.0.4 and override transitive versions
+**File**: `package.json`
+**Priority**: medium
+**Type**: security
+**Reason**: Upstream commits `ca265eef5` and `44b21a719` bump `open` to 11.0.4 and add overrides for transitive copies. The older `open` versions contain known command-injection vectors (see GHSA advisories around `open` <10). Overrides ensure no transitive dependency silently reintroduces the old version.
 
-### 6. Skip non-cacheable content parts when placing cache breakpoints
-**File**: `src/providers/cache-policy.ts` (or wherever cache breakpoint logic lives)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode ab249a9) — cache breakpoints were being placed on non-cacheable content parts (e.g., images, ephemeral tool results), invalidating the cache. Affects token economy on all providers; important for SAP AI Core cost tracking.
-
-**New code**:
-```typescript
-function placeBreakpoint(parts: ContentPart[]) {
-  // Only place on cacheable parts (text, tool-result with text payload)
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const p = parts[i]
-    if (p.type === "text" || (p.type === "tool-result" && hasTextOutput(p))) {
-      p.providerOptions = { ...p.providerOptions, cacheControl: { type: "ephemeral" } }
-      return
-    }
+**Current code** (likely):
+```json
+{
+  "dependencies": {
+    "open": "^8.x" // or missing
   }
 }
 ```
 
----
+**New code**:
+```json
+{
+  "dependencies": {
+    "open": "11.0.4"
+  },
+  "overrides": {
+    "open": "11.0.4"
+  },
+  "resolutions": {
+    "open": "11.0.4"
+  }
+}
+```
 
-### 7. Ignore unsupported agent colors (don't throw on config decode)
-**File**: `src/agent/config.ts` or `src/agent/schema.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 6a5f15a) — invalid color values in agent frontmatter crashed agent loading entirely. Agents should load with `color: undefined` instead.
+> Note: use `overrides` for npm/pnpm and `resolutions` for yarn/bun. Keep whichever matches Alexi's package manager; include both if the repo supports multiple.
 
-**Current code**:
+### 5. Harden MCP OAuth callback URL handling (if MCP integration present)
+**File**: `src/providers/mcp/oauth-callback.ts` (or equivalent in Alexi's MCP layer)
+**Priority**: medium
+**Type**: security
+**Reason**: Upstream `82926fb30` and MCP SDK bump to 1.32.1 together harden the OAuth URL flow — the authorization URL returned by an MCP server is user/network-controlled and must not be opened without scheme validation. If Alexi has an MCP integration, apply the same guard; if not, this item is a no-op and can be skipped.
+
+**Current code** (expected pattern):
 ```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(ColorSchema),
-  // ...
-})
+import open from "open"
+// ...
+await open(authorizationUrl)
 ```
 
 **New code**:
 ```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(
-    Schema.transform(
-      Schema.Unknown,
-      Schema.UndefinedOr(ColorSchema),
-      {
-        decode: (v) => (isValidColor(v) ? v : undefined),
-        encode: (v) => v,
-      }
-    )
-  ),
-  // ...
-})
-```
-
----
-
-### 8. Add session host registry + Kilo Cloud adapter (session hosting abstraction)
-**Files**:
-- `src/session-hosting/types.ts` (new)
-- `src/session-hosting/registry.ts` (new)
-- `src/session-hosting/index.ts` (new)
-
-**Priority**: medium
-**Type**: feature
-**Reason**: Upstream feature (kilocode 2f452d7a5, f18d9006c) — introduces a pluggable session host registry. For Alexi, this creates a clean seam to register SAP AI Core as a session host alongside any local/cloud hosts. Enables future SAP-hosted session restore/sync.
-
-**New code** (`src/session-hosting/types.ts`):
-```typescript
-export interface SessionHost {
-  readonly id: string
-  readonly displayName: string
-  readonly supports: (sessionID: string) => boolean
-  readonly restore: (sessionID: string) => Promise<SessionSnapshot | undefined>
-  readonly list?: () => Promise<SessionSummary[]>
-}
-
-export interface SessionSnapshot { /* ... */ }
-export interface SessionSummary { id: string; title: string; updatedAt: number }
-```
-
-**New code** (`src/session-hosting/registry.ts`):
-```typescript
-const hosts = new Map<string, SessionHost>()
-
-export const register = (host: SessionHost) => {
-  hosts.set(host.id, host)
-}
-export const get = (id: string) => hosts.get(id)
-export const list = () => Array.from(hosts.values())
-export const resolveForSession = (sessionID: string): SessionHost | undefined =>
-  list().find((h) => h.supports(sessionID))
-```
-
-Register an SAP AI Core host adapter in `src/providers/sap-ai-core.ts` on module init.
-
----
-
-### 9. Preserve MCP prompt content (no shell expansion on prompt strings)
-**File**: `src/core/session/prompt.ts` or `src/tool/mcp.ts`
-**Priority**: medium
-**Type**: bugfix
-**Reason**: Upstream fix (kilocode 2e1793154) — MCP prompt content was being passed through shell expansion, mangling `$VAR` and backticks. Fix preserves the raw content.
-
-**Current code**:
-```typescript
-const expanded = shellExpand(mcpPrompt.content)
-```
-
-**New code**:
-```typescript
-// MCP prompts are user content, not shell commands; do not expand.
-const content = mcpPrompt.content
-```
-
-Add a regression test: an MCP prompt containing `$HOME` must remain literal `$HOME`.
-
----
-
-### 10. Introduce shared `isRecord` and `stringify` helpers; drop redundant decoding
-**File**: `src/util/record.ts` (new), apply across callsites
-**Priority**: medium
-**Type**: refactor
-**Reason**: Upstream refactor (opencode 93bf002, 7012c9d, 6dfc681) — consolidates `isRecord` type guard + `stringify` helper and removes redundant re-decoding of already-branded data. Reduces duplicated runtime validation in hot paths (session inbox, projector, prompt).
-
-**New code** (`src/util/record.ts`):
-```typescript
-export const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v)
-
-export const stringify = (v: unknown): string => {
-  if (typeof v === "string") return v
-  try { return JSON.stringify(v) } catch { return String(v) }
+import { openUrl } from "@/core/open"
+// ...
+try {
+  await openUrl(authorizationUrl)
+} catch (err) {
+  log.error("Refused to open MCP OAuth URL", {
+    url: authorizationUrl,
+    error: (err as Error).message,
+  })
+  throw err // or surface to CLI user explicitly
 }
 ```
 
-Then audit `src/core/session/{inbox,projector,prompt}.ts` and `src/providers/*.ts` for inline `typeof x === "object" && x !== null` checks and replace with `isRecord`. Rem
-{"prompt_tokens":15088,"completion_tokens":4096,"total_tokens":19184,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+## Testing Recommendations
 
-[Session: 3034f6b1-0c6a-4d59-a5e8-d52c6cd91c27]
-[Messages: 2, Tokens: 19184]
+1. **Run new tests**: `bun test test/core/open.test.ts` — must pass with all rejection cases.
+2. **Grep audit**: Confirm `rg 'import open from "open"' src/` returns only `src/core/open.ts`. Every other hit indicates a missed migration.
+3. **Smoke test SAP AI Core auth flow**: Trigger any browser-opening login/consent flow and verify an https URL still opens successfully.
+4. **Negative smoke test**: Manually pass a `file://` URL to any CLI command that opens links; confirm it fails cleanly with the "Only http and https links" error and does not hang the process.
+5. **Dependency check**: `bun pm ls open` (or `npm ls open`) — verify exactly one resolved version (`11.0.4`) across the tree.
+6. **Lockfile regen**: Commit regenerated lockfile; confirm CI dependency-audit step passes without `open`-related advisories.
+
+## Potential Risks
+
+- **Behavior change for legitimate non-http URLs**: If any existing Alexi feature intentionally opens `file://` (e.g., "open local report" or "reveal in Finder"), it will break. Audit for such uses and route them through a separate `revealLocalPath()` helper that uses OS-native `xdg-open`/`start`/`open -R` directly, bypassing URL-scheme validation. Do NOT weaken `openUrl`.
+- **`open` 11.x API changes**: `open` v10+ dropped CJS and tightened ESM-only exports. If Alexi still has CommonJS consumers, ensure the bundler/runtime supports ESM default-import of `open`, or wrap with a dynamic `await import("open")`.
+- **URL.canParse availability**: Requires Node ≥ 19.9 / Bun ≥ 1.0. Confirm Alexi's minimum runtime; if older, add a try/catch `new URL(input)` fallback.
+- **SAP AI Core integration unaffected**: These changes do not touch provider request paths, auth tokens, or routing — only outbound browser-opening. SAP-specific customizations are preserved.
+- **Non-breaking elsewhere**: No tool, agent, permission, or event-bus upstream changes in this window; nothing else in Alexi needs touching.
+```
+{"prompt_tokens":11566,"completion_tokens":3372,"total_tokens":14938,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: a20bb9d8-9acc-48ad-b1d6-421b0cfe8590]
+[Messages: 2, Tokens: 14938]
 
 ## Execution Instructions
 

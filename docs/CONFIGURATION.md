@@ -18,6 +18,7 @@ This document describes all configuration options available in Alexi, including 
   - [Session PR-Link Storage](#session-pr-link-storage)
   - [Session Retention Policy](#session-retention-policy)
 - [Configuration Examples](#configuration-examples)
+- [Dependency Overrides (`package.json` `overrides`)](#dependency-overrides-packagejson-overrides)
 
 ## Environment Variables
 
@@ -1971,6 +1972,31 @@ Recognized codes: `ENOTFOUND`, `EAI_AGAIN`, `ECONNREFUSED`, `ECONNRESET`, `ETIME
 ### Safe URL Opener
 
 `openUrl(input, options?)` (`src/core/open.ts`) is the single sanctioned browser-open entry point. Only `http:` and `https:` URLs are permitted; every other scheme (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC-style path is rejected. There is no allow-list to configure — the two-scheme policy is fixed by design. Options: `{ detached?: boolean }` (default `true`). See [API.md — Safe URL Opener](API.md#safe-url-opener-openurl).
+
+### Dependency Overrides (`package.json` `overrides`)
+
+Alexi uses the npm `overrides` field (`package.json`) to force specific versions of transitive dependencies that carry known security advisories. These are build-time knobs — they do not change CLI behaviour at run time — but they are documented here because operators who vendor Alexi into locked-down environments need to see the full version-resolution surface.
+
+```json
+"overrides": {
+  "minimatch": "10.2.6",
+  "open": "11.0.4"
+}
+```
+
+Introduced progressively across upstream syncs:
+
+- **`minimatch: 10.2.6`** — pins the glob-matcher library against CVE-era vulnerabilities in `<9`.
+- **`open: 11.0.4`** (added 2026-10-24, `1.22.54`, ports upstream kilocode `44b21a71` + `ca265eef5`) — pins the `open` npm package against command-injection vectors flagged by GHSA advisories around `open` `<10`. Alexi does NOT consume `open` directly; `src/core/open.ts` deliberately shells out via `child_process.spawn` against the platform launcher to avoid pulling the package into the dependency tree. The override is lockfile-neutral until a future transitive pull-in happens — once one does, the override forces resolution to `11.0.4` instead of the vulnerable line.
+
+Verify the live resolution with `npm ls <package>`:
+
+```bash
+npm ls open     # expected: no direct install, or 11.0.4 if a transitive pulled it in
+npm ls minimatch
+```
+
+Neither override alters runtime behaviour for the SAP AI Core integration (`src/providers/`, `src/core/orchestrator.ts`, `src/core/router.ts`, `src/core/sessionManager.ts`), environment variables, routing-config format, hook contracts, or session persistence under `~/.alexi/sessions/`.
 
 ## Reference System Configuration
 
