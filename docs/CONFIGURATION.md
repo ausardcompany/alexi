@@ -18,6 +18,8 @@ This document describes all configuration options available in Alexi, including 
   - [Session PR-Link Storage](#session-pr-link-storage)
   - [Session Retention Policy](#session-retention-policy)
 - [Configuration Examples](#configuration-examples)
+- [MCP sign-in telemetry (`src/mcp/auth-telemetry.ts`)](#mcp-sign-in-telemetry-srcmcpauth-telemetryts)
+- [MCP OAuth URL hardening (`src/mcp/oauth-callback.ts`)](#mcp-oauth-url-hardening-srcmcpoauth-callbackts)
 
 ## Environment Variables
 
@@ -3208,3 +3210,134 @@ The allowlist is deliberately conservative — it mirrors what SAP AI Core Orche
 An MCP tool that returns, say, a `image/bmp` screenshot will now show up to the model as `[omitted unsupported image: image/bmp]` instead of causing the whole chat turn to fail with an opaque 400 from the SAP AI Core orchestration endpoint. The tool's structured error path and text output are unaffected — only the embedded media attachment is dropped.
 
 See [docs/ARCHITECTURE.md — MCP Tool-Output MIME Filtering](ARCHITECTURE.md#mcp-tool-output-mime-filtering-srcmcpclientts) for the full dispatch flow and [docs/PROVIDERS.md — MCP MIME Allowlist](API.md#mcp-mime-allowlist-srcmcpclientts) for the public API shape.
+
+## MCP sign-in telemetry (`src/mcp/auth-telemetry.ts`)
+
+Introduced in the 2026-10-25 upstream sync (commit `9a2d1449`, ports upstream kilocode `7e789bbee` / `df98111b3` / `60f1ad7f1` / `df43b6526` — "MCP sign-in telemetry hardening"). Pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` event (`success | failure | interrupt | displaced`) so dashboards computing OAuth success rates for third-party MCP servers are not biased by orphaned `start` events from aborted or displaced flows.
+
+### Who exercises this surface
+
+SAP AI Core itself authenticates via the `AICORE_SERVICE_KEY` client-credentials flow and never issues sign-in events. The telemetry module is only exercised when the operator wires a third-party OAuth-protected MCP server (GitHub, Linear, Confluence, …) into Alexi. When sign-in is unused the module is pure state machine with no runtime cost.
+
+### `McpAuthTelemetry` class
+
+Transport-agnostic state machine. Callers inject an `EmitFn` that forwards each `SignInEvent` to the metrics sink of their choice (OpenTelemetry, Langfuse, local JSON log, …). The tracker performs no I/O itself.
+
+```typescript
+import { McpAuthTelemetry, type SignInEvent } from '../mcp/auth-telemetry.js';
+
+const tracker = new McpAuthTelemetry((event: SignInEvent) => {
+  // forward to OpenTelemetry, Langfuse, structured log, …
+  telemetrySink.record(event);
+});
+
+tracker.start('flow-123', 'github-mcp');
+// … browser flow runs …
+tracker.complete('flow-123', 'success');
+```
+
+### Event shape
+
+```typescript
+export type SignInOutcome = 'success' | 'failure' | 'interrupt' | 'displaced';
+
+export interface SignInEvent {
+  /** Event kind: lifecycle start, or one of the terminal outcomes. */
+  kind: 'start' | 'complete';
+  /** Flow id — unique per start, re-used by the matching complete. */
+  flowId: string;
+  /** Server id the sign-in flow is attributed to. */
+  serverId: string;
+  /** Outcome bucket — only set for `kind === 'complete'`. */
+  outcome?: SignInOutcome;
+  /** Wall-clock duration from start to complete, in ms. */
+  durationMs?: number;
+  /** Optional free-form error context when `outcome !== 'success'`. */
+  error?: string;
+}
+```
+
+### Invariants
+
+The three invariants locked in by `src/mcp/__tests__/auth-telemetry.test.ts`:
+
+1. **At most one in-flight flow per `serverId`.** Starting a new flow for a server that already has an open flow auto-completes the open flow with `outcome: 'displaced'` before the new `start` event is emitted. Starts for a *different* `serverId` do NOT displace — they run concurrently.
+2. **`complete(flowId, …)` is idempotent.** A second `complete` call for the same `flowId` is a silent no-op. Caller cleanup code can be defensive without risk of double-counting.
+3. **`shutdown()` closes every outstanding flow with `outcome: 'interrupt'`.** Call from Alexi's SIGINT / server-stop path so hung flows are visible in the metrics instead of silently leaking across runs.
+
+### `durationMs` and the injectable clock
+
+The second constructor argument is an optional `now: () => number` function (defaults to `Date.now`). Tests pass a controllable clock to make `durationMs` deterministic:
+
+```typescript
+let clock = 1000;
+const tracker = new McpAuthTelemetry(emit, () => clock);
+tracker.start('flow-1', 'server-a');
+clock = 1750;
+tracker.complete('flow-1', 'success');
+// → emitted complete event carries durationMs: 750
+```
+
+### Operator-facing impact
+
+If sign-in is unused, nothing changes. If a third-party MCP server with an OAuth flow is wired in, dashboard queries that compute `success_rate = complete.success / start` are correct even when operators cancel browser tabs, restart Alexi mid-flow, or launch a second flow for the same server before the first completes.
+
+See [docs/TESTING.md — Testing MCP sign-in telemetry pairing](TESTING.md#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts).
+
+## MCP OAuth URL hardening (`src/mcp/oauth-callback.ts`)
+
+Introduced in the 2026-10-25 upstream sync (commit `9a2d1449`, ports upstream kilocode `82926fb30` — "fix(cli): restrict browser and MCP OAuth URLs to HTTP(S)"). An attacker-controlled MCP server can supply a `javascript:`, `file://`, `ms-msdt:`, `data:`, `vbscript:`, or UNC-style authorization URL in its OAuth discovery metadata; opening that URL in the operator's browser would be an arbitrary-scheme invocation (XSS, local file disclosure, or RCE via protocol handlers — see CVE-2022-30190 "Follina" for the pattern). Alexi rejects the URL in two gates before the launcher spawns.
+
+### Scheme allow-list
+
+Only `http:` and `https:` pass. Every other scheme is rejected with a label-bearing error so operators can identify the failing discovery-metadata field:
+
+| Input                                      | Behaviour                                     |
+| ------------------------------------------ | --------------------------------------------- |
+| `http://example.com`                       | Accepted                                      |
+| `https://auth.example.com/oauth/authorize` | Accepted                                      |
+| `file:///etc/hosts`                        | Rejected — `must use http or https: <input>`  |
+| `javascript:alert(1)`                      | Rejected — `must use http or https: <input>`  |
+| `ms-msdt:/id PCWDiagnostic`                | Rejected — `must use http or https: <input>`  |
+| `data:text/html,<script>…`                 | Rejected — `must use http or https: <input>`  |
+| `vbscript:msgbox(1)`                       | Rejected — `must use http or https: <input>`  |
+| `\\server\share\file.html` (UNC)           | Rejected before `URL` parse — see note below  |
+| `//server/share/file.html`                 | Rejected before `URL` parse — see note below  |
+| `''` / non-string / unparseable            | Rejected — `${label} is not a valid URL`      |
+
+**UNC-path guard.** Some Node versions on Windows normalise `\\server\share\file.html` into a `file:` URL *after* parsing, which would bypass a post-parse scheme check. `assertHttpUrl` rejects strings starting with `\\` or `//` outright before handing to the `URL` constructor.
+
+### Two-gate validation
+
+```typescript
+import { assertHttpUrl, startMcpOAuth } from '../mcp/oauth-callback.js';
+
+// Direct validation (used by MCP discovery-metadata parsing).
+assertHttpUrl(server.authorization_endpoint, 'authorization_endpoint');
+assertHttpUrl(server.token_endpoint, 'token_endpoint');
+assertHttpUrl(server.registration_endpoint, 'registration_endpoint');
+
+// Full flow: validate + open.
+await startMcpOAuth(server.authorization_endpoint, { label: 'authorization_endpoint' });
+```
+
+`startMcpOAuth` validates the URL on receipt (so a bad URL never reaches the shell / launcher) AND relies on `openUrl`'s own scheme allow-list in `src/core/open.ts` as belt-and-braces defense — a future refactor that drops the explicit `assertHttpUrl` call does not re-open the vulnerability.
+
+### Error-message shape
+
+The `label` argument is woven into the error message so a stack trace from a nested OAuth-discovery parse localises to the offending field:
+
+```text
+Error: authorization_endpoint must use http or https: file:///etc/hosts
+Error: token_endpoint is not a valid URL
+```
+
+### Who exercises this surface
+
+SAP AI Core authenticates via the `AICORE_SERVICE_KEY` client-credentials flow and never issues an interactive OAuth redirect. This surface is only exercised by third-party OAuth-protected MCP servers.
+
+### Extending the allow-list
+
+The allow-list is deliberately narrow. Expanding it requires an entry in BOTH `assertHttpUrl` AND `openUrl`'s own allow-list — the two gates must agree. Reviewers of any proposed expansion must verify the new scheme is not a known OS-level RCE vector on any supported platform (Windows protocol handlers, macOS URL types, Linux `xdg-open` handlers).
+
+See [docs/TESTING.md — Testing MCP OAuth authorization-URL scheme allow-list](TESTING.md#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts).

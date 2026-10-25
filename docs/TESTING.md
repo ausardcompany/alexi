@@ -36,6 +36,9 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
+- [Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)](#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts)
+- [Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)](#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts)
+- [Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)](#testing-the-scoped-sse-probe-fetch-testsmcpsse-probetestts)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -13607,3 +13610,85 @@ afterEach(() => {
 - **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
 - **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
 - **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
+
+### Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)
+
+`src/mcp/__tests__/auth-telemetry.test.ts` (101 lines, 7 cases) pins the three invariants of `McpAuthTelemetry` (`src/mcp/auth-telemetry.ts`). The suite is pure — no `vi.mock`, no temp directory, no I/O. It uses a tiny in-memory recorder and an injectable clock so `durationMs` assertions are deterministic.
+
+**Shared fixture.** A `recorder()` helper returns `{ events, emit }`. The `emit` is the `EmitFn` passed to the tracker; `events` is the array every emitted `SignInEvent` is pushed into, so each case can match against the full ordered sequence:
+
+```typescript
+function recorder(): { events: SignInEvent[]; emit: (e: SignInEvent) => void } {
+  const events: SignInEvent[] = [];
+  return { events, emit: (e) => events.push(e) };
+}
+```
+
+**Injectable clock.** Each case constructs the tracker as `new McpAuthTelemetry(emit, () => <fixedTime>)` so the recorded `durationMs` is a function of controllable timestamps rather than wall-clock skew. The sixth case flips a mutable `let clock = 1000` to `1750` between `start` and `complete` to assert `durationMs === 750`.
+
+**Minimum coverage.**
+
+1. **Successful start/complete pair.** `start('flow-1', 'server-a')` then `complete('flow-1', 'success')` emits exactly two events, in the expected order, and leaves `inflightCount() === 0`.
+2. **Displacement.** Starting a second flow for the SAME `serverId` auto-completes the first with `outcome: 'displaced'` BEFORE the second `start` event is emitted. The ordered sequence `start:flow-1 → complete:flow-1:displaced → start:flow-2` is asserted via `events.map(e => '${e.kind}:${e.flowId}:${e.outcome ?? ''}')`.
+3. **No cross-server displacement.** Starting flows for `server-a` and `server-b` concurrently produces two `start` events only (no `complete` from displacement). `inflightCount() === 2`.
+4. **Idempotent `complete`.** A second `complete` call for the same `flowId` is a silent no-op — the suite asserts `events` has exactly 2 entries after `complete(..., 'failure')` + `complete(..., 'success')`, and the recorded outcome is the FIRST one.
+5. **`shutdown()` closes outstanding flows as `interrupt`.** `start('flow-1', ...)` + `start('flow-2', ...)` + `shutdown()` emits two `complete` events, both with `outcome: 'interrupt'`, and `inflightCount() === 0`.
+6. **`durationMs` is wall-clock from start to complete.** Advance the injectable clock between `start` and `complete`; assert `complete.durationMs === 750` exactly.
+7. **`complete()` for an unknown flow is silently ignored.** No events emitted — the tracker never records a `start` so there is nothing to pair.
+
+**Pitfalls.**
+
+- **Do not share recorders across cases.** Each `it(…)` constructs a fresh `recorder()` + `McpAuthTelemetry`. Reusing a recorder would leak events from the previous case into the sequence assertion.
+- **Assert on the event sequence, not just the final state.** `inflightCount()` reports the current gauge, but the pairing contract is a property of the emitted stream. The displacement case specifically asserts the ORDER of `start → complete:displaced → start`, not just that two start events eventually landed.
+- **Do not re-import `src/mcp/auth-telemetry.ts` across cases.** The module exports a class, not a singleton — each case constructs its own instance. A regression that introduced module-local state would be caught by the "no cross-server displacement" case.
+
+### Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)
+
+`src/mcp/__tests__/oauth-callback.test.ts` (61 lines, 5 cases across two `describe` blocks) pins the scheme allow-list exported by `src/mcp/oauth-callback.ts`. The suite exercises `assertHttpUrl` directly and gates `startMcpOAuth` against the launcher — actually spawning `xdg-open` / `open` / `start` in CI would be flaky and platform-specific, so only the pre-launcher rejection path is covered here.
+
+**Minimum coverage for `assertHttpUrl`.**
+
+1. **`http:` and `https:` are accepted.** `assertHttpUrl('http://example.com', 'authorization_endpoint').href === 'http://example.com/'`; `assertHttpUrl('https://auth.example.com/oauth/authorize', 'authorization_endpoint').href` round-trips verbatim. The returned `URL` is the parsed object, usable by downstream OAuth code.
+2. **Empty and non-URL inputs reject with the label.** `assertHttpUrl('', 'authorization_endpoint')` throws `/authorization_endpoint/`; `assertHttpUrl('not a url', 'token_endpoint')` throws `/token_endpoint/`. The field label is the key operator-facing hint for identifying which discovery-metadata field failed.
+3. **Dangerous schemes reject with `must use http or https`.** A parametrised loop asserts over five known hostile schemes: `file:///etc/hosts`, `javascript:alert(1)`, `ms-msdt:/id PCWDiagnostic`, `data:text/html,<script>alert(1)</script>`, `vbscript:msgbox(1)`. Each throws a message containing `must use http or https`.
+4. **UNC paths reject BEFORE `URL` parse.** `\\server\share\file.html` (Windows UNC) and `//server/share/file.html` both throw `must use http or https`. The check is explicit because some Node versions on Windows normalise UNC into a valid `file:` URL post-parse, which would bypass a scheme check that only inspected `url.protocol`.
+
+**Minimum coverage for `startMcpOAuth`.**
+
+5. **Non-http(s) URLs reject before the launcher spawns.** `startMcpOAuth('file:///etc/hosts')` rejects with `/http or https/`; `startMcpOAuth('javascript:alert(1)')` rejects with `/http or https/`; `startMcpOAuth('')` rejects with `/not a valid URL/`. The error surfaces *before* `openUrl` is called, so a bad URL never round-trips through logging / telemetry.
+6. **The configured label surfaces in the error.** `startMcpOAuth('file:///etc/hosts', { label: 'authorization_endpoint' })` rejects with `/authorization_endpoint/`, so a nested OAuth-discovery parse localises to the offending field.
+
+**Pitfalls.**
+
+- **Do NOT exercise `openUrl` directly in this suite.** `startMcpOAuth` validates first, so the suite needs to assert only on the pre-spawn rejection path. A test that attempts to spawn a browser subprocess in CI will time out on headless workers.
+- **Keep the dangerous-scheme list in sync with the implementation.** The source file enumerates the known-hostile schemes in a module-level comment (CVE-2022-30190 "Follina" for `ms-msdt:`, XSS for `javascript:` and `data:`, local file disclosure for `file:`); when adding a new scheme to the rejection list, extend both the suite's loop AND the module docblock.
+- **Match on the message substring, not the full string.** Use `/must use http or https/` and `/authorization_endpoint/` regex matchers rather than exact string equality — the error-message format may evolve (e.g. adding the offending URL to the message) and the suite should only pin the substrings operators actually read.
+
+### Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)
+
+`tests/mcp/sse-probe.test.ts` (102 lines, 11 cases across three `describe` blocks) covers `classifyProbeContentType`, `isSseContentType`, and the newer `ScopedProbeFetch` helper (`src/mcp/sse-probe.ts`). The suite is pure — no `vi.mock`, no network, no temp directory.
+
+**`classifyProbeContentType` cases.** Six cases parameterise the content-type matrix:
+
+1. Canonical `text/event-stream` classifies as `'sse'`.
+2. Case-varying `Text/Event-Stream` and `TEXT/EVENT-STREAM` classify as `'sse'` — classification is case-insensitive.
+3. Trailing parameters (`text/event-stream; charset=utf-8`) are stripped before matching.
+4. `application/json` classifies as `'json'` (streamable HTTP transport).
+5. Unrelated types (`text/html`, `application/xml`) classify as `'other'`.
+6. Missing / `null` / `undefined` / empty-string content types classify as `'other'` — defensive against SDKs that omit the header on error responses.
+
+**`isSseContentType` cases.** Two cases confirm the predicate wraps the classifier correctly for the common "am I talking to an SSE endpoint?" check.
+
+**`ScopedProbeFetch` cases.** The new cases cover the scoping contract introduced in the 2026-10-25 upstream sync (ports kilocode `432462088` / `70354f039`):
+
+7. **The initial URL is owned.** `new ScopedProbeFetch('https://mcp.example.com/sse').owns('https://mcp.example.com/sse') === true`.
+8. **Unrelated URLs are NOT owned.** The scoped probe does not claim ownership of `https://sap-aicore.example.com/v2/inference` or an unrelated MCP endpoint — this is the direct regression guard against the "leaked fetch interception" bug the upstream commit names in its message. Pre-fix, the probe installed a global fetch wrapper that intercepted EVERY concurrent request made by the process, including unrelated SAP AI Core traffic.
+9. **Redirect hops stay scoped.** `recordRedirect('https://mcp.example.com/sse/v2')` adds the hop to the owned-URL set; subsequent `owns(hop)` returns `true`, but owns on `https://unrelated.example.com` still returns `false`.
+10. **URL normalisation ignores fragments.** `#fragment` is stripped before scope matching — fetch never sees the fragment, so a `Location:` header that adds one must not break scope recognition.
+11. **Case-varying schemes still match.** `URL` already lower-cases scheme and host, but the normalisation is explicit so a caller passing a pre-formatted string (unusual, but possible) does not trip the scope check.
+
+**Pitfalls.**
+
+- **Test ownership through `owns`, not by inspecting the private Set.** `snapshot()` is exposed for test assertions and is the sanctioned way to inspect state. The private `visited` field is implementation detail.
+- **Do not install a global `fetch` wrapper in this suite.** `ScopedProbeFetch` is a pure in-memory bookkeeping helper — the actual fetch-interception wiring lives in follow-up code paths. Mocking `globalThis.fetch` here would conflate the two layers and leak the mock across parallel test files.
+- **Keep the `URL.canParse` fallback test honest.** The private `normalizeUrl` falls back to the raw string when `URL.canParse(input)` returns `false`. A regression that silently coerces unparseable strings would evade scope checks. The suite's "owns a non-URL string" scenario relies on this fallback staying deterministic.

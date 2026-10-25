@@ -4353,6 +4353,65 @@ If you extend `parseSchedule` (e.g. add `"weekly on Monday at 9am"`):
 
 See [docs/TESTING.md — Testing the todowrite scheduled-todo promotion hook](TESTING.md#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets) for the regression surface.
 
+## MCP sign-in telemetry pairing (`src/mcp/auth-telemetry.ts`)
+
+Introduced in the 2026-10-25 upstream sync (ports kilocode `7e789bbee` / `df98111b3` / `60f1ad7f1` / `df43b6526`). The `McpAuthTelemetry` state machine pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` so dashboards computing OAuth success rates are not biased by orphaned starts.
+
+### Port-maintenance invariants
+
+- **Pure state machine, no I/O.** The tracker performs zero I/O itself — callers inject an `EmitFn` that forwards events to the metrics sink. Do NOT bake a specific sink (OpenTelemetry, Langfuse, …) into this module. If a future sink needs a different payload shape, extend `SignInEvent` additively or let the caller remap in its `emit` closure.
+- **One in-flight flow per `serverId`.** `start(flowId, serverId)` iterates `inflight` and auto-completes any existing flow for the same `serverId` with `outcome: 'displaced'` BEFORE emitting the new `start` event. If you refactor the dispatch, keep the `start → complete:displaced → start` order; a dashboard that computes success rates from the sequence will double-count if the displacement complete lands after the new start.
+- **`complete` is idempotent.** A second `complete(flowId, …)` call for the same flow is a silent no-op. The current guard is `if (!meta) { return; }` on the Map lookup — do NOT replace this with a throw or a `logger.warn`. Caller cleanup code is intentionally allowed to call `complete` defensively (e.g. in a `finally` after the OAuth promise already rejected).
+- **`shutdown()` snapshots the keys before iterating.** `complete()` mutates `this.inflight`; iterating the Map's live keys would skip entries. The reference implementation uses `Array.from(this.inflight.keys())` — keep this.
+- **Injectable clock.** The constructor's second argument is `now: () => number = Date.now` so tests can advance the clock deterministically. Do NOT hard-code `Date.now()` inside the methods — the one assertion that pins `durationMs` relies on controllable time.
+- **No module-level singleton.** `McpAuthTelemetry` is a class, not a factory. Each caller constructs its own instance scoped to a session / tracker lifetime. Do not introduce a module-local singleton — the "no cross-server displacement" invariant relies on the tracker being process-local.
+- **New terminal outcomes extend the type union, not the `complete` signature.** If a future outcome bucket (e.g. `'expired'`) is needed, add it to the `SignInOutcome` union AND the regression suite's parametrised matrix. Do not add outcome-specific overloads.
+
+### `durationMs` contract
+
+Wall-clock from `start` to `complete`, carried only on the `complete` payload. Negative values are impossible because `now()` is monotonic within a single process run; if a future refactor supports persisting the start timestamp across restarts, add a `>= 0` guard before emitting.
+
+See [docs/TESTING.md — Testing MCP sign-in telemetry pairing](TESTING.md#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts) for the seven-case regression surface.
+
+## MCP OAuth URL hardening (`src/mcp/oauth-callback.ts`)
+
+Introduced in the 2026-10-25 upstream sync (ports kilocode `82926fb30`). Two-gate scheme allow-list that rejects attacker-controlled authorization URLs before the launcher spawns.
+
+### Port-maintenance invariants
+
+- **Scheme allow-list is the exported contract.** `assertHttpUrl` rejects every scheme except `http:` and `https:`. Expanding the allow-list requires entries in BOTH `assertHttpUrl` AND `openUrl`'s own allow-list in `src/core/open.ts` — the two gates must agree. Reviewers of any proposed expansion MUST verify the new scheme is not a known OS-level RCE vector (Windows protocol handlers, macOS URL types, Linux `xdg-open` handlers).
+- **UNC-path guard runs BEFORE `URL` parse.** `input.startsWith('\\\\')` and `input.startsWith('//')` are rejected explicitly. Some Node versions on Windows normalise UNC into a valid `file:` URL post-parse, which would bypass a scheme check that only inspected `url.protocol`. Keep the pre-parse guard even if the modern Node version in CI appears to reject UNC on its own — the guard is for environments the project cannot pin.
+- **`URL.canParse` is probed via feature detection.** The check is `if (typeof URL.canParse === 'function' && !URL.canParse(input))` so an older runtime without `canParse` falls through to the `try { new URL(input) }` block. Do NOT drop the feature-detection guard — the minimum supported Node version documented in `package.json` is the floor, but downstream distributors may ship older runtimes.
+- **Error messages carry the `label` argument.** Every throw path includes `${label}` in the message so a nested OAuth-discovery parse localises to the offending field. Do not change the message format without updating the suite's substring regex matchers in sync.
+- **`startMcpOAuth` is the sanctioned entry point.** It validates on receipt AND relies on `openUrl`'s own allow-list as belt-and-braces defense. A future refactor that drops the explicit `assertHttpUrl` call MUST NOT re-open the vulnerability — the `openUrl` scheme check must stay in place as the second gate. Reviewers of a `startMcpOAuth` refactor must verify both gates still fire.
+- **SAP AI Core is not affected.** SAP AI Core authenticates via the `AICORE_SERVICE_KEY` client-credentials flow and never issues an interactive OAuth redirect. This surface is only exercised by third-party OAuth-protected MCP servers. Do NOT reroute SAP AI Core auth through this helper on the assumption that "all auth needs URL validation" — the client-credentials flow has no browser-launch step.
+
+### Testing new rejections
+
+When adding a new rejected scheme (e.g. a newly disclosed CVE in a protocol handler):
+
+1. Add the scheme to the dangerous-scheme loop in `src/mcp/__tests__/oauth-callback.test.ts` (the parametrised `for (const bad of [...])` block).
+2. Update the module docblock in `src/mcp/oauth-callback.ts` to name the CVE / disclosure. The docblock is the historical record of why each scheme is on the list.
+3. If the new scheme would also pass `URL.canParse` and surface a non-`http:` / non-`https:` protocol, the existing `url.protocol !== 'http:' && url.protocol !== 'https:'` check catches it — no code change needed. If the scheme is pre-normalised by Node into a scheme the check already covers (e.g. UNC into `file:`), add a dedicated pre-parse guard like the current `\\` / `//` block.
+4. Do NOT add a per-scheme error message. The `must use http or https` wording is the operator-facing contract and should be shared across every rejected scheme.
+
+See [docs/TESTING.md — Testing MCP OAuth authorization-URL scheme allow-list](TESTING.md#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts) for the six-case regression surface.
+
+## Scoped probe fetch (`src/mcp/sse-probe.ts` — `ScopedProbeFetch`)
+
+Introduced in the 2026-10-25 upstream sync (ports kilocode `432462088` / `70354f039`). Scopes SSE-probe fetch interception to the probe's own request URL plus any recorded redirect hops, so a probe no longer intercepts unrelated SAP AI Core traffic or other MCP tool calls.
+
+### Port-maintenance invariants
+
+- **Pure in-memory bookkeeping.** The class is a thin wrapper around `Set<string>`. It performs no I/O and does not call `fetch` itself — the actual interception wiring is a separate call site that consults `owns(requestUrl)` from inside a `fetch` wrapper. Do NOT fold the fetch wrapper into this class; keeping the scope-tracking pure means the class can be unit-tested without any network ceremony.
+- **URL normalisation strips fragments and lower-cases the scheme.** The private `normalizeUrl` helper is the single normalisation point. `URL` already lower-cases scheme and host, but the explicit `u.protocol = u.protocol.toLowerCase()` defends against pre-formatted strings from `Location:` headers that bypass the `URL` constructor. Keep both normalisations.
+- **`URL.canParse` fallback preserves the raw string.** When `URL.canParse(input) === false`, `normalizeUrl` returns the raw input so a non-URL string still has a stable key in the owned-URL set. Do NOT throw on unparseable input — the probe may encounter malformed redirect `Location:` headers in the wild and must stay running.
+- **`recordRedirect` is additive.** Callers invoke it once per observed redirect hop. The class does not de-duplicate across probes — each `ScopedProbeFetch` instance owns its own `visited` Set. Do not introduce a cross-probe LRU or shared cache; the per-probe isolation is the regression guard against the "leaked fetch interception" bug the upstream commit names.
+- **`snapshot()` is the test-only inspection surface.** Reach for `snapshot()` in tests to assert the recorded URL set. Do NOT expose the private `visited` field directly or add setter methods beyond `recordRedirect` — the current surface is deliberately minimal.
+- **Case-matching is by normalised string equality.** `owns` compares normalised strings via `Set.has`. Do NOT introduce fuzzy matching (prefix match, path-stripped match) — the whole point of scoping is to reject lookalike URLs that are not actually part of this probe's traffic.
+
+See [docs/TESTING.md — Testing the scoped SSE probe fetch](TESTING.md#testing-the-scoped-sse-probe-fetch-testsmcpsse-probetestts) for the eleven-case regression surface.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
