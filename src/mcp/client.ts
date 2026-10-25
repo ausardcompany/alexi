@@ -1527,12 +1527,26 @@ export class McpClientManager {
   }
 
   /**
-   * Disconnect from all servers
+   * Disconnect from all servers in parallel.
+   *
+   * Uses {@link Promise.allSettled} so one slow or throwing server's
+   * `close()` does not block the cleanup of the remaining servers.
+   * Rejections are logged but never re-thrown — shutdown is a
+   * best-effort cleanup path and must always complete, even if a
+   * misbehaving transport throws partway through.
+   *
+   * Snapshotting the names up-front is important: `disconnect` mutates
+   * `this.connections`, so iterating the live `keys()` while removing
+   * entries in parallel would skip servers non-deterministically.
    */
   async disconnectAll(): Promise<void> {
-    for (const name of this.connections.keys()) {
-      await this.disconnect(name);
-    }
+    const names = Array.from(this.connections.keys());
+    const results = await Promise.allSettled(names.map((name) => this.disconnect(name)));
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        logger.warn(`MCP server ${names[i]} disconnect failed: ${formatError(result.reason)}`);
+      }
+    });
   }
 
   /**
