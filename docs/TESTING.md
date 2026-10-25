@@ -39,6 +39,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)](#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts)
 - [Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)](#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts)
 - [Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)](#testing-the-scoped-sse-probe-fetch-testsmcpsse-probetestts)
+- [Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)](#testing-the-mcp-output-schema-normaliser-srcmcp__tests__normalizeoutputschematestts)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -1371,6 +1372,28 @@ describe('Write Tool', () => {
   });
 });
 ```
+
+### Alternative: direct `executeUnsafe` without a module mock
+
+Not every tool test needs the `vi.mock('../../../src/tool/index.js', ...)` shim shown above. When the suite imports a single `*Tool` export and only asserts on filesystem side effects, calling `tool.executeUnsafe(params, ctx)` directly is both shorter and avoids a module-level stub that other suites in the same file would inherit. `src/tool/tools/__tests__/edit.mixed-eol.test.ts` and `src/tool/tools/__tests__/edit.agentsmd.test.ts` follow this shape:
+
+```typescript
+async function runEdit(
+  ctx: MinimalContext,
+  params: { filePath: string; oldString: string; newString: string; replaceAll?: boolean }
+) {
+  // Use executeUnsafe so the test does not depend on the default `ask`
+  // permission rule for `write` (which has no interactive listener in a
+  // test run and would otherwise time out and reject every call).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (editTool as any).executeUnsafe(params, ctx);
+  return result;
+}
+```
+
+The cast to `as any` is required because `executeUnsafe` is not on the public `ToolDefinition` surface — it is added by `defineTool` at registration time. The cast is local to the test helper and does not leak into production typings.
+
+Regression history to be aware of: calling `editTool.execute(...)` from a non-interactive test suite will time out on the default `ask` rule for `write` and silently resolve every edit to a user rejection — the assertions then compare the file's original contents against the expected post-edit contents and fail. This is the exact mode `edit.mixed-eol.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)). When adding a new edit / write / delete test, pick either the `vi.mock('../../../src/tool/index.js', ...)` shim OR the direct `executeUnsafe` call — never the raw `.execute()` path.
 
 ### Tool Test Coverage
 
@@ -11519,6 +11542,10 @@ Regression contract — four fixture cells all produced in-memory via `xlsx.util
 | Date-only (ISO midnight)  | `YYYY-MM-DD`           | Unchanged behaviour for backwards compat  |
 | Elapsed `[h]:mm`          | sheet-formatted `value.w` | Elapsed-time regex `/\[(h+|m+|s+)\]/i`   |
 
+#### Fixture note: elapsed-time durations are 1899-12-30 + N hours, not out-of-range ISO strings
+
+SheetJS stores an elapsed duration (e.g. `25:30`) as `1899-12-30T00:00:00Z` plus `N` hours — a `25:30` elapsed value therefore materialises as `1899-12-31T01:30:00.000Z`. Do NOT construct the fixture as `new Date('1899-12-30T25:30:00.000Z')`: hour `25` is not a legal ISO time-of-day, so JavaScript's `Date` constructor silently returns `Invalid Date` and the implementation's downstream `.toISOString()` call throws `RangeError: Invalid time value` before the assertion runs. This is the exact failure mode `read-office.xlsx-cell.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)); the fix is to compute the fixture against the real SheetJS epoch (1899-12-30 + hours) rather than to encode `h > 23` in the ISO literal itself.
+
 ### Running
 
 ```bash
@@ -13698,3 +13725,70 @@ function recorder(): { events: SignInEvent[]; emit: (e: SignInEvent) => void } {
 - **Test ownership through `owns`, not by inspecting the private Set.** `snapshot()` is exposed for test assertions and is the sanctioned way to inspect state. The private `visited` field is implementation detail.
 - **Do not install a global `fetch` wrapper in this suite.** `ScopedProbeFetch` is a pure in-memory bookkeeping helper — the actual fetch-interception wiring lives in follow-up code paths. Mocking `globalThis.fetch` here would conflate the two layers and leak the mock across parallel test files.
 - **Keep the `URL.canParse` fallback test honest.** The private `normalizeUrl` falls back to the raw string when `URL.canParse(input)` returns `false`. A regression that silently coerces unparseable strings would evade scope checks. The suite's "owns a non-URL string" scenario relies on this fallback staying deterministic.
+
+### Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)
+
+Added in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). A 57-line pure-function test suite that pins the six shape contracts enforced by `normalizeOutputSchema` (`src/mcp/client.ts:717-734`), the normaliser that lets MCP servers advertise tools whose `outputSchema` is not a root object. Co-located with the module under `src/mcp/__tests__/` so it ships alongside the implementation and runs under the same `vitest` sweep as the rest of the MCP suite.
+
+### Why normalise at all
+
+MCP servers in the wild emit a mix of `outputSchema` shapes: root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: 'string'`, `type: 'number'`), or no schema at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object — a `{ type: 'array', items: ... }` schema would be filtered out at registration time with no actionable error. The normaliser wraps non-object roots into a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape; the suite audits that six distinct input shapes produce the right six outputs.
+
+### Minimum coverage (the six-case shape audit)
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { normalizeOutputSchema } from '../client.js';
+
+describe('normalizeOutputSchema', () => {
+  it('returns undefined for non-object input', () => {
+    expect(normalizeOutputSchema(undefined)).toBeUndefined();
+    expect(normalizeOutputSchema(null)).toBeUndefined();
+    expect(normalizeOutputSchema('string')).toBeUndefined();
+    expect(normalizeOutputSchema(42)).toBeUndefined();
+  });
+
+  it('passes root object schemas through unchanged', () => {
+    const schema = { type: 'object', properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('passes schemas with properties through even without explicit type', () => {
+    const schema = { properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('wraps array schemas under properties.result', () => {
+    const schema = { type: 'array', items: { type: 'string' } };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+
+  it('wraps primitive schemas under properties.result', () => {
+    expect(normalizeOutputSchema({ type: 'string' })).toEqual({
+      type: 'object',
+      properties: { result: { type: 'string' } },
+      required: ['result'],
+    });
+  });
+
+  it('wraps union (anyOf) schemas under properties.result', () => {
+    const schema = { anyOf: [{ type: 'string' }, { type: 'number' }] };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+});
+```
+
+### Pitfalls
+
+- **Do NOT drop the "passes-with-properties-only" case.** The `{ properties: {...} }` without explicit `type: 'object'` branch is a real-world shape — some MCP servers omit `type` when `properties` is present, assuming the JSON Schema default. The normaliser treats that branch as a root object and returns the schema verbatim; a regression that normalised it would wrap a perfectly valid root schema under `properties.result` and break downstream tooling.
+- **Do NOT replace the primitive case with a parametrised loop over every primitive.** A single `{ type: 'string' }` case is enough to pin the wrap path; iterating over `['string', 'number', 'boolean', 'integer']` just inflates the suite without exercising a different code path (the normaliser's dispatch does not care about the primitive's own `type` string).
+- **`undefined` vs `null` vs primitive are the same branch.** The suite covers all four values in a single `it` block because the module's guard `if (!schema || typeof schema !== 'object')` collapses them. Splitting them into four `it` blocks is noise.
+- **Assert `.toEqual(...)` not `.toMatchObject(...)` for the wrap cases.** `toMatchObject` would silently accept extra keys on the output; `toEqual` pins the exact `{ type, properties, required }` triple so a future addition (e.g. `description` or `title`) surfaces as a test failure that forces the author to decide whether the addition is intentional.

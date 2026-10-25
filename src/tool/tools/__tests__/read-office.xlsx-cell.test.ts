@@ -41,7 +41,11 @@ describe('formatXlsxCell', () => {
   });
 
   it('reads elapsed [h]:mm formats as the cell shows (duration)', () => {
-    const v = new Date('1899-12-30T25:30:00.000Z');
+    // SheetJS stores a duration as the 1899-12-30 epoch + N hours; a 25:30
+    // elapsed value therefore materialises as 1899-12-31T01:30:00.000Z, not
+    // the invalid '1899-12-30T25:30:00.000Z' literal (which `new Date` would
+    // flatten to NaN and send `.toISOString()` through RangeError).
+    const v = new Date('1899-12-31T01:30:00.000Z');
     // Elapsed-hour format must be treated as time, not date-only.
     expect(formatXlsxCell({ t: 'd', v, z: '[h]:mm', w: '25:30' })).toBe('25:30');
   });
