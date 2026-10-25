@@ -22,8 +22,10 @@ import {
   type ToolContext,
   type ToolResult,
 } from '../tool/index.js';
+import { checkToolActivation } from '../tool/registry.js';
 import { registerBuiltInTools } from '../tool/tools/index.js';
 import { getPermissionManager } from '../permission/index.js';
+import { ensurePluginsActivated } from '../plugin/index.js';
 import type { CompletionResult, TokenUsage } from '../providers/sapOrchestration.js';
 import type { AutoCommitManager } from '../git/autoCommit.js';
 import type { RepoMapManager } from '../context/repoMap.js';
@@ -251,6 +253,26 @@ async function executeToolCall(
     return { id: toolCall.id, result };
   }
 
+  // Alexi_change (opencode PR #51133): verify the tool's owning plugin
+  // (if any) has finished activating BEFORE dispatching. Returns a
+  // human-readable error string naming the still-activating plugin
+  // when the gate fails — the model then sees a clear root cause
+  // instead of a generic "command not found" race.
+  const activationError = await checkToolActivation(toolCall.function.name);
+  if (activationError) {
+    const result: ToolResult = {
+      success: false,
+      error: activationError,
+    };
+    onProgress?.({
+      type: 'tool_end',
+      toolName: toolCall.function.name,
+      toolId: toolCall.id,
+      result,
+    });
+    return { id: toolCall.id, result };
+  }
+
   try {
     // Parse arguments
     // Alexi_change (opencode c9e1ed70, 2026-10): reject malformed tool
@@ -377,6 +399,14 @@ export async function agenticChat(
 ): Promise<AgenticChatResult> {
   // Register built-in tools if not already registered
   registerBuiltInTools();
+
+  // Wait for every enabled plugin to finish its `onLoad` lifecycle hook
+  // before dispatching any tool. Prevents the "command not found"
+  // heisenbug where a plugin-provided tool (MCP command, hook-registered
+  // script, ...) is invoked before its owning plugin's async `onLoad`
+  // settles — see upstream opencode PR #51133.
+  logger.debug('agenticChat: waiting for plugin activation');
+  await ensurePluginsActivated();
 
   const effortConfig = getEffortConfig(options?.effort ?? DEFAULT_EFFORT);
   const maxIterations = options?.maxIterations ?? effortConfig.maxIterations;

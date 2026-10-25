@@ -13936,6 +13936,53 @@ afterEach(() => {
 - **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
 - **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
 
+## Testing the plugin activation gate (`tests/plugin/activation-race.test.ts`)
+
+Added by commit `14b15b42 fix(core): add plugin activation gate before tool dispatch` (ports upstream opencode PR #51133). The 194-line regression suite exercises `PluginManager.ensureActivated()`, `PluginManager.isActivated()`, and `PluginManager.findPluginForTool()` so the "command not found" heisenbug (a plugin-provided tool dispatched before its `onLoad` lifecycle hook settles) cannot silently return. The suite lives under `tests/plugin/` rather than colocated under `src/plugin/` because it drives the public `PluginManager` surface — the gate's correctness is defined at the boundary, not at any single helper.
+
+### Fixture pattern
+
+The tests build plugins directly, no filesystem scaffolding, no `plugin.json` round-trip. A tiny `slowPlugin(name, delayMs)` helper returns `{ plugin, finished }` where `plugin.onLoad` sleeps for `delayMs` and flips a captured `done` boolean so the test can assert the gate waited for the hook to actually finish:
+
+```typescript
+function slowPlugin(name: string, delayMs: number): { plugin: Plugin; finished: () => boolean } {
+  let done = false;
+  const plugin: Plugin = {
+    name,
+    version: '1.0.0',
+    async onLoad(): Promise<void> {
+      await sleep(delayMs);
+      done = true;
+    },
+  };
+  return { plugin, finished: () => done };
+}
+```
+
+A fresh `new PluginManager('/tmp/alexi-activation-test')` is spun up in `beforeEach`. No teardown is needed because the manager is a local reference — nothing is persisted and no process-wide singleton is touched.
+
+### Minimum coverage
+
+The suite pins seven invariants. Each one maps to a line in the fix diff; a refactor that drops any one of these must flip a red test.
+
+1. **`resolves immediately when no plugins are activating`.** `await manager.ensureActivated()` under 50 ms AND `manager.isActivated() === true`. Pins the fast path for the common post-startup case so the gate stays zero-cost on every subsequent agent turn.
+2. **`awaits a slow onLoad before returning (heisenbug repro)`.** Start `manager.load(slowPlugin(..., 100))` without `await`, flush the microtask queue with `await sleep(0)`, then assert `manager.isActivated() === false` BEFORE `ensureActivated` and `finished() === true` AFTER. This is the literal reproduction of the race the fix closes — if `ensureActivated` returned early, `finished()` would still be `false`.
+3. **`reports the owning plugin while activation is in flight`.** A plugin declaring `tools: [{ name: 'owned_tool', ... }]` under a slow `onLoad` must surface via `manager.findPluginForTool('owned_tool')` as `{ pluginName: 'owner-plugin', activating: true }` DURING the hook and `{ activating: false }` after `load` resolves. Pins the ownership resolution path through `state.plugin.tools?.some(...)` — the branch that handles the "advertised but not yet registered" case.
+4. **`collapses concurrent ensureActivated() calls onto one activation`.** Three parallel `manager.ensureActivated()` calls against a single 60 ms activation finish in under 150 ms. If each call awaited its own copy of `onLoad`, the elapsed time would stack to 180 ms. Pins the `state.activationPromise` sharing contract.
+5. **`ignores disabled plugins so they cannot stall the gate`.** Load a slow plugin (200 ms `onLoad`), `manager.disable('slow', { force: true })` before the gate check, and assert `ensureActivated` completes in under 100 ms. Disabled plugins are not advertised to the model, so their activation state MUST NOT block tool dispatch. Pins the `if (!state.enabled) continue` branch in `ensureActivated`.
+6. **`resolves cleanly when the plugin has no onLoad hook`.** A plugin without `onLoad` loads instantly; `ensureActivated` returns in under 20 ms and `isActivated` is `true`. Pins the branch that never creates an `activationPromise`.
+7. **`does not get stuck when onLoad throws`.** A plugin whose `onLoad` throws after 20 ms must settle the gate — `manager.load(plugin)` returns `{ success: false, ... }` AND the subsequent `ensureActivated` returns in under 50 ms AND `isActivated === true`. Pins the `finally` block that clears `activating` regardless of outcome: a thrown `onLoad` must not leave the plugin in a perpetually-activating state. The final assertion also covers `findPluginForTool('does_not_exist') === undefined` (unknown tool fast path).
+
+### Pitfalls
+
+- **Do NOT `await manager.load(plugin)` before asserting the race window.** The whole point of the heisenbug is that the agent loop fires a tool call BEFORE `load()` has resolved. Start the load as `const loadPromise = manager.load(plugin); await sleep(0);` and only `await loadPromise` at the end of the test. The `await sleep(0)` is critical — without it, the microtask queue has not run yet and `state.activating` has not been flipped from `false` to `true`.
+- **Do NOT reach into `(manager as any).plugins` to assert activation state.** The suite deliberately exercises only the public `ensureActivated` / `isActivated` / `findPluginForTool` surface. A test that peeks at private state will not catch a public-API refactor that removes `findPluginForTool`'s branch for `state.plugin.tools?.some(...)`.
+- **Keep delays small but non-zero.** Values in the 20–200 ms range are large enough that the gate observably waits, but small enough that the full suite runs under one second even on slow CI. The sub-50 ms "fast path" assertions have enough slack to tolerate CI jitter without ever reaching the full `onLoad` delay.
+- **`Promise.allSettled`, not `Promise.all`.** The "does not get stuck when onLoad throws" test depends on `ensureActivated` using `allSettled` internally — a refactor that switches to `all` would make this test flip from "settles in under 50 ms" to "rejects with the plugin's error". If `all` is ever intentionally re-introduced, the test's expectation must be updated to `expect(ensureActivated()).rejects.toThrow('boom')`, which is a strictly weaker contract.
+- **The suite is independent of the registry.** It drives `PluginManager` directly and does NOT touch `src/tool/registry.ts` or `src/core/agenticChat.ts`. The per-dispatch `checkToolActivation` guard and the top-of-loop `ensurePluginsActivated` call site are integration surfaces — they are covered elsewhere via the agent-loop tests. Keep the activation-race suite scoped to the plugin manager so it stays fast and does not depend on the agent harness.
+
+See [docs/ARCHITECTURE.md — Plugin Activation Gate (`src/plugin/index.ts`, `src/tool/registry.ts`)](ARCHITECTURE.md#plugin-activation-gate-srcpluginindexts-srctoolregistryts) for the architectural rationale and [docs/CONTRIBUTING.md — Plugin activation gate contract (`PluginManager.ensureActivated` / `checkToolActivation`)](CONTRIBUTING.md#plugin-activation-gate-contract-pluginmanagerensureactivated--checktoolactivation) for the invariants a reviewer must preserve when touching this code.
+
 ### Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)
 
 `src/mcp/__tests__/auth-telemetry.test.ts` (101 lines, 7 cases) pins the three invariants of `McpAuthTelemetry` (`src/mcp/auth-telemetry.ts`). The suite is pure — no `vi.mock`, no temp directory, no I/O. It uses a tiny in-memory recorder and an injectable clock so `durationMs` assertions are deterministic.
