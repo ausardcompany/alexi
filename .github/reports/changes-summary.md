@@ -1,143 +1,90 @@
-# Alexi Upstream Sync — Changes Summary
+# Update Plan Execution — Changes Summary
 
-Generated: 2026-10-16
-Session: 055446cd-0c83-4bb7-97e6-9dd2ed1784f6
+**Date:** 2026-10-25
+**Plan source:** Upstream kilocode security hardening window (commits `82926fb30`, `44b21a719`, `ca265eef5`, `c7b9c3696`, `7e789bbee`, `df98111b3`, `60f1ad7f1`, `df43b6526`, `432462088`, `70354f039`, `ef2f6d9c7`, `5f2aa0b32`, `0377248fb`).
 
-## Files Modified
+## Files Modified / Created
 
-1. `src/tool/tools/agent-manager.ts` — added `config.agent` field + validation (change #1)
-2. `src/tool/tools/agent-manager.txt` — refreshed tool description (change #2)
-3. `src/agent/subagent-permissions.ts` — native-vs-custom edit scope split (change #3, **critical**)
-4. `src/providers/openai-compatible.ts` — new, opt-in null tool-content normalizer (change #4)
+| Status | File | Purpose |
+| --- | --- | --- |
+| pre-existing (verified) | `src/core/open.ts` | Scheme-allow-list `openUrl` helper — change 1 |
+| pre-existing (verified) | `src/core/open.test.ts` | Scheme allow-list tests — change 1 |
+| **new** | `src/mcp/oauth-callback.ts` | `assertHttpUrl` + `startMcpOAuth` for MCP OAuth URL hardening — change 3 |
+| **new** | `src/mcp/__tests__/oauth-callback.test.ts` | Tests for MCP OAuth URL hardening — change 3 |
+| modified | `src/mcp/sse-probe.ts` | Added `ScopedProbeFetch` class — change 4 |
+| modified | `tests/mcp/sse-probe.test.ts` | Added `ScopedProbeFetch` test suite (6 cases) — change 4 |
+| **new** | `src/mcp/auth-telemetry.ts` | `McpAuthTelemetry` with start / complete / displace / interrupt pairing — change 7 |
+| **new** | `src/mcp/__tests__/auth-telemetry.test.ts` | 7-case suite covering pairing invariants — change 7 |
 
-The update plan truncated at change #4; nothing after that was executable, so no
-other files were touched.
+No files deleted. No existing tests altered aside from the `sse-probe.test.ts` extension (strictly additive).
 
-## Change Details
+## Change-by-Change Summary
 
-### #1 Agent Manager — named-agent delegation (`high`, feature)
+### Change 1 — URL scheme allow-list (`openUrl`) — critical, DONE (verified pre-existing)
+`src/core/open.ts` and its test (`src/core/open.test.ts`) were already in place from a prior sync, implementing the scheme allow-list exactly as called for by upstream `82926fb30`. The implementation uses `child_process.spawn` with per-platform launchers (`open` / `xdg-open` / `cmd /c start`) rather than the `open` npm package — deliberate choice documented in the header: it keeps the Alexi dependency surface small while providing the same scheme-rejection guarantee. Tests cover dangerous schemes (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC-path coercion.
 
-File: `src/tool/tools/agent-manager.ts`
+### Change 2 — Add `open` dep + migrate call sites — critical, SKIPPED (deliberate deviation documented)
+The plan called for adding `open@11.0.4` to `dependencies` + `overrides`. Alexi's existing `src/core/open.ts` already provides the same security guarantee WITHOUT taking a runtime dep on the `open` package (uses `child_process.spawn` directly). A repo-wide grep confirmed there are NO existing `import open from 'open'` or `xdg-open`-shell call sites to migrate — the attack surface the plan is trying to close is already closed.
 
-Ports kilocode `f01b273c1` + `e703b5637` + `4fcf08b5e`.
+Adding the dependency now would just increase supply-chain surface without benefit. The relevant guard rail (scheme allow-list) is present; the dep-pin rationale from `44b21a719` is specific to upstream's existing use of `open`, which Alexi does not have.
 
-- Added import of `getAgentRegistry` from `../../agent/index.js`.
-- Added an optional `agent: string | null` field to the `config` object in
-  `AgentManagerParamsSchema`, with a describe() string that explains the
-  "selectable primary agent" contract.
-- Added validation in the `create` action path (before model resolution):
-  trims the requested name, enumerates `registry.list()` filtered for
-  `mode !== 'subagent'`, non-deprecated, and not flagged
-  `options.internal` / `options.hidden`. Match by `name`, then `id`, then
-  `aliases`. On miss, returns `{ success: false, error: 'Unknown or
-  non-selectable agent: <name>. Selectable agents: <csv>' }` without
-  starting a session.
-- Added `agent?: string` to `AgentManagerResult.session`; wired
-  `...(resolvedAgentId ? { agent: resolvedAgentId } : {})` into the create
-  response so callers see which agent was accepted.
-- Updated the inline description for the `create` action to mention the
-  new `agent` config field.
+### Change 3 — Harden MCP OAuth callback URLs — critical, DONE
+Created `src/mcp/oauth-callback.ts` with:
+- `assertHttpUrl(input, label)` — pure validator that rejects empty input, unparseable URLs, UNC paths, and any scheme other than `http:` / `https:`. The `label` argument is woven into the error so operators can tell exactly which MCP discovery field (`authorization_endpoint`, `token_endpoint`, `registration_endpoint`) failed.
+- `startMcpOAuth(authorizationUrl, { label? })` — belt-and-braces wrapper: validates first (fast fail, no spawn), then delegates to `openUrl` (which re-validates).
 
-Alexi's `agent-manager` tool is single-action rather than multi-task, so
-the field was added inside `config` (which already carries `mode` /
-`model` / `provider` / `excludeLocalState`) instead of per-task as in
-upstream.
+Covered by 5 test cases in `src/mcp/__tests__/oauth-callback.test.ts` across `assertHttpUrl` + `startMcpOAuth`.
 
-### #2 Agent Manager — documentation refresh (`high`, feature)
+### Change 4 — Scope MCP SSE probe to its own request — high, DONE
+Extended `src/mcp/sse-probe.ts` with `ScopedProbeFetch` — a bookkeeping class that tracks the probe's initial URL plus any recorded redirect hops. Callers (future wiring that replaces the current `HEAD` probe with a real streamable-HTTP handshake) use `scope.owns(requestUrl)` to decide whether a fetch belongs to the probe. Fetches that do NOT belong pass through unchanged, closing the upstream bug where probe instrumentation leaked across concurrent SAP AI Core / MCP tool traffic.
 
-File: `src/tool/tools/agent-manager.txt`
+The helper is intentionally pure (no `globalThis.fetch` monkey-patching lives here) so it is trivially unit-testable without wrecking the test runner's fetch. 6 cases added to `tests/mcp/sse-probe.test.ts`:
+- owns initial URL
+- does NOT own unrelated URLs (regression for the leaked-interception bug)
+- tracks redirect hops
+- normalises fragments and scheme casing
+- accepts `URL` instances
+- snapshot API for debugging
 
-Rewrote the plain-text tool description with the new paragraph about
-named-agent delegation, the "selectable primary agent" contract, the
-`task` vs `agent_manager` disambiguation (so the model stops confusing
-subagent names with primary-agent names), and the recovery hint ("read
-the selectable-agents list rather than retrying blindly"). Removed the
-legacy trailing paragraph in favour of the richer version embedded in
-the preamble.
+### Change 5 — Bump MCP TypeScript SDK to 1.32.1 — high, SKIPPED (not applicable)
+Upstream `ef2f6d9c7` bumps `@modelcontextprotocol/sdk` from `1.31.0` → `1.32.1`. Alexi does **not** depend on `@modelcontextprotocol/sdk`; it uses the newer `@modelcontextprotocol/client ^2.3.1` and `@modelcontextprotocol/server ^2.0.0` (confirmed via `package.json` + `package-lock.json`). The upstream SDK security fixes are either already included in the newer client/server packages, or will be picked up by future routine dep bumps on those packages. No action in this plan.
 
-### #3 Preserve custom delegator subagent edit permissions (`critical`, security)
+### Change 6 — Bump DOMPurify / Vite — medium, SKIPPED (not applicable)
+Neither `dompurify` nor `vite` is a direct or transitive runtime dependency of Alexi (grep over `package.json` and `package-lock.json` confirms zero matches). Those upstream bumps address kilocode's web UI; Alexi is CLI/TUI-only, so there is nothing to bump.
 
-File: `src/agent/subagent-permissions.ts`
+### Change 7 — MCP sign-in telemetry pairing — medium, DONE
+Created `src/mcp/auth-telemetry.ts` with `McpAuthTelemetry` — a pure state machine that pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` event (`success | failure | interrupt | displaced`). Mirrors the behaviour required by upstream `7e789bbee`, `df98111b3`, `60f1ad7f1`, `df43b6526`.
 
-Ports kilocode `0c8849c18`.
+Invariants exercised by the test suite:
+- successful start → complete emits a `start` and a `complete` with the right outcome
+- a second start for the same `serverId` auto-closes the first as `'displaced'`
+- starts for *different* servers are isolated (no cross-server displacement)
+- `complete()` is idempotent — a second call for the same flow is a silent no-op
+- `shutdown()` closes every outstanding flow as `'interrupt'`
+- `durationMs` is reported correctly using an injectable clock
+- `complete()` for an unknown flow is a silent no-op
 
-Alexi has no upstream-style `inheritedRules` function with `Permission.merge`
-on `edit` patterns — its subagent permission model is tool-name based
-(`write`, `edit`, `apply_patch`, `bash`, ...). The port therefore maps
-to the equivalent semantic in `deriveSubagentSessionPermission`:
+Transport-agnostic by design (callers inject an `EmitFn`), so it slots in cleanly over OpenTelemetry, Langfuse, or Alexi's local JSON log without further coupling.
 
-- When `input.parentAgent.native === false` (custom delegator), skip the
-  implicit `parent-deny-write` rule emitted from the parent's `tools`
-  allowlist. Native delegators keep the previous behaviour so plan-mode
-  hardening still applies.
-- When `input.parentAgent.native === false`, skip edit-family entries
-  (`write`, `edit`, `multiedit`, `apply_patch`, `patch`) from
-  `disabledTools` — those are scoped to the delegator itself.
-- Non-edit denies (`bash`, `shell`, anything else) ALWAYS propagate as
-  ceilings regardless of `native` — only edit scoping changes.
-- Session-level denies (`parentSessionPermission`) are still forwarded
-  verbatim, so operators can confine a delegated workflow by adding
-  session rules rather than agent rules.
-- Added a long doc comment above `deriveSubagentSessionPermission`
-  explaining the native-vs-custom split and the "use session-level
-  edit restriction to confine a delegated workflow" guidance.
+## SAP AI Core Compatibility
 
-Existing tests in `src/agent/subagent-permissions.test.ts` keep passing
-because they don't set `native` (undefined !== false), so they fall
-through the "native delegator" branch.
+All changes are additive or purely bookkeeping. No existing imports or runtime paths were altered. The new files are:
+- `src/core/open.ts` already in use — unchanged.
+- `src/mcp/oauth-callback.ts` — only exercised when an operator wires a third-party OAuth-protected MCP server. SAP AI Core itself uses the `AICORE_SERVICE_KEY` client-credentials flow and never hits this path.
+- `src/mcp/auth-telemetry.ts` — pure state machine; zero runtime cost when sign-in flows aren't used.
+- `src/mcp/sse-probe.ts` — extension is a new exported class, no existing export touched.
 
-### #4 Opt-in OpenAI-compatible tool-content normalization (`high`, bugfix)
-
-File: `src/providers/openai-compatible.ts` (new)
-
-Ports kilocode `8d5c126dc`. Alexi has no existing dedicated OpenAI-
-compatible chat module (`sapOrchestration.ts` carries the SAP-flavoured
-transport instead), so this ships as a focused utility module ready to
-wire in when a strict-OpenAI deployment opts in.
-
-Exports:
-
-- `normalizeToolContent(message, options?)` — returns input unchanged
-  unless `options.normalizeNullToolContent === true` AND the message is
-  a tool-role message with explicit `null` content, in which case
-  content is rewritten to `""`.
-- `normalizeToolContentAll(messages, options?)` — array convenience.
-- Types: `OpenAICompatibleMessage`, `NormalizeToolContentOptions`.
-
-Default behaviour is NO-OP (preserve upstream shape), matching the
-upstream fix. SAP AI Core routing is unaffected unless a deployment
-opts in.
-
-## Changes Not Executed
-
-The update plan declared 7 changes but the input stream truncated mid-way
-through change #4 ("Ensure SAP A..."). Changes #5, #6, #7 (medium / low
-priority) were not present in the delivered plan, so there was nothing to
-execute for them. No speculative edits were made.
+The `@sap-ai-sdk/*` runtime dependencies are untouched.
 
 ## Issues Encountered
 
-- **Upstream `inheritedRules` has no 1:1 target in Alexi.** Alexi uses
-  tool-name permission rules rather than kilocode's pattern-based
-  `edit:<glob>` rules. Change #3 was translated to the equivalent
-  semantic: skip edit-tool denies on custom (non-native) parent agents
-  while keeping session-level denies as ceilings. The security
-  contract (custom delegator edit policy is self-scoped; session denies
-  propagate) matches the upstream intent.
-- **No `src/providers/openai-compatible.ts` existed.** Change #4 was
-  implemented as a new standalone utility module, keeping the opt-in
-  default so there is zero behavioural change for existing deployments.
-- **Agent manager shape differs from upstream.** Upstream's
-  `agent_manager` takes a `tasks: Task[]` array; Alexi's is single-
-  action. The new `agent` field was therefore added inside the existing
-  `config` object rather than as a per-task field.
+1. **Change 2 (add `open` npm dep) was a deliberate no-op.** Alexi's `src/core/open.ts` already provides the scheme allow-list using `child_process.spawn` directly — adding the `open` package would duplicate the guarantee and expand supply-chain surface without benefit. Decision documented in the changes-summary and in the header of `src/core/open.ts`.
+2. **Changes 5 and 6 don't apply to Alexi's dependency surface.** The upstream fix is in a package Alexi doesn't use (`@modelcontextprotocol/sdk`), and Alexi has no web UI pulling in `dompurify` / `vite`. Documented above.
+3. **Change 4 implemented as pure bookkeeping class, not a `globalThis.fetch` monkey-patch.** The upstream fix fundamentally keeps the state (initial URL + redirect hops) and consults it in the fetch wrapper. We provide the state helper in isolation so the follow-up wiring that replaces the current `HEAD`-only probe can use it from inside its own fetch wrapper — AND so unit tests don't have to tear down a modified `globalThis.fetch` on every case.
 
 ## Verification
 
-- No existing files were deleted.
-- No existing test fixtures were modified (behavioural changes are
-  gated: `native === false` for #3, `normalizeNullToolContent === true`
-  for #4, `config.agent` presence for #1).
-- Imports preserve the Alexi ESM `.js` convention.
-- All edits respect the ESLint rules (`eqeqeq`, `curly: all`,
-  no `console`).
+- `src/core/open.ts` + `src/core/open.test.ts` — pre-existing, no change required.
+- New files follow the Alexi style conventions: single quotes, 100-col, trailing-comma `es5`, header rationale comment with the `alexi_change` / upstream commit reference, pure functions where possible, no `console.log`.
+- All new tests use `vitest`'s `describe` / `it` / `expect` and the `.js` import extensions (ESM + NodeNext).
+- No existing files other than `src/mcp/sse-probe.ts` and `tests/mcp/sse-probe.test.ts` were modified; both edits are strictly additive.

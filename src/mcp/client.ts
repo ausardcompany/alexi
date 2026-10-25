@@ -694,9 +694,62 @@ export function formatContentPart(part: unknown): string {
   }
 }
 
+/**
+ * Normalize an MCP tool's `outputSchema` field.
+ *
+ * MCP servers in the wild emit a mix of output schema shapes:
+ *   - a root `object` schema with `properties`
+ *   - a union / `anyOf` schema
+ *   - an `array` schema
+ *   - a primitive (`type: "string"`, `type: "number"`, ...)
+ *   - or no `outputSchema` at all
+ *
+ * Downstream code that only inspects `.properties` would previously
+ * silently drop tools whose output schema was anything other than a root
+ * object. Wrapping non-object roots in `{ type: 'object', properties:
+ * { result: <original> }, required: ['result'] }` preserves the shape
+ * contract so a server that returns a bare array / primitive still
+ * advertises its tool to the model. Mirrors opencode `c41c3a0`.
+ *
+ * Returns `undefined` when the input is not a usable JSON schema node,
+ * so callers can safely spread the result onto a tool definition.
+ */
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined {
+  if (!schema || typeof schema !== 'object') {
+    return undefined;
+  }
+  const s = schema as { type?: unknown; properties?: unknown };
+  if (s.type === 'object' || s.properties !== undefined) {
+    return s as { type?: string; properties?: Record<string, unknown>; required?: string[] };
+  }
+  // Wrap unions / arrays / primitives so the runtime has a stable
+  // `{ properties }` shape regardless of what the server declared.
+  return {
+    type: 'object',
+    properties: { result: s as Record<string, unknown> },
+    required: ['result'],
+  };
+}
+
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * In-flight `connect()` promises keyed by server name.
+   *
+   * Prevents duplicate connect attempts when config observers fire
+   * concurrently during initial reconciliation (opencode `8ecd6ad`).
+   * Without this guard, a config-change event that lands while the
+   * startup `connectFromConfig()` is still running would spawn a second
+   * stdio child for the same server, resulting in zombie processes and
+   * confusing double-register notifications.
+   *
+   * Entry lifecycle: added when `connect()` begins, removed in its
+   * `finally` block regardless of outcome.
+   */
+  private pendingConnects: Map<string, Promise<McpConnection>> = new Map();
   /**
    * MCP protocol-breakage tracker. Counts validation violations per
    * server and surfaces a disable decision once the configured threshold
@@ -1165,6 +1218,32 @@ export class McpClientManager {
    * cause.
    */
   async connect(config: McpServerConfig, options?: McpConnectOptions): Promise<McpConnection> {
+    // Deduplicate concurrent connect requests for the same server. When
+    // the config observer and the initial reconciliation both fire a
+    // connect for `config.name`, the second caller joins the first
+    // promise instead of spawning a parallel transport. Mirrors opencode
+    // `8ecd6ad`.
+    const inFlight = this.pendingConnects.get(config.name);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const task = this.connectImpl(config, options).finally(() => {
+      this.pendingConnects.delete(config.name);
+    });
+    this.pendingConnects.set(config.name, task);
+    return task;
+  }
+
+  /**
+   * Internal implementation of {@link connect}. Separated so the public
+   * entry point can own in-flight dedup bookkeeping without re-indenting
+   * the (long) handshake body.
+   */
+  private async connectImpl(
+    config: McpServerConfig,
+    options?: McpConnectOptions
+  ): Promise<McpConnection> {
     if (this.connections.has(config.name)) {
       const existing = this.connections.get(config.name)!;
       if (existing.status === 'connected') {
@@ -1533,7 +1612,9 @@ export class McpClientManager {
    * `close()` does not block the cleanup of the remaining servers.
    * Rejections are logged but never re-thrown — shutdown is a
    * best-effort cleanup path and must always complete, even if a
-   * misbehaving transport throws partway through.
+   * misbehaving transport throws partway through. (See opencode `7b14ad4` — a
+   * sequential loop here was observed to add multi-second latency on exit
+   * when any one stdio child was slow to acknowledge SIGTERM.)
    *
    * Snapshotting the names up-front is important: `disconnect` mutates
    * `this.connections`, so iterating the live `keys()` while removing

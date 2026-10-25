@@ -598,12 +598,24 @@ flowchart TB
 When the LLM returns a context-length error, the agentic chat detects it via pattern matching and triggers reactive compaction:
 
 ```typescript
-// Error patterns detected:
+// Error patterns detected (curated — see src/core/contextOverflow.ts):
 const CONTEXT_OVERFLOW_PATTERNS = [
-  /context.length/i,
+  /context_length_exceeded/i,
+  /max_tokens_exceeded/i,
+  /too_many_tokens/i,
+  /context[\s_]window/i,
+  /context[\s_]limit/i,
+  /maximum[\s_]context([\s_]length)?/i,
+  /exceeds[\s_]the[\s_]context/i,
   /context.*exceeded/i,
   /token.*limit.*exceeded/i,
-  /max_tokens_exceeded/i,
+  /input.*too.long/i,
+  /request.*too.*large/i,
+  /prompt.*too.*long/i,
+  // Added 2026-10-23 (opencode `09a1db3`): some providers surface
+  // overflow as "please reduce the length of ..." in free-form error
+  // messages instead of a structured code.
+  /reduce the length/i,
   // ...
 ];
 
@@ -2212,6 +2224,82 @@ Contract:
 - `SessionReplay.replay(messages, opts)` hard-hides `displayRole: 'system'` even when `showSystemMessages: true`. Real `role: 'system'` messages (the actual system prompt) remain visible when that option is set.
 - `SessionManager.addMessage(role, content, tokens?, options?)` accepts either the raw `displayRole` string or an options object (`{ displayRole }`) as its fourth argument for backwards compatibility with three-argument call sites.
 - Auto-title generation (`activeSession.metadata.title` from the first user message) skips messages carrying any `displayRole` value, so hook payloads cannot end up as the session title.
+
+### Prompt Hook Model Resolution Cache (`src/hooks/index.ts`)
+
+Introduced in commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, merged 2026-10-24; resolves issue #2143). Prompt hooks that resolve model configuration on every invocation become expensive and noisy when the same model is reused across many hook calls inside a single agent step — routing lookups, deployment-registry hits, variant selection, and capability probes are all amortizable per step but were being redone per call. The cache lives in `src/hooks/index.ts` and is driven by the agent loop in `src/core/agenticChat.ts`.
+
+```typescript
+// src/hooks/index.ts
+export type ModelConfig = Record<string, unknown>;
+
+export function getModelForHook(
+  stepId: string,
+  modelName: string,
+  resolver: () => ModelConfig
+): ModelConfig;
+
+export function clearStepCache(stepId: string): void;
+```
+
+#### Keying scheme and lifetime
+
+The module-local `modelResolutionCache: Map<string, ModelConfig>` stores entries under the composite key `${stepId}:${modelName}`. The composite is deliberate:
+
+- Two different steps that happen to use the same `modelName` do NOT share state — a mid-session routing change that redirects `gpt-4o` to a different deployment on step N+1 is visible as a cache miss, not masked by a stale entry from step N.
+- A single step can resolve multiple models (routing + fallback + auxiliary task) without evicting entries from one another. The `getModelForHook` body is `O(1)` on hit, `O(resolver)` on miss, and never evicts.
+- `ModelConfig = Record<string, unknown>` is deliberately open — hook authors can thread arbitrary provider / deployment / capability fields through the cache without coupling it to a single provider shape. Callers are expected to produce the resolved object once and reuse it; the cache stores values by reference identity, so a subsequent lookup returns `===` the first result.
+
+`clearStepCache(stepId)` drops every entry whose key starts with `${stepId}:`. The implementation iterates `modelResolutionCache.keys()` and matches on the `${stepId}:` prefix — the trailing colon is load-bearing, because the naive `startsWith(stepId)` form would collapse `step-1` into `step-10` and drop both. The dedicated regression test (`tests/hooks/model-cache.test.ts` — `does NOT confuse a step id that is a prefix of another step id`) pins the correct behaviour. The function is idempotent on an unknown step id.
+
+#### Agent loop integration
+
+The `while (iterations < maxIterations)` body in `src/core/agenticChat.ts` tracks `let previousStepId: string | undefined` and clears the previous step's entries at the TOP of each iteration — the moment control returns to the loop head, regardless of whether the previous iteration completed normally, `continue`d, or threaded through one of the inline tool-call branches. A second clear fires once after the loop exits, so every `break` path (normal completion, loop detector, mistake tracker, stop hook, malformed-tool-call guard) still releases its cached entries.
+
+```mermaid
+flowchart TD
+    Enter["agenticChat() entry<br/>previousStepId = undefined"] --> Loop{"iterations < max?"}
+    Loop -- yes --> ClearPrev{"previousStepId<br/>defined?"}
+    ClearPrev -- yes --> Clear["clearStepCache(previousStepId)"]
+    ClearPrev -- no --> AssignId["sessionIdForStep = session.id ?? 'default'<br/>previousStepId = `${sessionId}:${iterations}`"]
+    Clear --> AssignId
+    AssignId --> Body["Step body:<br/>model.complete, tool calls,<br/>hook executions, ..."]
+    Body -- continue --> Loop
+    Body -- break --> PostLoop["clearStepCache(previousStepId)"]
+    Loop -- no --> PostLoop
+    PostLoop --> Return["return finalText"]
+```
+
+The two-point clear covers every exit without wrapping the ~600-line iteration body in a `try/finally`. The `let previousStepId` closure is intentional — a `try/finally` wrapping the body would need to reach past local variables declared in that body, and the loop head is where the next iteration's step id gets assigned anyway.
+
+#### Step-id composition
+
+```typescript
+const sessionIdForStep =
+  options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+previousStepId = `${sessionIdForStep}:${iterations}`;
+```
+
+The session id (when present) composed with the iteration number keeps the step id unique across concurrent sessions in the same process. Step N of session A and step N of session B therefore do NOT share cache entries — important for the server mode and for any in-process scenario where multiple agent loops run concurrently (sub-agent delegation, parallel task workers).
+
+Sessions without a bound `SessionManager` fall back to the literal `'default'` scope. This is safe within a single `agenticChat` invocation because the iteration number is monotonically increasing, so step N and step N+1 keys differ by the suffix. It is UNSAFE to run two anonymous (`'default'`-scoped) agent loops concurrently against the same cache; in practice every call site inside Alexi binds a session manager, and the anonymous path exists only for direct unit-test invocation.
+
+#### Test-only helpers (`@internal`)
+
+Two helpers are exported for tests:
+
+- `_resetModelResolutionCache(): void` — empties the full map. Used in `beforeEach` so each unit test starts from a clean slate.
+- `_modelResolutionCacheSize(): number` — returns the live entry count so tests can assert growth / eviction without peeking at module-private state.
+
+Production code must prefer `clearStepCache(stepId)` because the reset helper breaks concurrent-step isolation. The underscored names mark them as internal; agent-authored tooling should NOT depend on them.
+
+#### Hook-mock patches
+
+Four companion test files mock `../../src/hooks/index.js` and had to be updated so `agenticChat.ts`'s new `clearStepCache` import resolves against the mock surface: `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, and `tests/orchestrator-hooks.test.ts`. Each now exposes `clearStepCache: vi.fn()`. The `continueOnBlock.test.ts` mock additionally adds `getBlockCap: () => 8` to keep parity with the production module surface.
+
+#### Why not a `WeakMap` keyed by step object
+
+A `WeakMap<StepObject, Map<string, ModelConfig>>` would deliver the same lifetime guarantees without the explicit `clearStepCache` call, but it requires an actual step object to key on. The agent loop today does not materialize a `Step` struct — it tracks iteration state in locals — and introducing one just to anchor a `WeakMap` would be a larger refactor than the explicit-clear approach. The current design matches the upstream OpenCode PR and keeps the agent-loop diff to ~40 lines.
 
 ## Compaction System
 
@@ -9894,4 +9982,97 @@ flowchart TD
 ### Resource embed shape
 
 The embedded `resource` field in the formatter's input type was widened to `{ uri?: string; mimeType?: string; text?: string }` so the formatter can inline a `text/*` resource's body directly when the server supplies it. Non-text, non-image resources (e.g. `application/pdf`) render as a placeholder — the model knows the file exists without the orchestration layer rejecting the whole request.
+
+## MCP Output-Schema Normalisation (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). MCP servers in the wild emit a mix of `outputSchema` shapes — root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: "string"`, `type: "number"`), or no `outputSchema` at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object. `normalizeOutputSchema` wraps non-object roots in a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape so the runtime always has a `.properties` field to inspect, regardless of what the server declared.
+
+### Signature
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+### Dispatch
+
+```mermaid
+flowchart TD
+    In["schema: unknown"] --> NotObj{"typeof schema === 'object' && schema !== null?"}
+    NotObj -- no --> Undef["return undefined"]
+    NotObj -- yes --> AlreadyObject{"type === 'object'<br/>OR properties !== undefined?"}
+    AlreadyObject -- yes --> Passthrough["return schema verbatim"]
+    AlreadyObject -- no --> Wrap["return { type: 'object',<br/>properties: { result: schema },<br/>required: ['result'] }"]
+```
+
+### Why return `undefined` for non-object input
+
+Returning `undefined` for `null` / `string` / `number` / `undefined` input is deliberate: it lets call sites spread the result safely onto a tool definition — `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing, never a bogus wrapper. A `{}` fallback would misleadingly advertise an empty object schema to the model.
+
+### Why wrap under `properties.result` instead of `properties.value` or `properties.data`
+
+The literal key `result` was chosen to match opencode `c41c3a0` so a cross-project operator reading an MCP log sees the same wrapper on both sides. A matching `required: ['result']` is emitted alongside so JSON Schema consumers that treat `required` as the source of truth for mandatory fields see the wrapper as a non-optional field, not an opt-in extension.
+
+## MCP Client Connect De-duplication (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `8ecd6ad` for the dedup and `7b14ad4` for the parallel teardown). The `McpClientManager` kept a `connections: Map<string, McpConnection>` but had no guard against two concurrent `connect(config)` calls for the same server name — a config-change event that fired while `connectFromConfig()` was still running could spawn a second stdio child for the same server, resulting in zombie processes and double-register notifications. The fix adds an in-flight promise map keyed by server name; a second caller joins the first promise instead of spawning a parallel transport.
+
+### Internal state
+
+```typescript
+class McpClientManager {
+  private connections: Map<string, McpConnection> = new Map();
+  private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * In-flight connect() promises keyed by server name. Entry lifecycle:
+   * added when connect() begins, removed in its finally block regardless
+   * of outcome (resolve, reject, cancel).
+   */
+  private pendingConnects: Map<string, Promise<McpConnection>> = new Map();
+  // ...
+}
+```
+
+### `connect()` dispatch
+
+```mermaid
+sequenceDiagram
+    participant A as Caller A (startup)
+    participant B as Caller B (config observer)
+    participant Mgr as McpClientManager
+    participant Impl as connectImpl (handshake)
+
+    A->>Mgr: connect({ name: 'playwright', ... })
+    Mgr->>Mgr: pendingConnects.get('playwright') -> undefined
+    Mgr->>Impl: connectImpl(config, options)
+    Mgr->>Mgr: pendingConnects.set('playwright', task)
+    Mgr-->>A: Promise<McpConnection> (pending)
+
+    B->>Mgr: connect({ name: 'playwright', ... }) (concurrent)
+    Mgr->>Mgr: pendingConnects.get('playwright') -> inFlight
+    Mgr-->>B: return inFlight (SAME promise)
+
+    Impl-->>Mgr: resolves / rejects
+    Mgr->>Mgr: pendingConnects.delete('playwright') (finally)
+    Mgr-->>A: McpConnection
+    Mgr-->>B: McpConnection (same instance)
+```
+
+The public `connect()` method keeps its existing signature; the handshake body was extracted into a private `connectImpl(config, options)` so the dedup bookkeeping is a single-screen read instead of a nested `if` wrapped around ~400 lines of handshake. A `.finally()` block in the public method removes the pending entry on resolve, reject, and cancel paths alike, so a failed connect does not leave a stale cache entry.
+
+### `disconnectAll()` parallel teardown
+
+A sequential `for ... await disconnect(name)` loop was observed to add multi-second latency on exit when any one stdio child was slow to acknowledge `SIGTERM` — one hung server blocked every other server's teardown behind it. The loop is now:
+
+```typescript
+async disconnectAll(): Promise<void> {
+  const names = Array.from(this.connections.keys());
+  await Promise.allSettled(names.map((name) => this.disconnect(name)));
+}
+```
+
+`Promise.allSettled` is deliberate: a per-server teardown error should NOT propagate as a top-level rejection, because the caller is almost always on the shutdown path and surfacing a stray server misbehaviour there would mask the process exit code. Per-server errors are still logged by `disconnect()` itself; this layer is pure best-effort.
 
