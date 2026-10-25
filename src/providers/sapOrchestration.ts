@@ -1995,8 +1995,28 @@ export class SapOrchestrationProvider {
     // call is therefore not sufficient.
     try {
       for await (const chunk of response.stream) {
-        const deltaContent = chunk.getDeltaContent();
-        const deltaToolCalls = chunk.getDeltaToolCalls();
+        // Forward-compat guard (SST OpenCode PRs #58596 image events,
+        // #58609 speech events, #58608 finish reasons): the SDK may
+        // raise when it encounters a new event kind the current client
+        // version does not understand (`getDeltaContent` / `getDeltaToolCalls`
+        // dispatch internally on `event.type`). Treat per-chunk decode
+        // errors as skippable: log the raw payload at `warn` and
+        // continue the stream so one new event cannot crash the whole
+        // turn. Caller-visible errors (rate limit, auth, network) still
+        // escape via the outer try/catch because they surface on the
+        // iterator pull itself, not on getter dispatch.
+        let deltaContent: unknown;
+        let deltaToolCalls: SdkToolCallChunk[] | undefined;
+        try {
+          deltaContent = chunk.getDeltaContent();
+          deltaToolCalls = chunk.getDeltaToolCalls();
+        } catch (decodeErr) {
+          logger.warn(
+            `Unknown streaming event, skipping chunk (${this.config.modelName}): ` +
+              `${formatError(decodeErr)}`
+          );
+          continue;
+        }
 
         // Extract image content items from the delta. `extractImageChunks`
         // is safe on any input: a string delta returns `[]`, an
@@ -2018,7 +2038,7 @@ export class SapOrchestrationProvider {
             text: hasText ? (deltaContent as string) : '',
           };
 
-          if (hasToolCalls) {
+          if (hasToolCalls && deltaToolCalls) {
             streamChunk.toolCalls = deltaToolCalls.map((tc: SdkToolCallChunk) => ({
               index: tc.index,
               id: tc.id,

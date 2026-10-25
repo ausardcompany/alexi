@@ -294,6 +294,23 @@ interface PluginState {
    * yet expose a `rules` surface — only manifest-declared rules are tracked.
    */
   resolvedRules: ResolvedPluginRule[];
+  /**
+   * True while this plugin's `onLoad` lifecycle hook is still running. Set
+   * before awaiting `onLoad`, cleared when the hook settles (success or
+   * failure). Consumed by {@link PluginManager.ensureActivated} to prevent a
+   * race where a plugin-provided tool is dispatched before its plugin has
+   * finished initialising. Mirrors upstream opencode's activation gate
+   * (sst/opencode PR #51133).
+   */
+  activating: boolean;
+  /**
+   * The promise returned by `onLoad` while activation is in flight. Shared
+   * across concurrent `ensureActivated` callers so they all resolve against
+   * the same lifecycle completion, instead of racing / double-waiting.
+   * Undefined once activation has settled or when the plugin has no
+   * `onLoad` hook.
+   */
+  activationPromise?: Promise<void>;
 }
 
 // ============ Default Plugin Directories ============
@@ -1066,6 +1083,8 @@ export class PluginManager {
       registeredCommands: [],
       hookSubscriptions: [],
       resolvedRules: [],
+      activating: false,
+      activationPromise: undefined,
     };
 
     // Create context
@@ -1106,9 +1125,24 @@ export class PluginManager {
       // Store plugin state
       this.plugins.set(plugin.name, state);
 
-      // Call onLoad lifecycle hook
+      // Call onLoad lifecycle hook. We flip `state.activating` BEFORE
+      // awaiting so a concurrent `ensureActivated()` can observe the
+      // in-flight activation and wait on `state.activationPromise` rather
+      // than returning early. The promise is cleared in a `finally`
+      // regardless of outcome so a failing `onLoad` cannot leave the
+      // plugin stuck in a perpetually-activating state. See upstream
+      // opencode PR #51133 for the race this prevents.
       if (plugin.onLoad) {
-        await plugin.onLoad(state.context);
+        state.activating = true;
+        state.activationPromise = (async () => {
+          try {
+            await plugin.onLoad!(state.context);
+          } finally {
+            state.activating = false;
+            state.activationPromise = undefined;
+          }
+        })();
+        await state.activationPromise;
       }
 
       // Publish loaded event
@@ -1402,6 +1436,98 @@ export class PluginManager {
       rules.push(...state.resolvedRules);
     }
     return rules;
+  }
+
+  /**
+   * Wait for every enabled plugin to finish its `onLoad` lifecycle hook.
+   *
+   * Prevents the "command not found" heisenbug where a plugin-provided tool
+   * (e.g. an MCP command, hook-registered script) is invoked before its
+   * owning plugin finishes activating. Call this BEFORE dispatching any
+   * tool from the agent loop so a slow / cold-start `onLoad` cannot race
+   * with the first tool call.
+   *
+   * Semantics:
+   *   - Returns immediately when no enabled plugin is currently activating.
+   *   - When multiple plugins are activating in parallel, waits for all of
+   *     them via `Promise.all` so the gate reflects the slowest.
+   *   - Disabled plugins are skipped: their tools are not advertised, so
+   *     their activation state is irrelevant.
+   *   - A plugin whose `onLoad` throws will reject this promise with the
+   *     same error — callers should handle that like any other startup
+   *     failure (the plugin is still removed from the registry by `load`).
+   *   - Concurrent calls return promises that resolve against the same
+   *     in-flight `activationPromise` entries, so there is no fan-out of
+   *     duplicate work.
+   *
+   * Mirrors upstream opencode PR #51133 ("activation gate before tool
+   * dispatch").
+   */
+  async ensureActivated(): Promise<void> {
+    const pending: Promise<void>[] = [];
+    for (const state of this.plugins.values()) {
+      if (!state.enabled) {
+        continue;
+      }
+      if (state.activating && state.activationPromise) {
+        pending.push(state.activationPromise);
+      }
+    }
+    if (pending.length === 0) {
+      return;
+    }
+    // allSettled so one failing `onLoad` cannot block the gate for the
+    // other plugins — the failing plugin is still removed from the
+    // registry by `load()`'s own catch block, so no stale state leaks.
+    await Promise.allSettled(pending);
+  }
+
+  /**
+   * Return `true` when every enabled plugin has finished its `onLoad`
+   * lifecycle hook. Used by {@link EnhancedToolRegistry}'s readiness
+   * check to produce an actionable error message that names the plugin
+   * still activating, rather than letting the caller observe a generic
+   * "tool not found".
+   */
+  isActivated(): boolean {
+    for (const state of this.plugins.values()) {
+      if (!state.enabled) {
+        continue;
+      }
+      if (state.activating) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Resolve the plugin that owns a given tool name, with its current
+   * activation flag. Returns `undefined` if no enabled plugin owns the
+   * tool. Used by the tool-readiness check so the error surfaced to the
+   * model names the plugin still activating.
+   *
+   * Ownership is reported both for tools whose runtime registration has
+   * completed (`state.registeredTools`) AND for tools still *declared*
+   * by the plugin's static `plugin.tools` list but awaiting registration
+   * — the latter case is exactly the race `ensureActivated()` guards
+   * against (the model knows the tool name because it was advertised,
+   * but the registry entry is not yet live).
+   */
+  findPluginForTool(toolName: string): { pluginName: string; activating: boolean } | undefined {
+    for (const state of this.plugins.values()) {
+      if (!state.enabled) {
+        continue;
+      }
+      if (state.registeredTools.includes(toolName)) {
+        return { pluginName: state.plugin.name, activating: state.activating };
+      }
+      const declared = state.plugin.tools?.some((t) => t.name === toolName) ?? false;
+      if (declared) {
+        return { pluginName: state.plugin.name, activating: state.activating };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -1875,6 +2001,15 @@ export function togglePlugin(name: string, options?: { force?: boolean }): Toggl
     error: result.error,
     enabledDependencies: result.enabledDependencies,
   };
+}
+
+/**
+ * Wait for every enabled plugin in the global manager to finish activating.
+ * Thin wrapper around {@link PluginManager.ensureActivated}; see that
+ * method for the race it prevents.
+ */
+export async function ensurePluginsActivated(): Promise<void> {
+  return getPluginManager().ensureActivated();
 }
 
 /**

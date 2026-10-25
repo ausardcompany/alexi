@@ -4,7 +4,12 @@
  */
 
 export { McpServerAdapter, createMcpServer } from './server.js';
-export { McpClientManager, getMcpClientManager, type McpConnectOptions } from './client.js';
+export {
+  McpClientManager,
+  getMcpClientManager,
+  normalizeOutputSchema,
+  type McpConnectOptions,
+} from './client.js';
 export { loadMcpConfig, saveMcpConfig, type McpServerConfig, type McpConfig } from './config.js';
 
 // MCP Client ID Metadata Document (CIMD) support — opt-in helper for

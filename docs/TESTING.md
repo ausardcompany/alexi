@@ -37,6 +37,11 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
 - [Testing subagent edit-tool configuration inheritance (`tests/agent/subagent-tool-inheritance.test.ts`, issue #2123)](#testing-subagent-edit-tool-configuration-inheritance-testsagentsubagent-tool-inheritancetestts-issue-2123)
+
+- [Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)](#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts)
+- [Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)](#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts)
+- [Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)](#testing-the-scoped-sse-probe-fetch-testsmcpsse-probetestts)
+- [Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)](#testing-the-mcp-output-schema-normaliser-srcmcp__tests__normalizeoutputschematestts)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -1369,6 +1374,28 @@ describe('Write Tool', () => {
   });
 });
 ```
+
+### Alternative: direct `executeUnsafe` without a module mock
+
+Not every tool test needs the `vi.mock('../../../src/tool/index.js', ...)` shim shown above. When the suite imports a single `*Tool` export and only asserts on filesystem side effects, calling `tool.executeUnsafe(params, ctx)` directly is both shorter and avoids a module-level stub that other suites in the same file would inherit. `src/tool/tools/__tests__/edit.mixed-eol.test.ts` and `src/tool/tools/__tests__/edit.agentsmd.test.ts` follow this shape:
+
+```typescript
+async function runEdit(
+  ctx: MinimalContext,
+  params: { filePath: string; oldString: string; newString: string; replaceAll?: boolean }
+) {
+  // Use executeUnsafe so the test does not depend on the default `ask`
+  // permission rule for `write` (which has no interactive listener in a
+  // test run and would otherwise time out and reject every call).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (editTool as any).executeUnsafe(params, ctx);
+  return result;
+}
+```
+
+The cast to `as any` is required because `executeUnsafe` is not on the public `ToolDefinition` surface — it is added by `defineTool` at registration time. The cast is local to the test helper and does not leak into production typings.
+
+Regression history to be aware of: calling `editTool.execute(...)` from a non-interactive test suite will time out on the default `ask` rule for `write` and silently resolve every edit to a user rejection — the assertions then compare the file's original contents against the expected post-edit contents and fail. This is the exact mode `edit.mixed-eol.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)). When adding a new edit / write / delete test, pick either the `vi.mock('../../../src/tool/index.js', ...)` shim OR the direct `executeUnsafe` call — never the raw `.execute()` path.
 
 ### Tool Test Coverage
 
@@ -4440,6 +4467,87 @@ Coverage priorities for future extensions:
 2. **Assert `plan.contextWindowExtracted` alongside `plan.contextWindow`.** A future refactor that inverts the extraction/fallback precedence would produce a numerically correct plan with the wrong provenance flag; asserting both fields pins the contract.
 3. **Never leak a `RecoveryPromptFn` across tests.** The module holds the callback in a process-local `let`, so `afterEach(() => setRecoveryPrompt(null))` is mandatory in any suite that calls `setRecoveryPrompt(fn)`.
 
+### Testing streaming unknown-event handling (`tests/core/streaming-events.test.ts`)
+
+Introduced in commit `a482d950 feat(core): handle unknown streaming events gracefully` (ports the discipline from SST OpenCode PRs #58596 / #58608 / #58609). The 258-line suite pins the two-layer forward-compat net for unknown streaming event / chunk shapes: the module-level guards in `src/providers/protocols/stream-events.ts` and the orchestrator-level warn-and-skip path in `src/core/streamingOrchestrator.ts`. Pure-unit — no network, no real timers, no filesystem, no live SAP AI Core call. The provider is replaced wholesale by a factory that yields a pre-canned array of `StreamChunk`-shaped (and deliberately mis-shaped) payloads.
+
+Mock providers and the router BEFORE importing `streamChat` (vitest hoists `vi.mock`, but explicit ordering keeps dependency direction readable):
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+
+vi.mock('../../src/core/router.js', () => ({
+  routePrompt: vi.fn(),
+  recordRouteOutcome: vi.fn(),
+  classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
+}));
+
+import { streamChat } from '../../src/core/streamingOrchestrator.js';
+import {
+  isRecognizedStreamChunk,
+  isTypedStreamEvent,
+  classifyStreamEvent,
+  KNOWN_STREAM_CHUNK_FIELDS,
+} from '../../src/providers/protocols/stream-events.js';
+```
+
+The provider factory is intentionally typed loosely so a test can inject objects that do not conform to `StreamChunk` — this is the whole point: forward-rolled providers emit shapes the client type does not describe yet:
+
+```typescript
+function makeProvider(chunks: unknown[]): {
+  provider: { streamComplete: ReturnType<typeof vi.fn> };
+} {
+  function streamComplete(_messages: unknown, _opts?: unknown) {
+    async function* gen(): AsyncGenerator<StreamChunk> {
+      for (const c of chunks) {
+        yield c as StreamChunk;
+      }
+    }
+    return gen();
+  }
+  return { provider: { streamComplete: vi.fn(streamComplete) } };
+}
+```
+
+Six properties pinned by the suite:
+
+1. **`isRecognizedStreamChunk` accepts every known field in isolation.** Five one-liner assertions, one per field in `KNOWN_STREAM_CHUNK_FIELDS`: `{ text: 'hi' }`, `{ toolCalls: [{ index: 0 }] }`, `{ finishReason: 'stop' }`, `{ usage: { total_tokens: 1 } }`, `{ images: [] }`. Each must return `true`.
+2. **`isRecognizedStreamChunk` rejects empty / primitive / forward-rolled payloads.** `null`, `undefined`, string, number, and `{}` return `false`; a forward-rolled `{ imageChunkDelta: '...' }`, `{ speechDelta: '...' }`, or `{ type: 'image.chunk.delta', data: '...' }` all return `false`. These three cases mirror SST OpenCode #58596 / #58609 / #58608 verbatim.
+3. **`KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned.** `expect([...KNOWN_STREAM_CHUNK_FIELDS].sort()).toEqual(['finishReason', 'images', 'text', 'toolCalls', 'usage'].sort())`. Adding a new normalised channel to `StreamChunk` without also updating the snapshot and the field set fails this assertion immediately — the suite is the enforcement point for the "update both halves" discipline.
+4. **`streamChat` emits an empty-text yield for an unknown chunk between known chunks.** Provider yields `[{ text: 'hello ' }, { imageChunkDelta: 'base64-blob' }, { text: 'world' }]`. The consumer sees three iterator yields in order: `'hello '`, `''`, `'world'`. `final.text === 'hello world'`. `warnSpy` called exactly once with a message matching `/Unknown streaming chunk shape/`:
+
+    ```typescript
+    const iter = streamChat('hi', { modelOverride: 'gpt-4o' });
+    const emitted: string[] = [];
+    let final: { text: string } | undefined;
+
+    for (;;) {
+      const step = await iter.next();
+      if (step.done) {
+        final = step.value as { text: string };
+        break;
+      }
+      emitted.push(step.value.text);
+    }
+
+    expect(final?.text).toBe('hello world');
+    expect(emitted).toEqual(['hello ', '', 'world']);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0] as string).toMatch(/Unknown streaming chunk shape/);
+    ```
+
+5. **Multiple consecutive unknown chunks each produce one warn.** Provider yields `[{ text: 'A' }, { speechDelta: 'audio-1' }, { imageChunkDelta: 'image-1' }, { someFutureField: 'x' }, { text: 'B' }]`. `final.text === 'AB'` and `warnSpy` is called exactly three times — one per unknown chunk, never collapsed, never duplicated.
+6. **Usage recorded from a trailing known chunk after an unknown one still reaches the final `StreamingResult`.** Provider yields `[{ text: 'ok' }, { unknownField: 'ignored' }, { text: '', finishReason: 'stop', usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }]`. The final result exposes `final.text === 'ok'` and `final.usage?.total_tokens === 5`, so cost telemetry survives interleaved unknown shapes.
+
+Negative guard: a sequence of entirely-known chunks (`[{ text: 'a' }, { text: 'b' }, { finishReason: 'stop', usage: { ... } }]`) produces zero `warnSpy` calls. Prevents a future regression that would false-positive on healthy traffic.
+
+Spy pattern for the logger: `warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})` in `beforeEach` and `warnSpy.mockRestore()` in `afterEach`. Spying on `logger.warn` directly (not `console.warn`) keeps assertions stable regardless of log-level filtering in CI.
+
 ### Testing Network Disconnect Classification (`network.disconnected`)
 
 Introduced 2026-09-25 (ports upstream opencode/kilocode `d6bb0ef05`,
@@ -5884,6 +5992,76 @@ The eleven cases run inside the mocked-SDK unit suite — no new integration-lev
 - `tests/hooks/blockCap.test.ts` -- Tests consecutive Stop hook rejection cap
 - `tests/hooks/continueOnBlock.test.ts` -- Tests rejection feedback to model
 - `tests/hooks/dispatcher-coverage.test.ts` -- Pins that `HookManagerImpl.execute()` dispatches every `HookEvent` without falling through to an unknown branch (see [Testing hook dispatcher coverage per `HookEvent`](#testing-hook-dispatcher-coverage-per-hookevent-testshooksdispatcher-coveragetestts))
+- `tests/hooks/model-cache.test.ts` -- Pins the step-scoped prompt-hook model resolution cache (`getModelForHook` / `clearStepCache`), see [Testing the prompt-hook model resolution cache](#testing-the-prompt-hook-model-resolution-cache-testshooksmodel-cachetestts-issue-2143)
+
+### Testing the prompt-hook model resolution cache (`tests/hooks/model-cache.test.ts`, issue #2143)
+
+Added by commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, merged 2026-10-24). The 165-line suite exercises `getModelForHook`, `clearStepCache`, and the two `@internal` test helpers (`_resetModelResolutionCache`, `_modelResolutionCacheSize`) exported from `src/hooks/index.ts`. Each test starts from a clean slate via a `beforeEach(() => _resetModelResolutionCache())` block so one test's cache state cannot leak into another.
+
+Pattern — mock-free, direct unit test. The module under test exposes a module-level `Map` as cache state. The suite imports the public API plus the two `@internal` probes and asserts behaviour by observing resolver call counts (via `vi.fn<[], ModelConfig>(...)`) and `_modelResolutionCacheSize()`. There is no provider mock, no agent-loop harness, and no fs setup — the cache is pure and the test honours that purity.
+
+Seven cases, each pinning a distinct contract:
+
+1. **`resolves the model config on first call and caches the result`** — the resolver fires once, `_modelResolutionCacheSize()` becomes `1`, and the returned value matches the resolver output. Baseline happy path.
+2. **`returns the cached config on subsequent calls without invoking the resolver`** — three sequential `getModelForHook('step-1', 'gpt-4o', resolver)` calls fire the resolver once, and the three returned references are reference-identical (`toBe`, not `toEqual`). This pins the "store by reference identity" contract — hook authors can rely on `===` between hits in the same step.
+3. **`isolates caches between different steps for the same model name`** — two different step ids with the same `modelName` cache independently, both resolvers fire once, and the two cached objects are NOT reference-identical. This pins the composite-key contract.
+4. **`caches different models within the same step independently`** — two different `modelName`s within one step cache independently; a single step can resolve a routing primary and a fallback without evicting entries.
+5. **`clears only entries for the specified step on clearStepCache`** — after seeding three entries across two steps, `clearStepCache('step-1')` drops two entries and leaves one. Follow-up resolution confirms step-2 is still cached (resolver call count unchanged) and step-1 is a cache miss (resolver call count incremented).
+6. **`clearStepCache is a no-op for an unknown step id`** — pins idempotency on an unknown step id, so a defensive double-clear in a `break` path cannot corrupt state.
+7. **`does NOT confuse a step id that is a prefix of another step id`** — the critical regression guard. Keys `step-1:gpt-4o` and `step-10:gpt-4o` coexist; `clearStepCache('step-1')` must only drop the first. The implementation matches on `${stepId}:` (trailing colon), not `${stepId}`, and this test fails hard if a refactor removes the colon.
+8. **`refreshes after a clear — a routing change mid-session is visible`** — the behavioural scenario the whole feature exists for. A `resolver` that reads a mutable `currentConfig` first returns `{ deployment: 'old' }`, then `currentConfig` changes between steps, then step-2 picks up `{ deployment: 'new' }` after `clearStepCache('step-1')`. This pins that the cache cannot mask a mid-session routing change.
+
+Minimum assertion shape (abbreviated from the actual file):
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  getModelForHook,
+  clearStepCache,
+  _resetModelResolutionCache,
+  _modelResolutionCacheSize,
+  type ModelConfig,
+} from '../../src/hooks/index.js';
+
+describe('Prompt hook model resolution cache', () => {
+  beforeEach(() => {
+    _resetModelResolutionCache();
+  });
+
+  it('returns the cached config on subsequent calls without invoking the resolver', () => {
+    const resolver = vi.fn<[], ModelConfig>(() => ({ provider: 'sap-ai-core', version: 'v1' }));
+    const first = getModelForHook('step-1', 'gpt-4o', resolver);
+    const second = getModelForHook('step-1', 'gpt-4o', resolver);
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first); // reference identity, not equality
+    expect(_modelResolutionCacheSize()).toBe(1);
+  });
+
+  it('does NOT confuse a step id that is a prefix of another step id', () => {
+    const resolver = vi.fn<[], ModelConfig>(() => ({ ok: true }));
+    getModelForHook('step-1', 'gpt-4o', resolver);
+    getModelForHook('step-10', 'gpt-4o', resolver);
+    expect(_modelResolutionCacheSize()).toBe(2);
+    clearStepCache('step-1');
+    expect(_modelResolutionCacheSize()).toBe(1); // step-10 survives
+  });
+});
+```
+
+### Mocking `clearStepCache` in agent-loop tests
+
+`src/core/agenticChat.ts` now imports `clearStepCache` alongside `executeHooks`, `createHookContext`, and `getBlockCap`. Tests that mock the whole hooks module to inspect `agenticChat` behaviour MUST re-export `clearStepCache: vi.fn()` or the mock will not shadow the real module and the import will resolve to `undefined`, crashing the loop at the top-of-iteration clear.
+
+```typescript
+vi.mock('../../src/hooks/index.js', () => ({
+  executeHooks: (...args: unknown[]) => mockExecuteHooks(...args),
+  createHookContext: (...args: unknown[]) => mockCreateHookContext(...args),
+  getBlockCap: () => 8,
+  clearStepCache: vi.fn(), // required by src/core/agenticChat.ts
+}));
+```
+
+The four touched files in commit `5b2a00e5` are `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, and `tests/orchestrator-hooks.test.ts` — use any of them as a reference when adding a new agent-loop mock.
 
 ### Testing Block Cap
 
@@ -7055,8 +7233,70 @@ describe('resolveFileInclusions', () => {
 - `tests/mcp/sse-probe.test.ts` — case-insensitive `Content-Type` classification for the remote-transport connect probe (2026-09-21 sync)
 - `tests/mcp/cimd.test.ts` — pure-function coverage of Capability Interface Metadata Document validation (`validateCapabilities`, `buildManifestFromTools`, `CapabilityManifestSchema`, `McpCapabilityMismatchError`) covering the backward-compatibility, protocol-version, tool-removal, additive-change, schema-drift, description-drift, and composite-failure axes (issue #1877)
 - `tests/mcp/client-cimd.test.ts` — end-to-end integration of CIMD validation into `McpClientManager.connect`: manifest caching on every successful connect, warn-only behaviour when `cimdEnabled` is absent, permanent-failure behaviour when `cimdEnabled: true`, and the no-op path when `expectedCapabilities` is not pinned (issue #1877)
+- `tests/mcp/parallel-shutdown.test.ts` — integration contract for `McpClientManager.disconnectAll` concurrency, fault tolerance, and idempotency (commit `89e7cb7b`); backed by the configurable mock in `tests/mcp/__mocks__/slow-server.ts`
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+
+### Testing `McpClientManager.disconnectAll` parallel shutdown (`tests/mcp/parallel-shutdown.test.ts`)
+
+Introduced by commit `89e7cb7b` (`test(tests): add integration test for mcp parallel shutdown`). The suite is a verification-only regression guard that locks in the `Promise.allSettled`-based concurrent shutdown contract on `McpClientManager.disconnectAll` (`src/mcp/client.ts:1529-1550`) across three axes: concurrency, fault tolerance, and idempotency. All behaviour is already present in the manager — the suite exists so a future refactor that collapses the parallel shutdown back to a sequential `for ... await` loop, drops the up-front `Array.from(this.connections.keys())` snapshot, or converts `Promise.allSettled` into `Promise.all` trips CI immediately rather than silently serialising shutdown or stranding slow / throwing peers.
+
+The configurable mock in `tests/mcp/__mocks__/slow-server.ts` is deliberately independent from `@modelcontextprotocol/client`: a test does not have to boot a real MCP server to exercise the manager's shutdown orchestration. The exported `SlowMcpServer` exposes just the slice of the SDK `Client` surface `McpClientManager.disconnect` touches — a single `close(): Promise<void>` method plus two observable fields (`shutdownCalls`, `isShutdown`). The mock is wired into the manager via a bare `McpConnection` fixture that the suite injects directly through a one-location `connections` cast — the real SDK handshake is intentionally bypassed:
+
+```typescript
+// tests/mcp/parallel-shutdown.test.ts (helper)
+function buildFakeConnection(name: string, server: SlowMcpServer): McpConnection {
+  const config: McpServerConfig = {
+    name,
+    transport: 'stdio',
+    command: 'node',
+    args: ['server.js'],
+    enabled: true,
+  };
+  return {
+    config,
+    // The manager only ever calls `.close()` on this during disconnect;
+    // cast through unknown is required because `SlowMcpServer` is
+    // intentionally not a full SDK `Client`.
+    client: server as unknown as McpConnection['client'],
+    tools: [],
+    status: 'connected',
+    attemptCount: 1,
+  };
+}
+
+function registerFakeConnections(
+  manager: McpClientManager,
+  entries: Array<{ name: string; server: SlowMcpServer }>
+): void {
+  const connections = (manager as unknown as { connections: Map<string, McpConnection> })
+    .connections;
+  for (const { name, server } of entries) {
+    connections.set(name, buildFakeConnection(name, server));
+  }
+}
+```
+
+Five cases pin the contract:
+
+| Case                                                                        | What it pins                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shuts down all servers concurrently (total time ~1x, not Nx)`              | Five servers at 80 ms per-server delay. Elapsed time must be `< perServerDelayMs * 2` so a regression to sequential shutdown (which would be `>= 320 ms` here) trips the assertion. Every server reaches `isShutdown === true` and `shutdownCalls === 1`.                                                                                      |
+| `completes shutdown even when one server throws during close`               | Three servers (healthy / faulty / healthy); the faulty one has `throwOnShutdown: true`. `disconnectAll()` must resolve without rejecting. Healthy peers reach `isShutdown === true`; the faulty server's `shutdownCalls === 1` but `isShutdown === false` (the throw aborted before the assignment).                                           |
+| `is idempotent: a second disconnectAll is a no-op`                          | Two servers. After the first `disconnectAll()`, a second call must not re-close already-removed connections. `shutdownCalls` stays at `1` on each server.                                                                                                                                                                                      |
+| `handles an empty connection map without error`                             | A bare manager with no registered connections. `disconnectAll()` resolves to `undefined` without throwing.                                                                                                                                                                                                                                     |
+| `repeated disconnect(name) after cleanup is a no-op`                        | After `disconnect('solo')`, a second `disconnect('solo')` early-returns without throwing; `disconnect('never-existed')` for an unregistered name does the same. `shutdownCalls` stays at `1`.                                                                                                                                                  |
+
+Key patterns to reuse when extending the suite:
+
+1. **Mock the logger at four levels (`info`, `warn`, `error`, `debug`) via `vi.mock('../../src/utils/logger.js', ...)` with `importActual` as the base.** The manager's shutdown path logs on every `.disconnect(name)` success and on every `Promise.allSettled` rejection; without the mock the suite output is unreadable. Keeping `debug` mocked (not left as-is) is deliberate — the parallel-shutdown contract is a timing + state contract, not a logging contract, so an unexpected debug log is not a regression this suite watches for. If a future contract adds structured log fields, add dedicated assertions against the mocked function rather than relying on this suite.
+2. **Inject fake connections via a one-location cast, not through the real `connect` handshake.** The suite's `registerFakeConnections(manager, entries)` helper reaches into the private `connections` map with `(manager as unknown as { connections: Map<string, McpConnection> }).connections.set(...)`. Isolating the cast to a single helper keeps the test file free of repeated `as unknown as` noise and localises any future field-rename maintenance to one place. Do NOT drive the mock through `manager.connect(config)` — the real `connect` path boots a child process, performs the SDK handshake, and installs a real `Client`; none of that is needed to exercise `disconnectAll`.
+3. **Set `connection.process` to `undefined` so the manager's `process.kill()` branch is skipped.** The suite exercises the client-side shutdown orchestration (`Promise.allSettled` over the `connections.keys()` snapshot), not the stdio child-cleanup path. Real stdio child cleanup is covered by other integration tests under `tests/mcp/`. A reviewer who adds a `process: { kill: vi.fn() }` stub here is drifting the test scope — add a dedicated case under `client.test.ts` instead.
+4. **Keep the per-server delay small (10-80 ms) and the overhead budget generous (2x the per-server delay).** CI's noisy scheduler can add 20-50 ms of overhead per test on a cold worker; a tight overhead cap turns the suite into a flake generator. The 2x budget on the 80 ms five-server case is still a hard regression guard — a sequential shutdown would be `> 320 ms`, well above the `< 160 ms` ceiling. If you add a new concurrency case, size the delay so the sequential-regression case is at least 3x the parallel-case assertion.
+5. **Assert on observable state (`isShutdown`, `shutdownCalls`), not log calls.** The point of `SlowMcpServer` is that both fields are directly observable without introspecting manager internals. Asserting `expect(server.isShutdown).toBe(true)` is a stable contract; asserting `expect(logger.info).toHaveBeenCalledWith(...)` ties the suite to the log format and will break on cosmetic log rewording. The suite intentionally never asserts on log content.
+6. **Keep the mock independent from `@modelcontextprotocol/client`.** The whole value of `SlowMcpServer` is that it is a 45-line standalone file with zero SDK coupling. A reviewer who tries to extend it to implement `tools/list` or `callTool` is building the wrong thing — those code paths are covered by `client.test.ts` with the full SDK mock. The slow-server mock exists solely for shutdown-orchestration tests.
+
+The matching port-maintenance invariants for `disconnectAll` (why the up-front name snapshot and `Promise.allSettled` are both load-bearing, and what a reviewer should block) live in [CONTRIBUTING.md — Best-effort parallel shutdown (`McpClientManager.disconnectAll`)](CONTRIBUTING.md#best-effort-parallel-shutdown-mcpclientmanagerdisconnectall).
 
 ### Testing the `mcp-servers.example.json` schema guard (commit `ae461291`)
 
@@ -7307,6 +7547,12 @@ contributors do not re-introduce them by hand:
    // pass in commit 8ea08827 — the previous three-line break fit within 100
    // columns once the first argument sat at 98 columns)
    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
+
+   // src/mcp/__tests__/oauth-callback.test.ts:33 (canonical form after the
+   // 2026-10-25 auto-fix pass in commit 0e133ffa — the synchronous
+   // expect(() => fn()).toThrow(/.../) variant of the above, which sat at
+   // 99 columns and fits under the 100-column ceiling)
+   expect(() => assertHttpUrl(bad, 'authorization_endpoint')).toThrow(/must use http or https/);
 
    // src/config/__tests__/overlay.test.ts:6 (canonical form after the
    // 2026-10-07 auto-fix pass in commit b02d6ad2 — a three-binding named
@@ -8481,6 +8727,85 @@ Invariants the suite pins:
 - **`reset()` clears exhaustion.** Zeroing `consecutiveErrors` via `reset()` re-opens the budget; subsequent `isFatal(err)` returns `false` on the same error shape.
 
 When adding a new transient classifier to `isRetryableError`, extend this block with one positive case (budget exhaustion flips the new shape) and one negative case (budget still available keeps it transient). The retry-budget exhaustion path shares its classifier with every other transient driver — a false positive here flows into `NetworkManager`, `retryProviderCall`, and the agent-workflow `KILO_RETRIES` loop.
+
+### Testing content-policy classification (issue #2134)
+
+`tests/core/error-classification.test.ts` (294 lines, 32 cases across four describe blocks) pins the non-retry contract for the broader `isContentPolicyError` detector, the stateless `classifyError` taxonomy, the three provider-attribution helpers, and the `ErrorBackoff` integration. The suite is pure state-assertion — no fake timers, no mocked network, no provider-SDK stubs — so it composes with any future upstream shape added to the detector.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+
+import { classifyError, isContentPolicyError, ErrorBackoff } from '../../src/core/error-backoff.js';
+import {
+  isOpenAIContentPolicyError,
+  isGoogleSafetyError,
+  isAnthropicContentPolicyError,
+} from '../../src/providers/index.js';
+```
+
+**Block 1 — `classifyError` taxonomy (12 cases).** Every HTTP-status branch (`401`, `403`, `400`, `422`, `429`, `451`, `502`, `503`, plus unknown 4xx and 5xx), plus `ECONNRESET` code, `ETIMEDOUT` message, `NoRefreshTokenError` by name, free-tier rate-limit code, xAI capacity message, unknown errors, and `null` / `undefined`. Reference assertion shape:
+
+```typescript
+it('classifies ECONNRESET as transient network', () => {
+  const err = Object.assign(new Error('socket hang up (ECONNRESET)'), { code: 'ECONNRESET' });
+  const c = classifyError(err);
+  expect(c.type).toBe('network');
+  expect(c.fatal).toBe(false);
+  expect(c.retryable).toBe(true);
+});
+
+it('classifies HTTP 451 as content_policy with statusCode preserved', () => {
+  const c = classifyError({ status: 451, message: 'Unavailable For Legal Reasons' });
+  expect(c.type).toBe('content_policy');
+  expect(c.fatal).toBe(true);
+  expect(c.statusCode).toBe(451);
+});
+```
+
+**Block 2 — content-policy detection (8 cases).** Every message substring (`moderation`, `content_filter`, `content policy`, `safety`), HTTP `451`, the `ContentFilterError` class-name path (cross-module safe — a cross-worker vitest re-import that defeats `instanceof` still trips the `name` check), the `content_filter` code marker, and negative cases (`new Error('request failed')`, `{ status: 500 }`, `null`, `undefined`, `42`). Reference:
+
+```typescript
+it('detects a message containing "moderation"', () => {
+  const err = new Error('Request blocked by moderation');
+  expect(isContentPolicyError(err)).toBe(true);
+  const c = classifyError(err);
+  expect(c.type).toBe('content_policy');
+  expect(c.fatal).toBe(true);
+  expect(c.retryable).toBe(false);
+});
+```
+
+**Block 3 — provider-specific helpers (9 cases).** OpenAI moderation API shape, `content_policy_violation` code, HTTP `451` on an OpenAI envelope, negative OpenAI shapes; Google `finishReason: 'SAFETY'`, Google `promptFeedback.blockReason: 'SAFETY'`, negative Google reasons (`'STOP'`, `'OK'`); Anthropic `error_type: 'content_policy'`, Anthropic `invalid_request_error` + content-policy message, negative Anthropic message (`'missing field'`). Each positive case double-asserts that `classifyError(err).type === 'content_policy'` — so a future refactor that de-syncs the per-provider helpers from the generic detector trips immediately.
+
+**Block 4 — `ErrorBackoff` integration (7 cases).** Pins that a content-policy error from any provider family flips `isFatal()` through the record-then-ask path:
+
+```typescript
+describe('ErrorBackoff + content-policy integration (issue #2134)', () => {
+  it('does not retry an OpenAI moderation error', () => {
+    const b = new ErrorBackoff({ maxRetries: 5, initialDelayMs: 10 });
+    const err = { error: { type: 'moderation' }, message: 'blocked' };
+    b.recordError(undefined, err);
+    expect(b.isFatal()).toBe(true);
+  });
+
+  it('still retries a transient 503 error (not fatal)', () => {
+    const b = new ErrorBackoff({ maxRetries: 5, initialDelayMs: 10 });
+    const err = { status: 503, message: 'service unavailable' };
+    b.recordError(503, err);
+    expect(b.isFatal()).toBe(false);
+  });
+
+  it('isFatal(err) short-circuits for content-policy without recordError', () => {
+    const b = new ErrorBackoff();
+    const err = { error: { type: 'moderation' } };
+    expect(b.isFatal(err)).toBe(true);
+  });
+});
+```
+
+The transient-vs-permanent guard is the load-bearing invariant: a Google `SAFETY` shape, an OpenAI nested `moderation` shape, an Anthropic `content_policy` shape, an HTTP `451`, AND a bare message substring all flip `isFatal()`; a transient `503` or an `ECONNRESET` do NOT. Without the negative cases a future refactor that over-broadens the detector would silently stop retrying real transient failures. The final case pins the no-record short-circuit — `isFatal(err)` must return `true` for a staged content-policy payload *without* a prior `recordError` call, so CLI renderers can render the user-facing message synchronously.
+
+When adding a new upstream content-policy shape (e.g. a new provider family in a future `providers.<id>` adapter), extend Block 2 with one positive detection case, Block 3 with the per-provider helper if one is added, and Block 4 with one integration case that pins `ErrorBackoff.isFatal` through both the record-then-ask and the no-record paths.
 
 ### Hook `contextModification` persistence tests
 
@@ -11511,6 +11836,10 @@ Regression contract — four fixture cells all produced in-memory via `xlsx.util
 | Date-only (ISO midnight)  | `YYYY-MM-DD`           | Unchanged behaviour for backwards compat  |
 | Elapsed `[h]:mm`          | sheet-formatted `value.w` | Elapsed-time regex `/\[(h+|m+|s+)\]/i`   |
 
+#### Fixture note: elapsed-time durations are 1899-12-30 + N hours, not out-of-range ISO strings
+
+SheetJS stores an elapsed duration (e.g. `25:30`) as `1899-12-30T00:00:00Z` plus `N` hours — a `25:30` elapsed value therefore materialises as `1899-12-31T01:30:00.000Z`. Do NOT construct the fixture as `new Date('1899-12-30T25:30:00.000Z')`: hour `25` is not a legal ISO time-of-day, so JavaScript's `Date` constructor silently returns `Invalid Date` and the implementation's downstream `.toISOString()` call throws `RangeError: Invalid time value` before the assertion runs. This is the exact failure mode `read-office.xlsx-cell.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)); the fix is to compute the fixture against the real SheetJS epoch (1899-12-30 + hours) rather than to encode `h > 23` in the ISO literal itself.
+
 ### Running
 
 ```bash
@@ -13798,3 +14127,199 @@ afterEach(() => {
 - **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
 - **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
 - **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
+
+## Testing the plugin activation gate (`tests/plugin/activation-race.test.ts`)
+
+Added by commit `14b15b42 fix(core): add plugin activation gate before tool dispatch` (ports upstream opencode PR #51133). The 194-line regression suite exercises `PluginManager.ensureActivated()`, `PluginManager.isActivated()`, and `PluginManager.findPluginForTool()` so the "command not found" heisenbug (a plugin-provided tool dispatched before its `onLoad` lifecycle hook settles) cannot silently return. The suite lives under `tests/plugin/` rather than colocated under `src/plugin/` because it drives the public `PluginManager` surface — the gate's correctness is defined at the boundary, not at any single helper.
+
+### Fixture pattern
+
+The tests build plugins directly, no filesystem scaffolding, no `plugin.json` round-trip. A tiny `slowPlugin(name, delayMs)` helper returns `{ plugin, finished }` where `plugin.onLoad` sleeps for `delayMs` and flips a captured `done` boolean so the test can assert the gate waited for the hook to actually finish:
+
+```typescript
+function slowPlugin(name: string, delayMs: number): { plugin: Plugin; finished: () => boolean } {
+  let done = false;
+  const plugin: Plugin = {
+    name,
+    version: '1.0.0',
+    async onLoad(): Promise<void> {
+      await sleep(delayMs);
+      done = true;
+    },
+  };
+  return { plugin, finished: () => done };
+}
+```
+
+A fresh `new PluginManager('/tmp/alexi-activation-test')` is spun up in `beforeEach`. No teardown is needed because the manager is a local reference — nothing is persisted and no process-wide singleton is touched.
+
+### Minimum coverage
+
+The suite pins seven invariants. Each one maps to a line in the fix diff; a refactor that drops any one of these must flip a red test.
+
+1. **`resolves immediately when no plugins are activating`.** `await manager.ensureActivated()` under 50 ms AND `manager.isActivated() === true`. Pins the fast path for the common post-startup case so the gate stays zero-cost on every subsequent agent turn.
+2. **`awaits a slow onLoad before returning (heisenbug repro)`.** Start `manager.load(slowPlugin(..., 100))` without `await`, flush the microtask queue with `await sleep(0)`, then assert `manager.isActivated() === false` BEFORE `ensureActivated` and `finished() === true` AFTER. This is the literal reproduction of the race the fix closes — if `ensureActivated` returned early, `finished()` would still be `false`.
+3. **`reports the owning plugin while activation is in flight`.** A plugin declaring `tools: [{ name: 'owned_tool', ... }]` under a slow `onLoad` must surface via `manager.findPluginForTool('owned_tool')` as `{ pluginName: 'owner-plugin', activating: true }` DURING the hook and `{ activating: false }` after `load` resolves. Pins the ownership resolution path through `state.plugin.tools?.some(...)` — the branch that handles the "advertised but not yet registered" case.
+4. **`collapses concurrent ensureActivated() calls onto one activation`.** Three parallel `manager.ensureActivated()` calls against a single 60 ms activation finish in under 150 ms. If each call awaited its own copy of `onLoad`, the elapsed time would stack to 180 ms. Pins the `state.activationPromise` sharing contract.
+5. **`ignores disabled plugins so they cannot stall the gate`.** Load a slow plugin (200 ms `onLoad`), `manager.disable('slow', { force: true })` before the gate check, and assert `ensureActivated` completes in under 100 ms. Disabled plugins are not advertised to the model, so their activation state MUST NOT block tool dispatch. Pins the `if (!state.enabled) continue` branch in `ensureActivated`.
+6. **`resolves cleanly when the plugin has no onLoad hook`.** A plugin without `onLoad` loads instantly; `ensureActivated` returns in under 20 ms and `isActivated` is `true`. Pins the branch that never creates an `activationPromise`.
+7. **`does not get stuck when onLoad throws`.** A plugin whose `onLoad` throws after 20 ms must settle the gate — `manager.load(plugin)` returns `{ success: false, ... }` AND the subsequent `ensureActivated` returns in under 50 ms AND `isActivated === true`. Pins the `finally` block that clears `activating` regardless of outcome: a thrown `onLoad` must not leave the plugin in a perpetually-activating state. The final assertion also covers `findPluginForTool('does_not_exist') === undefined` (unknown tool fast path).
+
+### Pitfalls
+
+- **Do NOT `await manager.load(plugin)` before asserting the race window.** The whole point of the heisenbug is that the agent loop fires a tool call BEFORE `load()` has resolved. Start the load as `const loadPromise = manager.load(plugin); await sleep(0);` and only `await loadPromise` at the end of the test. The `await sleep(0)` is critical — without it, the microtask queue has not run yet and `state.activating` has not been flipped from `false` to `true`.
+- **Do NOT reach into `(manager as any).plugins` to assert activation state.** The suite deliberately exercises only the public `ensureActivated` / `isActivated` / `findPluginForTool` surface. A test that peeks at private state will not catch a public-API refactor that removes `findPluginForTool`'s branch for `state.plugin.tools?.some(...)`.
+- **Keep delays small but non-zero.** Values in the 20–200 ms range are large enough that the gate observably waits, but small enough that the full suite runs under one second even on slow CI. The sub-50 ms "fast path" assertions have enough slack to tolerate CI jitter without ever reaching the full `onLoad` delay.
+- **`Promise.allSettled`, not `Promise.all`.** The "does not get stuck when onLoad throws" test depends on `ensureActivated` using `allSettled` internally — a refactor that switches to `all` would make this test flip from "settles in under 50 ms" to "rejects with the plugin's error". If `all` is ever intentionally re-introduced, the test's expectation must be updated to `expect(ensureActivated()).rejects.toThrow('boom')`, which is a strictly weaker contract.
+- **The suite is independent of the registry.** It drives `PluginManager` directly and does NOT touch `src/tool/registry.ts` or `src/core/agenticChat.ts`. The per-dispatch `checkToolActivation` guard and the top-of-loop `ensurePluginsActivated` call site are integration surfaces — they are covered elsewhere via the agent-loop tests. Keep the activation-race suite scoped to the plugin manager so it stays fast and does not depend on the agent harness.
+
+See [docs/ARCHITECTURE.md — Plugin Activation Gate (`src/plugin/index.ts`, `src/tool/registry.ts`)](ARCHITECTURE.md#plugin-activation-gate-srcpluginindexts-srctoolregistryts) for the architectural rationale and [docs/CONTRIBUTING.md — Plugin activation gate contract (`PluginManager.ensureActivated` / `checkToolActivation`)](CONTRIBUTING.md#plugin-activation-gate-contract-pluginmanagerensureactivated--checktoolactivation) for the invariants a reviewer must preserve when touching this code.
+
+### Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)
+
+`src/mcp/__tests__/auth-telemetry.test.ts` (101 lines, 7 cases) pins the three invariants of `McpAuthTelemetry` (`src/mcp/auth-telemetry.ts`). The suite is pure — no `vi.mock`, no temp directory, no I/O. It uses a tiny in-memory recorder and an injectable clock so `durationMs` assertions are deterministic.
+
+**Shared fixture.** A `recorder()` helper returns `{ events, emit }`. The `emit` is the `EmitFn` passed to the tracker; `events` is the array every emitted `SignInEvent` is pushed into, so each case can match against the full ordered sequence:
+
+```typescript
+function recorder(): { events: SignInEvent[]; emit: (e: SignInEvent) => void } {
+  const events: SignInEvent[] = [];
+  return { events, emit: (e) => events.push(e) };
+}
+```
+
+**Injectable clock.** Each case constructs the tracker as `new McpAuthTelemetry(emit, () => <fixedTime>)` so the recorded `durationMs` is a function of controllable timestamps rather than wall-clock skew. The sixth case flips a mutable `let clock = 1000` to `1750` between `start` and `complete` to assert `durationMs === 750`.
+
+**Minimum coverage.**
+
+1. **Successful start/complete pair.** `start('flow-1', 'server-a')` then `complete('flow-1', 'success')` emits exactly two events, in the expected order, and leaves `inflightCount() === 0`.
+2. **Displacement.** Starting a second flow for the SAME `serverId` auto-completes the first with `outcome: 'displaced'` BEFORE the second `start` event is emitted. The ordered sequence `start:flow-1 → complete:flow-1:displaced → start:flow-2` is asserted via `events.map(e => '${e.kind}:${e.flowId}:${e.outcome ?? ''}')`.
+3. **No cross-server displacement.** Starting flows for `server-a` and `server-b` concurrently produces two `start` events only (no `complete` from displacement). `inflightCount() === 2`.
+4. **Idempotent `complete`.** A second `complete` call for the same `flowId` is a silent no-op — the suite asserts `events` has exactly 2 entries after `complete(..., 'failure')` + `complete(..., 'success')`, and the recorded outcome is the FIRST one.
+5. **`shutdown()` closes outstanding flows as `interrupt`.** `start('flow-1', ...)` + `start('flow-2', ...)` + `shutdown()` emits two `complete` events, both with `outcome: 'interrupt'`, and `inflightCount() === 0`.
+6. **`durationMs` is wall-clock from start to complete.** Advance the injectable clock between `start` and `complete`; assert `complete.durationMs === 750` exactly.
+7. **`complete()` for an unknown flow is silently ignored.** No events emitted — the tracker never records a `start` so there is nothing to pair.
+
+**Pitfalls.**
+
+- **Do not share recorders across cases.** Each `it(…)` constructs a fresh `recorder()` + `McpAuthTelemetry`. Reusing a recorder would leak events from the previous case into the sequence assertion.
+- **Assert on the event sequence, not just the final state.** `inflightCount()` reports the current gauge, but the pairing contract is a property of the emitted stream. The displacement case specifically asserts the ORDER of `start → complete:displaced → start`, not just that two start events eventually landed.
+- **Do not re-import `src/mcp/auth-telemetry.ts` across cases.** The module exports a class, not a singleton — each case constructs its own instance. A regression that introduced module-local state would be caught by the "no cross-server displacement" case.
+
+### Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)
+
+`src/mcp/__tests__/oauth-callback.test.ts` (61 lines, 5 cases across two `describe` blocks) pins the scheme allow-list exported by `src/mcp/oauth-callback.ts`. The suite exercises `assertHttpUrl` directly and gates `startMcpOAuth` against the launcher — actually spawning `xdg-open` / `open` / `start` in CI would be flaky and platform-specific, so only the pre-launcher rejection path is covered here.
+
+**Minimum coverage for `assertHttpUrl`.**
+
+1. **`http:` and `https:` are accepted.** `assertHttpUrl('http://example.com', 'authorization_endpoint').href === 'http://example.com/'`; `assertHttpUrl('https://auth.example.com/oauth/authorize', 'authorization_endpoint').href` round-trips verbatim. The returned `URL` is the parsed object, usable by downstream OAuth code.
+2. **Empty and non-URL inputs reject with the label.** `assertHttpUrl('', 'authorization_endpoint')` throws `/authorization_endpoint/`; `assertHttpUrl('not a url', 'token_endpoint')` throws `/token_endpoint/`. The field label is the key operator-facing hint for identifying which discovery-metadata field failed.
+3. **Dangerous schemes reject with `must use http or https`.** A parametrised loop asserts over five known hostile schemes: `file:///etc/hosts`, `javascript:alert(1)`, `ms-msdt:/id PCWDiagnostic`, `data:text/html,<script>alert(1)</script>`, `vbscript:msgbox(1)`. Each throws a message containing `must use http or https`.
+4. **UNC paths reject BEFORE `URL` parse.** `\\server\share\file.html` (Windows UNC) and `//server/share/file.html` both throw `must use http or https`. The check is explicit because some Node versions on Windows normalise UNC into a valid `file:` URL post-parse, which would bypass a scheme check that only inspected `url.protocol`.
+
+**Minimum coverage for `startMcpOAuth`.**
+
+5. **Non-http(s) URLs reject before the launcher spawns.** `startMcpOAuth('file:///etc/hosts')` rejects with `/http or https/`; `startMcpOAuth('javascript:alert(1)')` rejects with `/http or https/`; `startMcpOAuth('')` rejects with `/not a valid URL/`. The error surfaces *before* `openUrl` is called, so a bad URL never round-trips through logging / telemetry.
+6. **The configured label surfaces in the error.** `startMcpOAuth('file:///etc/hosts', { label: 'authorization_endpoint' })` rejects with `/authorization_endpoint/`, so a nested OAuth-discovery parse localises to the offending field.
+
+**Pitfalls.**
+
+- **Do NOT exercise `openUrl` directly in this suite.** `startMcpOAuth` validates first, so the suite needs to assert only on the pre-spawn rejection path. A test that attempts to spawn a browser subprocess in CI will time out on headless workers.
+- **Keep the dangerous-scheme list in sync with the implementation.** The source file enumerates the known-hostile schemes in a module-level comment (CVE-2022-30190 "Follina" for `ms-msdt:`, XSS for `javascript:` and `data:`, local file disclosure for `file:`); when adding a new scheme to the rejection list, extend both the suite's loop AND the module docblock.
+- **Match on the message substring, not the full string.** Use `/must use http or https/` and `/authorization_endpoint/` regex matchers rather than exact string equality — the error-message format may evolve (e.g. adding the offending URL to the message) and the suite should only pin the substrings operators actually read.
+
+### Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)
+
+`tests/mcp/sse-probe.test.ts` (102 lines, 11 cases across three `describe` blocks) covers `classifyProbeContentType`, `isSseContentType`, and the newer `ScopedProbeFetch` helper (`src/mcp/sse-probe.ts`). The suite is pure — no `vi.mock`, no network, no temp directory.
+
+**`classifyProbeContentType` cases.** Six cases parameterise the content-type matrix:
+
+1. Canonical `text/event-stream` classifies as `'sse'`.
+2. Case-varying `Text/Event-Stream` and `TEXT/EVENT-STREAM` classify as `'sse'` — classification is case-insensitive.
+3. Trailing parameters (`text/event-stream; charset=utf-8`) are stripped before matching.
+4. `application/json` classifies as `'json'` (streamable HTTP transport).
+5. Unrelated types (`text/html`, `application/xml`) classify as `'other'`.
+6. Missing / `null` / `undefined` / empty-string content types classify as `'other'` — defensive against SDKs that omit the header on error responses.
+
+**`isSseContentType` cases.** Two cases confirm the predicate wraps the classifier correctly for the common "am I talking to an SSE endpoint?" check.
+
+**`ScopedProbeFetch` cases.** The new cases cover the scoping contract introduced in the 2026-10-25 upstream sync (ports kilocode `432462088` / `70354f039`):
+
+7. **The initial URL is owned.** `new ScopedProbeFetch('https://mcp.example.com/sse').owns('https://mcp.example.com/sse') === true`.
+8. **Unrelated URLs are NOT owned.** The scoped probe does not claim ownership of `https://sap-aicore.example.com/v2/inference` or an unrelated MCP endpoint — this is the direct regression guard against the "leaked fetch interception" bug the upstream commit names in its message. Pre-fix, the probe installed a global fetch wrapper that intercepted EVERY concurrent request made by the process, including unrelated SAP AI Core traffic.
+9. **Redirect hops stay scoped.** `recordRedirect('https://mcp.example.com/sse/v2')` adds the hop to the owned-URL set; subsequent `owns(hop)` returns `true`, but owns on `https://unrelated.example.com` still returns `false`.
+10. **URL normalisation ignores fragments.** `#fragment` is stripped before scope matching — fetch never sees the fragment, so a `Location:` header that adds one must not break scope recognition.
+11. **Case-varying schemes still match.** `URL` already lower-cases scheme and host, but the normalisation is explicit so a caller passing a pre-formatted string (unusual, but possible) does not trip the scope check.
+
+**Pitfalls.**
+
+- **Test ownership through `owns`, not by inspecting the private Set.** `snapshot()` is exposed for test assertions and is the sanctioned way to inspect state. The private `visited` field is implementation detail.
+- **Do not install a global `fetch` wrapper in this suite.** `ScopedProbeFetch` is a pure in-memory bookkeeping helper — the actual fetch-interception wiring lives in follow-up code paths. Mocking `globalThis.fetch` here would conflate the two layers and leak the mock across parallel test files.
+- **Keep the `URL.canParse` fallback test honest.** The private `normalizeUrl` falls back to the raw string when `URL.canParse(input)` returns `false`. A regression that silently coerces unparseable strings would evade scope checks. The suite's "owns a non-URL string" scenario relies on this fallback staying deterministic.
+
+### Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)
+
+Added in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). A 57-line pure-function test suite that pins the six shape contracts enforced by `normalizeOutputSchema` (`src/mcp/client.ts:717-734`), the normaliser that lets MCP servers advertise tools whose `outputSchema` is not a root object. Co-located with the module under `src/mcp/__tests__/` so it ships alongside the implementation and runs under the same `vitest` sweep as the rest of the MCP suite.
+
+### Why normalise at all
+
+MCP servers in the wild emit a mix of `outputSchema` shapes: root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: 'string'`, `type: 'number'`), or no schema at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object — a `{ type: 'array', items: ... }` schema would be filtered out at registration time with no actionable error. The normaliser wraps non-object roots into a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape; the suite audits that six distinct input shapes produce the right six outputs.
+
+### Minimum coverage (the six-case shape audit)
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { normalizeOutputSchema } from '../client.js';
+
+describe('normalizeOutputSchema', () => {
+  it('returns undefined for non-object input', () => {
+    expect(normalizeOutputSchema(undefined)).toBeUndefined();
+    expect(normalizeOutputSchema(null)).toBeUndefined();
+    expect(normalizeOutputSchema('string')).toBeUndefined();
+    expect(normalizeOutputSchema(42)).toBeUndefined();
+  });
+
+  it('passes root object schemas through unchanged', () => {
+    const schema = { type: 'object', properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('passes schemas with properties through even without explicit type', () => {
+    const schema = { properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('wraps array schemas under properties.result', () => {
+    const schema = { type: 'array', items: { type: 'string' } };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+
+  it('wraps primitive schemas under properties.result', () => {
+    expect(normalizeOutputSchema({ type: 'string' })).toEqual({
+      type: 'object',
+      properties: { result: { type: 'string' } },
+      required: ['result'],
+    });
+  });
+
+  it('wraps union (anyOf) schemas under properties.result', () => {
+    const schema = { anyOf: [{ type: 'string' }, { type: 'number' }] };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+});
+```
+
+### Pitfalls
+
+- **Do NOT drop the "passes-with-properties-only" case.** The `{ properties: {...} }` without explicit `type: 'object'` branch is a real-world shape — some MCP servers omit `type` when `properties` is present, assuming the JSON Schema default. The normaliser treats that branch as a root object and returns the schema verbatim; a regression that normalised it would wrap a perfectly valid root schema under `properties.result` and break downstream tooling.
+- **Do NOT replace the primitive case with a parametrised loop over every primitive.** A single `{ type: 'string' }` case is enough to pin the wrap path; iterating over `['string', 'number', 'boolean', 'integer']` just inflates the suite without exercising a different code path (the normaliser's dispatch does not care about the primitive's own `type` string).
+- **`undefined` vs `null` vs primitive are the same branch.** The suite covers all four values in a single `it` block because the module's guard `if (!schema || typeof schema !== 'object')` collapses them. Splitting them into four `it` blocks is noise.
+- **Assert `.toEqual(...)` not `.toMatchObject(...)` for the wrap cases.** `toMatchObject` would silently accept extra keys on the output; `toEqual` pins the exact `{ type, properties, required }` triple so a future addition (e.g. `description` or `title`) surfaces as a test failure that forces the author to decide whether the addition is intentional.

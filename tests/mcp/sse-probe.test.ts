@@ -9,7 +9,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { classifyProbeContentType, isSseContentType } from '../../src/mcp/sse-probe.js';
+import {
+  classifyProbeContentType,
+  isSseContentType,
+  ScopedProbeFetch,
+} from '../../src/mcp/sse-probe.js';
 
 describe('sse-probe / classifyProbeContentType', () => {
   it('classifies canonical text/event-stream as sse', () => {
@@ -53,5 +57,46 @@ describe('sse-probe / isSseContentType', () => {
     expect(isSseContentType('application/json')).toBe(false);
     expect(isSseContentType('text/html')).toBe(false);
     expect(isSseContentType(null)).toBe(false);
+  });
+});
+
+describe('sse-probe / ScopedProbeFetch', () => {
+  it('owns the initial probe URL', () => {
+    const scope = new ScopedProbeFetch('https://mcp.example.com/sse');
+    expect(scope.owns('https://mcp.example.com/sse')).toBe(true);
+  });
+
+  it('does NOT own unrelated URLs (fix for leaked fetch interception)', () => {
+    const scope = new ScopedProbeFetch('https://mcp.example.com/sse');
+    expect(scope.owns('https://sap-aicore.example.com/v2/inference')).toBe(false);
+    expect(scope.owns('https://other-mcp.example.com/sse')).toBe(false);
+  });
+
+  it('tracks redirect hops so a redirected probe stays scoped', () => {
+    const scope = new ScopedProbeFetch('https://mcp.example.com/sse');
+    scope.recordRedirect('https://mcp.example.com/sse/v2');
+    expect(scope.owns('https://mcp.example.com/sse/v2')).toBe(true);
+    // Still does not leak to unrelated endpoints.
+    expect(scope.owns('https://unrelated.example.com')).toBe(false);
+  });
+
+  it('normalises fragments and scheme casing', () => {
+    const scope = new ScopedProbeFetch('HTTPS://mcp.example.com/sse#foo');
+    expect(scope.owns('https://mcp.example.com/sse')).toBe(true);
+    expect(scope.owns('https://mcp.example.com/sse#bar')).toBe(true);
+  });
+
+  it('accepts URL instances', () => {
+    const scope = new ScopedProbeFetch('https://mcp.example.com/sse');
+    expect(scope.owns(new URL('https://mcp.example.com/sse'))).toBe(true);
+  });
+
+  it('exposes a snapshot for debugging / tests', () => {
+    const scope = new ScopedProbeFetch('https://mcp.example.com/sse');
+    scope.recordRedirect('https://mcp.example.com/sse/v2');
+    const snap = scope.snapshot();
+    expect(snap).toHaveLength(2);
+    expect(snap).toContain('https://mcp.example.com/sse');
+    expect(snap).toContain('https://mcp.example.com/sse/v2');
   });
 });
