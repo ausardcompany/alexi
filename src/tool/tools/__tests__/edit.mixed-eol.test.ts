@@ -25,8 +25,12 @@ async function runEdit(
   ctx: MinimalContext,
   params: { filePath: string; oldString: string; newString: string; replaceAll?: boolean }
 ) {
+  // Use executeUnsafe so the test does not depend on the default `ask`
+  // permission rule for `write` (which has no interactive listener in a
+  // test run and would otherwise time out and reject every call).
+  // Mirrors the pattern in edit.agentsmd.test.ts.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const result = await (editTool as any).execute(params, ctx);
+  const result = await (editTool as any).executeUnsafe(params, ctx);
   return result;
 }
 

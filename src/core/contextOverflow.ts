@@ -42,6 +42,11 @@ export const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /input.*too.long/i,
   /request.*too.*large/i,
   /prompt.*too.*long/i,
+  // Added from upstream opencode `09a1db3`: some providers return
+  // "please reduce the length of ..." in the error message when the
+  // input exceeds the context window. The literal string is distinctive
+  // enough that the false-positive risk is negligible.
+  /reduce the length/i,
 ];
 
 /**

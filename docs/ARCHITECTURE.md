@@ -598,12 +598,24 @@ flowchart TB
 When the LLM returns a context-length error, the agentic chat detects it via pattern matching and triggers reactive compaction:
 
 ```typescript
-// Error patterns detected:
+// Error patterns detected (curated — see src/core/contextOverflow.ts):
 const CONTEXT_OVERFLOW_PATTERNS = [
-  /context.length/i,
+  /context_length_exceeded/i,
+  /max_tokens_exceeded/i,
+  /too_many_tokens/i,
+  /context[\s_]window/i,
+  /context[\s_]limit/i,
+  /maximum[\s_]context([\s_]length)?/i,
+  /exceeds[\s_]the[\s_]context/i,
   /context.*exceeded/i,
   /token.*limit.*exceeded/i,
-  /max_tokens_exceeded/i,
+  /input.*too.long/i,
+  /request.*too.*large/i,
+  /prompt.*too.*long/i,
+  // Added 2026-10-23 (opencode `09a1db3`): some providers surface
+  // overflow as "please reduce the length of ..." in free-form error
+  // messages instead of a structured code.
+  /reduce the length/i,
   // ...
 ];
 
@@ -808,6 +820,80 @@ recordRouteOutcome(modelId, { kind: 'success' });
 **`ErrorBackoff` fatal flag.** `src/core/error-backoff.ts:210-217` recognises `ContentFilterError` alongside `FreeTierRateLimitError` in the permanent-failure branch of `recordError`, flipping `fatalNotified` so the circuit breaker short-circuits any further attempt on the same instance. The synchronous `isFatal(err?)` short-circuit (`error-backoff.ts:285-290`) returns `true` for a `ContentFilterError` on the first inspection — CLI renderers can decide synchronously whether to retry or surface the user-facing message without first calling `recordError`.
 
 **No route-health penalty, no cost under-count.** The check runs BEFORE `recordRouteOutcome(modelId, { kind: 'success' })`, so a filtered response does not spuriously reset the route failure counter. `provider.complete()` already reported usage BEFORE throwing, so the caller can still bill the prompt tokens the policy block consumed — the telemetry event carries `promptTokens` / `completionTokens` for the operator trace. The error object carries `partialText` when the model produced any output before the filter fired, so a surface that wants to show "model produced N tokens before the block" can read it off `(err as ContentFilterError & { partialText?: string }).partialText`.
+
+### Content-policy classification across provider families (issue #2134)
+
+The content-filter machinery above covers the SAP AI Core orchestration path that normalises every rejection into a `ContentFilterError` with the `content_filter` machine code. That path is sufficient for Alexi's single supported provider — but the error-backoff surface is also consumed by raw-fetch call sites, telemetry/logging helpers, and tests that stage upstream provider payloads directly. Before issue #2134 those payloads bypassed the fatal check and were retried against the same prompt until the budget was spent. `isContentPolicyError(err)` in [`src/core/error-backoff.ts:100-170`](../src/core/error-backoff.ts) closes the gap by covering four additional shapes:
+
+- **OpenAI**: `error.type === 'moderation'`, `error.code === 'content_policy_violation'`, HTTP `451` ("Unavailable For Legal Reasons" — reused by OpenAI for moderation blocks).
+- **Google (Gemini / Vertex)**: `finishReason === 'SAFETY'` or `finishReason === 'content-filter'`, and `promptFeedback.blockReason === 'SAFETY' | 'OTHER'`.
+- **Anthropic**: `error_type === 'content_policy'`, and `type === 'invalid_request_error'` with a `content_policy` message substring.
+- **Message-regex fallback** for raw string errors wrapped in bare `Error` objects without structured fields:
+
+  ```typescript
+  const CONTENT_POLICY_MESSAGE_RE =
+    /\bmoderation\b|content[_\s-]filter|content[_\s-]policy|\bsafety filter\b|\bsafety setting|safety_rating|\bsafety\b/i;
+  ```
+
+  Word boundaries bracket `moderation` and `safety` to avoid false positives on unrelated 5xx telemetry text like `safety-related` or `moderation-note`.
+
+`ErrorBackoff.recordError(statusCode?, err?)` and `ErrorBackoff.isFatal(err?)` consume `isContentPolicyError` alongside `isFreeTierRateLimitError`, so a content-policy rejection flips `fatalNotified` and short-circuits the retry loop identically regardless of which provider family staged the payload — the pre-existing `isContentFilterError` SAP-orchestration path is checked first and short-circuits before the broader detector pays any extra scan cost.
+
+```mermaid
+flowchart TB
+    Err[Provider error] --> ContentPolicy{isContentPolicyError?}
+    ContentPolicy -->|yes| Fatal1[fatal: true<br/>retryable: false<br/>type: content_policy]
+    ContentPolicy -->|no| Auth{isPermanentAuthFailure?}
+    Auth -->|yes| Fatal2[fatal: true<br/>type: auth]
+    Auth -->|no| FreeTier{isFreeTierRateLimitError?}
+    FreeTier -->|yes| Fatal3[fatal: true<br/>type: rate_limit]
+    FreeTier -->|no| Status{HTTP status?}
+    Status -->|451| Fatal1
+    Status -->|401/403| Fatal2
+    Status -->|400/422/other 4xx| Fatal4[fatal: true<br/>type: validation]
+    Status -->|429| Transient1[fatal: false<br/>type: rate_limit]
+    Status -->|5xx| Transient2[fatal: false<br/>type: network]
+    Status -->|none/other| MessageRe{NETWORK_MESSAGE_RE match?}
+    MessageRe -->|yes| Transient2
+    MessageRe -->|no| RateLimit{isRateLimitError /<br/>isXAICapacityError?}
+    RateLimit -->|yes| Transient1
+    RateLimit -->|no| Unknown[fatal: false<br/>retryable: true<br/>type: unknown]
+```
+
+**Stateless `classifyError(err): ErrorClassification` taxonomy.** `src/core/error-backoff.ts:559-617` folds any upstream error into a single `{ type, fatal, retryable, statusCode? }` record for callers that only need a one-line decision (telemetry attribution, user-facing error rendering, outer retry loops without session-level bookkeeping). The signature:
+
+```typescript
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+export function classifyError(err: unknown): ErrorClassification;
+```
+
+Precedence is most-specific first, matching the flowchart above. The function is deliberately stateless — retry-budget bookkeeping across multiple attempts stays with the `ErrorBackoff` instance. Both `ErrorType` and `ErrorClassification` are re-exported from [`src/providers/index.ts:405-410`](../src/providers/index.ts) so callers importing from the canonical providers surface get a single entry point.
+
+**Provider-attribution helpers.** Three thin wrappers in [`src/providers/index.ts:327-401`](../src/providers/index.ts) isolate the structural pattern per provider family for telemetry and logging paths that want to attribute a block to a specific provider:
+
+| Helper                            | Shapes covered                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| `isOpenAIContentPolicyError(err)` | HTTP `451`; `{ error: { type: 'moderation' } }`; `{ error: { code: 'content_policy_violation' } }` |
+| `isGoogleSafetyError(err)`        | `finishReason === 'SAFETY'`; `promptFeedback.blockReason === 'SAFETY'`         |
+| `isAnthropicContentPolicyError`   | `error_type === 'content_policy'`; `invalid_request_error` + `content_policy` message |
+
+All three are subsumed by the generic `isContentPolicyError` for retry decisions; they exist purely for attribution. The generic detector is the single source of truth for `ErrorBackoff` and `classifyError`.
+
+**Non-retry contract pinned by regression suite.** [`tests/core/error-classification.test.ts`](../tests/core/error-classification.test.ts) (294 lines, 32 cases across four describe blocks) locks in: (1) every `classifyError` branch, (2) every content-policy message substring and shape plus negatives, (3) every provider-specific helper branch, and (4) that `ErrorBackoff.isFatal` short-circuits for a content-policy error from any provider family *without* a prior `recordError` call (and that a transient `503` or `ECONNRESET` does NOT flip the flag). See [docs/TESTING.md — Testing content-policy classification (issue #2134)](./TESTING.md#testing-content-policy-classification-issue-2134).
 
 ### Environment Details Fence
 
@@ -2212,6 +2298,82 @@ Contract:
 - `SessionReplay.replay(messages, opts)` hard-hides `displayRole: 'system'` even when `showSystemMessages: true`. Real `role: 'system'` messages (the actual system prompt) remain visible when that option is set.
 - `SessionManager.addMessage(role, content, tokens?, options?)` accepts either the raw `displayRole` string or an options object (`{ displayRole }`) as its fourth argument for backwards compatibility with three-argument call sites.
 - Auto-title generation (`activeSession.metadata.title` from the first user message) skips messages carrying any `displayRole` value, so hook payloads cannot end up as the session title.
+
+### Prompt Hook Model Resolution Cache (`src/hooks/index.ts`)
+
+Introduced in commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, merged 2026-10-24; resolves issue #2143). Prompt hooks that resolve model configuration on every invocation become expensive and noisy when the same model is reused across many hook calls inside a single agent step — routing lookups, deployment-registry hits, variant selection, and capability probes are all amortizable per step but were being redone per call. The cache lives in `src/hooks/index.ts` and is driven by the agent loop in `src/core/agenticChat.ts`.
+
+```typescript
+// src/hooks/index.ts
+export type ModelConfig = Record<string, unknown>;
+
+export function getModelForHook(
+  stepId: string,
+  modelName: string,
+  resolver: () => ModelConfig
+): ModelConfig;
+
+export function clearStepCache(stepId: string): void;
+```
+
+#### Keying scheme and lifetime
+
+The module-local `modelResolutionCache: Map<string, ModelConfig>` stores entries under the composite key `${stepId}:${modelName}`. The composite is deliberate:
+
+- Two different steps that happen to use the same `modelName` do NOT share state — a mid-session routing change that redirects `gpt-4o` to a different deployment on step N+1 is visible as a cache miss, not masked by a stale entry from step N.
+- A single step can resolve multiple models (routing + fallback + auxiliary task) without evicting entries from one another. The `getModelForHook` body is `O(1)` on hit, `O(resolver)` on miss, and never evicts.
+- `ModelConfig = Record<string, unknown>` is deliberately open — hook authors can thread arbitrary provider / deployment / capability fields through the cache without coupling it to a single provider shape. Callers are expected to produce the resolved object once and reuse it; the cache stores values by reference identity, so a subsequent lookup returns `===` the first result.
+
+`clearStepCache(stepId)` drops every entry whose key starts with `${stepId}:`. The implementation iterates `modelResolutionCache.keys()` and matches on the `${stepId}:` prefix — the trailing colon is load-bearing, because the naive `startsWith(stepId)` form would collapse `step-1` into `step-10` and drop both. The dedicated regression test (`tests/hooks/model-cache.test.ts` — `does NOT confuse a step id that is a prefix of another step id`) pins the correct behaviour. The function is idempotent on an unknown step id.
+
+#### Agent loop integration
+
+The `while (iterations < maxIterations)` body in `src/core/agenticChat.ts` tracks `let previousStepId: string | undefined` and clears the previous step's entries at the TOP of each iteration — the moment control returns to the loop head, regardless of whether the previous iteration completed normally, `continue`d, or threaded through one of the inline tool-call branches. A second clear fires once after the loop exits, so every `break` path (normal completion, loop detector, mistake tracker, stop hook, malformed-tool-call guard) still releases its cached entries.
+
+```mermaid
+flowchart TD
+    Enter["agenticChat() entry<br/>previousStepId = undefined"] --> Loop{"iterations < max?"}
+    Loop -- yes --> ClearPrev{"previousStepId<br/>defined?"}
+    ClearPrev -- yes --> Clear["clearStepCache(previousStepId)"]
+    ClearPrev -- no --> AssignId["sessionIdForStep = session.id ?? 'default'<br/>previousStepId = `${sessionId}:${iterations}`"]
+    Clear --> AssignId
+    AssignId --> Body["Step body:<br/>model.complete, tool calls,<br/>hook executions, ..."]
+    Body -- continue --> Loop
+    Body -- break --> PostLoop["clearStepCache(previousStepId)"]
+    Loop -- no --> PostLoop
+    PostLoop --> Return["return finalText"]
+```
+
+The two-point clear covers every exit without wrapping the ~600-line iteration body in a `try/finally`. The `let previousStepId` closure is intentional — a `try/finally` wrapping the body would need to reach past local variables declared in that body, and the loop head is where the next iteration's step id gets assigned anyway.
+
+#### Step-id composition
+
+```typescript
+const sessionIdForStep =
+  options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+previousStepId = `${sessionIdForStep}:${iterations}`;
+```
+
+The session id (when present) composed with the iteration number keeps the step id unique across concurrent sessions in the same process. Step N of session A and step N of session B therefore do NOT share cache entries — important for the server mode and for any in-process scenario where multiple agent loops run concurrently (sub-agent delegation, parallel task workers).
+
+Sessions without a bound `SessionManager` fall back to the literal `'default'` scope. This is safe within a single `agenticChat` invocation because the iteration number is monotonically increasing, so step N and step N+1 keys differ by the suffix. It is UNSAFE to run two anonymous (`'default'`-scoped) agent loops concurrently against the same cache; in practice every call site inside Alexi binds a session manager, and the anonymous path exists only for direct unit-test invocation.
+
+#### Test-only helpers (`@internal`)
+
+Two helpers are exported for tests:
+
+- `_resetModelResolutionCache(): void` — empties the full map. Used in `beforeEach` so each unit test starts from a clean slate.
+- `_modelResolutionCacheSize(): number` — returns the live entry count so tests can assert growth / eviction without peeking at module-private state.
+
+Production code must prefer `clearStepCache(stepId)` because the reset helper breaks concurrent-step isolation. The underscored names mark them as internal; agent-authored tooling should NOT depend on them.
+
+#### Hook-mock patches
+
+Four companion test files mock `../../src/hooks/index.js` and had to be updated so `agenticChat.ts`'s new `clearStepCache` import resolves against the mock surface: `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, and `tests/orchestrator-hooks.test.ts`. Each now exposes `clearStepCache: vi.fn()`. The `continueOnBlock.test.ts` mock additionally adds `getBlockCap: () => 8` to keep parity with the production module surface.
+
+#### Why not a `WeakMap` keyed by step object
+
+A `WeakMap<StepObject, Map<string, ModelConfig>>` would deliver the same lifetime guarantees without the explicit `clearStepCache` call, but it requires an actual step object to key on. The agent loop today does not materialize a `Step` struct — it tracks iteration state in locals — and introducing one just to anchor a `WeakMap` would be a larger refactor than the explicit-clear approach. The current design matches the upstream OpenCode PR and keeps the agent-loop diff to ~40 lines.
 
 ## Compaction System
 
@@ -9246,7 +9408,9 @@ Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream op
 
 ## Stream Event Classification (`src/providers/protocols/stream-events.ts`)
 
-Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). Extended in commit `a482d950` (ports SST OpenCode #58596 / #58608 / #58609) to cover the normalised-chunk shape consumed by the streaming orchestrator, not only raw SSE event decoders.
+
+SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind — image deltas, speech deltas, custom finish reasons — without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
 
 ### Public surface
 
@@ -9254,12 +9418,48 @@ Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream op
 - `isTypedStreamEvent(event): event is TypedStreamEvent` — narrows an arbitrary SSE payload; returns `false` for `null`, non-objects, and objects whose `type` field is missing or not a non-empty string.
 - `StreamEventClassification = 'known' | 'unknown' | 'untyped'`.
 - `classifyStreamEvent(event, knownTypes: ReadonlySet<string>): StreamEventClassification` — non-throwing classifier against a caller-supplied known set.
+- `KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>` — authoritative list of normalised `StreamChunk` fields the orchestrator knows how to handle today: `text`, `toolCalls`, `finishReason`, `usage`, `images`. Kept in sync with the `StreamChunk` interface at `src/providers/sapOrchestration.ts:238-250`.
+- `isRecognizedStreamChunk(chunk: unknown): boolean` — non-throwing, returns `true` iff the chunk is a non-null object carrying at least one field from `KNOWN_STREAM_CHUNK_FIELDS`.
+
+### Two-layer forward-compat net
+
+The module backs a two-layer net against forward-rolled provider SDKs:
+
+1. **Provider-level getter-dispatch guard (`src/providers/sapOrchestration.ts:1997-2019`).** The SAP AI SDK's `chunk.getDeltaContent()` and `chunk.getDeltaToolCalls()` dispatch internally on `event.type` and may throw when the current client version does not recognise a new event kind. The provider wraps both getter calls in a per-chunk `try/catch`; on decode error it emits `logger.warn('Unknown streaming event, skipping chunk (<model>): <formatError>')` and `continue`s to the next SDK chunk. One new event kind cannot abort the whole turn. Caller-visible errors (rate limit, auth, network) still escape via the outer `try/catch` because they surface on the iterator pull itself, not on getter dispatch.
+2. **Consumer-level recognised-chunk guard (`src/core/streamingOrchestrator.ts:546-561`).** When the SDK succeeds at normalising a chunk but the normalised shape carries only fields the orchestrator does not yet understand (e.g. a `StreamChunk` widened with an `audio` channel the renderer has not learned about), `isRecognizedStreamChunk(chunk)` returns `false`. The orchestrator logs `logger.warn('Unknown streaming chunk shape, skipping: <JSON>', { modelUsed })` and returns `{ value: { text: '' }, done: false }` so `for await` consumers naturally advance to the next pull.
+
+### Forward-compat flow
+
+```mermaid
+flowchart LR
+    SDK[SAP AI SDK chunk]
+    GetterTry{getDeltaContent / getDeltaToolCalls throws?}
+    WarnDecode[logger.warn 'Unknown streaming event, skipping chunk']
+    Continue[continue to next SDK chunk]
+    Normalised[Normalised StreamChunk]
+    RecognisedGuard{isRecognizedStreamChunk?}
+    WarnShape[logger.warn 'Unknown streaming chunk shape, skipping']
+    EmptyYield[yield text:'' passthrough]
+    Known[Accumulate fullText / usage]
+    Yield[Yield StreamChunk to consumer]
+
+    SDK --> GetterTry
+    GetterTry -->|throws| WarnDecode
+    WarnDecode --> Continue
+    GetterTry -->|returns| Normalised
+    Normalised --> RecognisedGuard
+    RecognisedGuard -->|false| WarnShape
+    WarnShape --> EmptyYield
+    RecognisedGuard -->|true| Known
+    Known --> Yield
+```
 
 ### Design notes
 
-- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` / `isRecognizedStreamChunk` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `warn` / `debug` and continue so the stream stays open for the next event.
 - Replaces the old `throw new Error('Unknown stream event: ...')` at every stream decoder.
 - Structural shape so the guard is portable across providers — no provider-specific `type` enumeration leaks into this module.
+- The `KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned by `tests/core/streaming-events.test.ts` so adding a new normalised channel (e.g. `audio`, `reasoning`) requires updating both the `StreamChunk` interface and the snapshot together — forgetting one half surfaces as a test failure instead of a silent miss.
 
 ## Transport Retry Classifier (`src/utils/retry.ts`)
 
@@ -10015,4 +10215,97 @@ flowchart TD
 ### Resource embed shape
 
 The embedded `resource` field in the formatter's input type was widened to `{ uri?: string; mimeType?: string; text?: string }` so the formatter can inline a `text/*` resource's body directly when the server supplies it. Non-text, non-image resources (e.g. `application/pdf`) render as a placeholder — the model knows the file exists without the orchestration layer rejecting the whole request.
+
+## MCP Output-Schema Normalisation (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). MCP servers in the wild emit a mix of `outputSchema` shapes — root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: "string"`, `type: "number"`), or no `outputSchema` at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object. `normalizeOutputSchema` wraps non-object roots in a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape so the runtime always has a `.properties` field to inspect, regardless of what the server declared.
+
+### Signature
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+### Dispatch
+
+```mermaid
+flowchart TD
+    In["schema: unknown"] --> NotObj{"typeof schema === 'object' && schema !== null?"}
+    NotObj -- no --> Undef["return undefined"]
+    NotObj -- yes --> AlreadyObject{"type === 'object'<br/>OR properties !== undefined?"}
+    AlreadyObject -- yes --> Passthrough["return schema verbatim"]
+    AlreadyObject -- no --> Wrap["return { type: 'object',<br/>properties: { result: schema },<br/>required: ['result'] }"]
+```
+
+### Why return `undefined` for non-object input
+
+Returning `undefined` for `null` / `string` / `number` / `undefined` input is deliberate: it lets call sites spread the result safely onto a tool definition — `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing, never a bogus wrapper. A `{}` fallback would misleadingly advertise an empty object schema to the model.
+
+### Why wrap under `properties.result` instead of `properties.value` or `properties.data`
+
+The literal key `result` was chosen to match opencode `c41c3a0` so a cross-project operator reading an MCP log sees the same wrapper on both sides. A matching `required: ['result']` is emitted alongside so JSON Schema consumers that treat `required` as the source of truth for mandatory fields see the wrapper as a non-optional field, not an opt-in extension.
+
+## MCP Client Connect De-duplication (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `8ecd6ad` for the dedup and `7b14ad4` for the parallel teardown). The `McpClientManager` kept a `connections: Map<string, McpConnection>` but had no guard against two concurrent `connect(config)` calls for the same server name — a config-change event that fired while `connectFromConfig()` was still running could spawn a second stdio child for the same server, resulting in zombie processes and double-register notifications. The fix adds an in-flight promise map keyed by server name; a second caller joins the first promise instead of spawning a parallel transport.
+
+### Internal state
+
+```typescript
+class McpClientManager {
+  private connections: Map<string, McpConnection> = new Map();
+  private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * In-flight connect() promises keyed by server name. Entry lifecycle:
+   * added when connect() begins, removed in its finally block regardless
+   * of outcome (resolve, reject, cancel).
+   */
+  private pendingConnects: Map<string, Promise<McpConnection>> = new Map();
+  // ...
+}
+```
+
+### `connect()` dispatch
+
+```mermaid
+sequenceDiagram
+    participant A as Caller A (startup)
+    participant B as Caller B (config observer)
+    participant Mgr as McpClientManager
+    participant Impl as connectImpl (handshake)
+
+    A->>Mgr: connect({ name: 'playwright', ... })
+    Mgr->>Mgr: pendingConnects.get('playwright') -> undefined
+    Mgr->>Impl: connectImpl(config, options)
+    Mgr->>Mgr: pendingConnects.set('playwright', task)
+    Mgr-->>A: Promise<McpConnection> (pending)
+
+    B->>Mgr: connect({ name: 'playwright', ... }) (concurrent)
+    Mgr->>Mgr: pendingConnects.get('playwright') -> inFlight
+    Mgr-->>B: return inFlight (SAME promise)
+
+    Impl-->>Mgr: resolves / rejects
+    Mgr->>Mgr: pendingConnects.delete('playwright') (finally)
+    Mgr-->>A: McpConnection
+    Mgr-->>B: McpConnection (same instance)
+```
+
+The public `connect()` method keeps its existing signature; the handshake body was extracted into a private `connectImpl(config, options)` so the dedup bookkeeping is a single-screen read instead of a nested `if` wrapped around ~400 lines of handshake. A `.finally()` block in the public method removes the pending entry on resolve, reject, and cancel paths alike, so a failed connect does not leave a stale cache entry.
+
+### `disconnectAll()` parallel teardown
+
+A sequential `for ... await disconnect(name)` loop was observed to add multi-second latency on exit when any one stdio child was slow to acknowledge `SIGTERM` — one hung server blocked every other server's teardown behind it. The loop is now:
+
+```typescript
+async disconnectAll(): Promise<void> {
+  const names = Array.from(this.connections.keys());
+  await Promise.allSettled(names.map((name) => this.disconnect(name)));
+}
+```
+
+`Promise.allSettled` is deliberate: a per-server teardown error should NOT propagate as a top-level rejection, because the caller is almost always on the shutdown path and surfacing a stray server misbehaviour there would mask the process exit code. Per-server errors are still logged by `disconnect()` itself; this layer is pure best-effort.
 
