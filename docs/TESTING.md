@@ -36,6 +36,8 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
+- [Testing structured MCP startup logging (`tests/mcp/startup-logger.test.ts`, `tests/mcp/client-integration.test.ts`)](#testing-structured-mcp-startup-logging-testsmcpstartup-loggertestts-testsmcpclient-integrationtestts)
+
 - [Testing subagent edit-tool configuration inheritance (`tests/agent/subagent-tool-inheritance.test.ts`, issue #2123)](#testing-subagent-edit-tool-configuration-inheritance-testsagentsubagent-tool-inheritancetestts-issue-2123)
 
 - [Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)](#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts)
@@ -14127,6 +14129,111 @@ afterEach(() => {
 - **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
 - **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
 - **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
+
+## Testing structured MCP startup logging (`tests/mcp/startup-logger.test.ts`, `tests/mcp/client-integration.test.ts`)
+
+Introduced by commit `0f3be963 feat(core): structured MCP startup logging with phases and stderr context`. The logger facade in `src/mcp/startup-logger.ts` is a tiny stateless layer, so coverage splits cleanly into two halves: a unit suite that pins the exact log line shape and level selection, and an integration suite that drives the real connect flow through a subprocess MCP fixture to pin the ordered sequence of phase events.
+
+### Unit tests (`tests/mcp/startup-logger.test.ts`)
+
+The seven unit cases mock `../../src/utils/logger.js` so the test can assert on the exact arguments passed to `logger.info`, `logger.debug`, `logger.warn`, and `logger.error`. The format itself is part of the contract — operator tooling (grep rules, dashboards, future `alexi logs mcp` subcommand) depends on the stable `MCP startup [<server>] phase=... attempt=... ...` prefix, so changing the shape without updating consumers is a semantic regression.
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/utils/logger.js', () => ({
+  logger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+  formatError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+}));
+
+import { logger } from '../../src/utils/logger.js';
+import {
+  logPhaseEnd,
+  logPhaseStart,
+  logRetryScheduled,
+  logStartupError,
+  type StartupPhase,
+} from '../../src/mcp/startup-logger.js';
+
+const base: StartupPhase = {
+  server: 'test-server',
+  phase: 'spawn',
+  attempt: 1,
+  startedAt: 1_000_000,
+};
+```
+
+Coverage axes:
+
+1. **Line shape on first attempt.** `logPhaseStart(base)` emits exactly `MCP startup [test-server] phase=spawn attempt=1 started` through `logger.info`. `logger.debug` MUST NOT be called. Pins the "first attempt renders at info" branch.
+2. **Duration formatting.** `logPhaseEnd({ ...base, phase: 'initialize' }, 234)` emits `MCP startup [test-server] phase=initialize attempt=1 completed in 234ms`. The `234ms` suffix is the operator-visible signal that a phase is slow; a refactor that drops the trailing `ms`, inserts a space, or reformats to seconds breaks grep rules.
+3. **Retry attempts downgrade to `debug`.** For `attempt: 3` both `logPhaseStart` and `logPhaseEnd` route through `logger.debug` and `logger.info` is never called. This is the "a server that eventually succeeds after a blip must not flood operator logs" contract.
+4. **`stderr` tail appended when present.** `logStartupError('test-server', 'spawn', new Error('spawn ENOENT'), 'Error: Cannot find module "foo"\n    at Module._resolveFilename')` emits a single `logger.error` line containing both the `MCP startup [test-server] phase=spawn failed: spawn ENOENT` prefix and `stderr: Error: Cannot find module "foo"`. The `stderr:` separator is a UX contract — operators grep for `^stderr:` to extract the server's own output.
+5. **Whitespace-only stderr is treated as empty.** `logStartupError('test-server', 'initialize', new Error('boom'), '   \n')` emits exactly `MCP startup [test-server] phase=initialize failed: boom` and `line.not.toContain('stderr:')`. Prevents an all-whitespace stderr from producing a visually noisy but informationless `stderr:  ` line.
+6. **Large stderr buffers are truncated.** `logStartupError('test-server', 'spawn', new Error('boom'), 'x'.repeat(5000))` produces a line shorter than the raw 5000-char buffer and containing `truncated`. Pins the 2000-byte tail cap in the private `tailStderr` helper so a `--verbose` MCP server cannot blow up a single log line.
+7. **Non-`Error` throwables are stringified via `formatError`.** `logStartupError('test-server', 'capabilities', 'raw string failure')` emits `MCP startup [test-server] phase=capabilities failed: raw string failure`. Guards the `formatError` indirection against a refactor that defaults to `String(err)` and loses the `err.message` branch for real `Error` instances.
+8. **Retry schedule.** `logRetryScheduled('test-server', 2, 2000)` emits exactly `MCP startup [test-server] retrying in 2000ms (attempt 2)` through `logger.warn`. The `warn` level mirrors the pre-existing free-form retry log so the two surfaces stay level-consistent.
+
+### Integration tests (`tests/mcp/client-integration.test.ts`)
+
+Two new cases in the pre-existing integration suite drive the real subprocess fixture (`tests/fixtures/slow-mcp-server.js`) through `McpClientManager.connect` with the logger spied. These catch wiring regressions that a mocked unit suite cannot — a refactor that routes a phase through the wrong helper, drops the `ready:completed` summary, or forgets to call `logStartupError` on a timeout would pass unit tests and still break operator visibility.
+
+```typescript
+it('emits structured startup phase logs in order for a successful connect', async () => {
+  manager = new McpClientManager();
+
+  const infoLines: string[] = [];
+  const infoSpy = vi.spyOn(logger, 'info').mockImplementation((msg: string) => {
+    infoLines.push(msg);
+  });
+
+  try {
+    const connection = await manager.connect(fixtureConfig('phased', 0, 5000));
+    expect(connection.status).toBe('connected');
+
+    const startupLines = infoLines.filter((l) => l.startsWith('MCP startup ['));
+    const phaseEvents = startupLines.map((l) => {
+      const match = l.match(/phase=(\w+) attempt=(\d+) (started|completed)/);
+      return match ? `${match[1]}:${match[3]}` : l;
+    });
+    expect(phaseEvents).toEqual([
+      'spawn:started',
+      'spawn:completed',
+      'initialize:started',
+      'initialize:completed',
+      'capabilities:started',
+      'capabilities:completed',
+      'ready:completed',
+    ]);
+
+    for (const line of startupLines) {
+      expect(line).toContain('[phased]');
+    }
+  } finally {
+    infoSpy.mockRestore();
+  }
+}, 15000);
+```
+
+Coverage axes:
+
+1. **Exact phase-event sequence.** The seven-element array `['spawn:started', 'spawn:completed', 'initialize:started', 'initialize:completed', 'capabilities:started', 'capabilities:completed', 'ready:completed']` is the connect-flow contract. `ready` appears only as `:completed` because the outer loop emits a single phase-end summarising the whole attempt — asserting `.toEqual(...)` catches both reordering (e.g. `capabilities:started` emitted before `initialize:completed`) and missing / duplicated events (e.g. a double `spawn:completed` from an accidental `logPhaseEnd` in a retry path).
+2. **Server-name tag on every line.** The `for (const line of startupLines) { expect(line).toContain('[phased]'); }` loop pins the invariant that no phase helper drops the `[<server>]` tag. A regression that formats one line without the tag breaks per-server grep.
+3. **Timeout surfaces under the right phase.** The companion case `emits a structured startup error with the phase name on timeout` drives a `STARTUP_DELAY_MS=5000` fixture against a 1500 ms client budget and asserts the single `logger.error` structured line contains `phase=initialize`, `[phased-timeout]`, and the `startup timeout for server 'phased-timeout'` message produced by `formatTimeoutError`. Pins that the manager routes the `AbortController` timeout through `logStartupError(..., 'initialize', ...)` and not the generic retry log.
+
+### Patterns worth internalising
+
+1. **Mock `src/utils/logger.js` at the module boundary, including `formatError`.** The logger module exports both `logger` and `formatError`. The vi.mock factory must return both — otherwise `logStartupError` imports a real `formatError` that walks the import graph and the test either fails on hoist order or stringifies errors differently from production.
+2. **Spy on `logger.info` and filter by prefix in integration tests.** Alexi's connect flow emits unrelated info logs (`Connected to MCP server: ...`, `Discovered N tools`). Filtering `infoLines.filter((l) => l.startsWith('MCP startup ['))` isolates the structured stream so additions to the human-readable log stream do not break the phase-sequence assertion.
+3. **Pin phase sequences with `.toEqual([...])`, not length checks.** `expect(phaseEvents).toHaveLength(7)` would pass under a reorder that moved `capabilities:completed` before `initialize:completed`. The ordered array is the contract; a length-only check is a correctness regression.
+4. **Keep `tests/fixtures/slow-mcp-server.js` as the single source of subprocess scenarios.** The fixture is driven entirely by `STARTUP_DELAY_MS` (0 for fast, N > 0 for slow, N < 0 for hung). Adding scenario-specific fixtures proliferates process-startup cost and makes the suite flakier under cold CI; extend the single fixture with new env-var levers instead.
+5. **Cap integration cases at a 15s `timeout`.** The pre-existing suite uses `}, 15000)` on every integration case. The structured-logging cases follow the same cap so a hung spawn fails fast instead of soaking a 60s default Vitest timeout.
+6. **Do NOT assert on `duration ms` numeric values.** The exact `completed in Xms` number is non-deterministic across runners. The integration suite extracts only the `started` / `completed` discriminator from each line; the exact ms formatting is covered by the unit case that passes `234` as the fixed duration.
 
 ## Testing the plugin activation gate (`tests/plugin/activation-race.test.ts`)
 
