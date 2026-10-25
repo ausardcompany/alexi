@@ -9170,7 +9170,7 @@ Semantics:
 
 ## Stream Event Guards API
 
-Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). The `src/providers/protocols/stream-events.ts` module exposes forward-compatible SSE-event guards so a benign forward-rolled upstream provider does not turn into a hard failure.
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). Extended in commit `a482d950` (ports the SST OpenCode #58596 / #58608 / #58609 discipline) to cover the normalised-chunk shape consumed by the streaming orchestrator, not only raw SSE event decoders. The `src/providers/protocols/stream-events.ts` module exposes forward-compatible guards so a benign forward-rolled upstream provider never turns into a hard failure.
 
 ```typescript
 export interface TypedStreamEvent {
@@ -9186,12 +9186,32 @@ export function classifyStreamEvent(
   event: unknown,
   knownTypes: ReadonlySet<string>
 ): StreamEventClassification;
+
+/**
+ * The set of fields a normalised StreamChunk may carry. Keep in sync with
+ * the StreamChunk interface at src/providers/sapOrchestration.ts:238-250.
+ * Adding a new normalised channel (e.g. audio, reasoning) MUST update both
+ * halves; forgetting only causes a benign warn log, not a crash.
+ */
+export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>;
+
+/**
+ * Returns true when a stream chunk carries at least one field the
+ * orchestrator knows how to handle. Non-throwing by contract.
+ */
+export function isRecognizedStreamChunk(chunk: unknown): boolean;
 ```
 
 Semantics:
 
-- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
-- Structural `{ type: string }` shape — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` / `isRecognizedStreamChunk` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `warn` / `debug` and continue so the stream stays open for the next event.
+- Structural `{ type: string }` shape for events, duck-typed field-presence check for chunks — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+- `KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned by `tests/core/streaming-events.test.ts`. Widening the `StreamChunk` interface without updating the snapshot fails CI.
+
+Consumer wiring:
+
+- `src/providers/sapOrchestration.ts:1997-2019` wraps the SAP AI SDK's `chunk.getDeltaContent()` / `chunk.getDeltaToolCalls()` getters in a per-chunk `try/catch`, logs `logger.warn('Unknown streaming event, skipping chunk (<model>): ...')` on decode failure, and `continue`s to the next SDK chunk.
+- `src/core/streamingOrchestrator.ts:546-561` invokes `isRecognizedStreamChunk` before accumulating into `fullText` / `finalUsage`. On an unrecognised normalised shape it logs `logger.warn('Unknown streaming chunk shape, skipping: <JSON>', { modelUsed })` and returns `{ value: { text: '' }, done: false }` so `for await` consumers advance naturally.
 
 ## Transport Retry Classifier API
 

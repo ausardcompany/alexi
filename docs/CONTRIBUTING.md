@@ -1872,6 +1872,45 @@ The reference example is `tests/agent/subagent-permissions.test.ts` (commit `f0d
 
 See [docs/TESTING.md — Testing subagent `allowedTools` array-shape preservation](TESTING.md#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108) for the per-case walkthrough. Any future options-bag field whose downstream interpretation branches on its type (e.g. `maxDepth?: number | 'unlimited'`, `recipient?: string | string[]`) should receive a matching shape-preservation suite before the first consumer ships.
 
+### Forward-compatibility shape guards
+
+SAP AI Core proxies five upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock). Each one occasionally surfaces a new SDK event kind — image deltas, speech deltas, custom finish reasons — that reaches the normalised `StreamChunk` shape before Alexi's renderer learns about it. The canonical reference is commit `a482d950 feat(core): handle unknown streaming events gracefully` (ports SST OpenCode PRs #58596 image events, #58609 speech events, #58608 finish reasons). Future contributions that touch a long-lived data boundary (provider → orchestrator → renderer, MCP tool-result → formatter, routing-rule JSON → router) MUST follow the same two-layer discipline:
+
+1. **Warn, do not throw, on unknown shapes.** A benign forward-rolled upstream is a soft failure. Replace any `throw new Error('Unknown ...')` with a `logger.warn('Unknown ..., skipping: <payload>', { context })` plus a continue / pass-through yield. Preserve caller-visible errors (rate limit, auth, network) via the surrounding `try/catch`; only decode-level dispatch errors fall into the warn-and-skip bucket. The provider pattern is at `src/providers/sapOrchestration.ts:1997-2019`; the orchestrator pattern is at `src/core/streamingOrchestrator.ts:546-561`.
+
+2. **Expose a module-local snapshot of the known shape.** The canonical example is `KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>` in `src/providers/protocols/stream-events.ts`:
+
+    ```typescript
+    export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string> = new Set([
+      'text',
+      'toolCalls',
+      'finishReason',
+      'usage',
+      'images',
+    ]);
+
+    export function isRecognizedStreamChunk(chunk: unknown): boolean {
+      if (!chunk || typeof chunk !== 'object') {
+        return false;
+      }
+      const rec = chunk as Record<string, unknown>;
+      for (const field of KNOWN_STREAM_CHUNK_FIELDS) {
+        if (rec[field] !== undefined) {
+          return true;
+        }
+      }
+      return false;
+    }
+    ```
+
+    The snapshot MUST be kept in sync with the interface it mirrors (here, `StreamChunk` at `src/providers/sapOrchestration.ts:238-250`). The paired regression suite — `tests/core/streaming-events.test.ts` — snapshots the set with `expect([...KNOWN_STREAM_CHUNK_FIELDS].sort()).toEqual([...].sort())` so widening the interface without updating the snapshot fails CI immediately. Every forward-compat shape guard SHOULD have a matching snapshot assertion for exactly this reason: a silent "update the interface, forget the guard" refactor becomes impossible.
+
+3. **Return a safe empty value from the consumer-level guard.** `isRecognizedStreamChunk` returning `false` causes `streamChat` to emit `{ value: { text: '' }, done: false }`. The empty-text yield lets `for await` consumers advance to the next pull without special-casing a null yield; `fullText += ''` is a no-op; cost telemetry is unaffected because `chunk.usage` is read only on known chunks. Any new forward-compat guard should produce an analogous "advance without side effect" value for its consumers rather than skipping the yield entirely — a skipped yield may cause a consumer that counts chunks (progress bars, test harnesses) to deadlock.
+
+4. **Document both layers in `docs/ARCHITECTURE.md` and `docs/PROVIDERS.md`.** The provider-level getter guard belongs under PROVIDERS (SDK-interface concern); the consumer-level recognised-shape guard belongs under ARCHITECTURE (orchestrator-pipeline concern). The CHANGELOG entry MUST link both so a reviewer or future bisector can find them from the commit message alone.
+
+Related suites that follow the same pattern are the shape-preservation suites above (pin the TypeScript shape at a module boundary) and the verification-only regression suites (lock a behavioural contract with tests + inline JSDoc). Treat forward-compatibility shape guards as the "incoming data" analogue of shape-preservation suites: shape-preservation pins the field the caller passes IN; forward-compat guards pin the field the provider sends OUT.
+
 ### Abort propagation through delegating tools
 
 Tools that delegate work to a child session (currently only `task`) MUST wire the child's lifetime to the parent's `AbortSignal` so that a Ctrl+C at the CLI immediately stops every descendant subagent — otherwise a runaway subagent chain will keep consuming API quota after the user has given up.

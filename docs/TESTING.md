@@ -4465,6 +4465,87 @@ Coverage priorities for future extensions:
 2. **Assert `plan.contextWindowExtracted` alongside `plan.contextWindow`.** A future refactor that inverts the extraction/fallback precedence would produce a numerically correct plan with the wrong provenance flag; asserting both fields pins the contract.
 3. **Never leak a `RecoveryPromptFn` across tests.** The module holds the callback in a process-local `let`, so `afterEach(() => setRecoveryPrompt(null))` is mandatory in any suite that calls `setRecoveryPrompt(fn)`.
 
+### Testing streaming unknown-event handling (`tests/core/streaming-events.test.ts`)
+
+Introduced in commit `a482d950 feat(core): handle unknown streaming events gracefully` (ports the discipline from SST OpenCode PRs #58596 / #58608 / #58609). The 258-line suite pins the two-layer forward-compat net for unknown streaming event / chunk shapes: the module-level guards in `src/providers/protocols/stream-events.ts` and the orchestrator-level warn-and-skip path in `src/core/streamingOrchestrator.ts`. Pure-unit — no network, no real timers, no filesystem, no live SAP AI Core call. The provider is replaced wholesale by a factory that yields a pre-canned array of `StreamChunk`-shaped (and deliberately mis-shaped) payloads.
+
+Mock providers and the router BEFORE importing `streamChat` (vitest hoists `vi.mock`, but explicit ordering keeps dependency direction readable):
+
+```typescript
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+vi.mock('../../src/providers/index.js', () => ({
+  getProviderForModelWithFallback: vi.fn(),
+  getDefaultModel: vi.fn(() => 'gpt-4o'),
+}));
+
+vi.mock('../../src/core/router.js', () => ({
+  routePrompt: vi.fn(),
+  recordRouteOutcome: vi.fn(),
+  classifyRouteError: vi.fn(() => ({ kind: 'unknown' })),
+}));
+
+import { streamChat } from '../../src/core/streamingOrchestrator.js';
+import {
+  isRecognizedStreamChunk,
+  isTypedStreamEvent,
+  classifyStreamEvent,
+  KNOWN_STREAM_CHUNK_FIELDS,
+} from '../../src/providers/protocols/stream-events.js';
+```
+
+The provider factory is intentionally typed loosely so a test can inject objects that do not conform to `StreamChunk` — this is the whole point: forward-rolled providers emit shapes the client type does not describe yet:
+
+```typescript
+function makeProvider(chunks: unknown[]): {
+  provider: { streamComplete: ReturnType<typeof vi.fn> };
+} {
+  function streamComplete(_messages: unknown, _opts?: unknown) {
+    async function* gen(): AsyncGenerator<StreamChunk> {
+      for (const c of chunks) {
+        yield c as StreamChunk;
+      }
+    }
+    return gen();
+  }
+  return { provider: { streamComplete: vi.fn(streamComplete) } };
+}
+```
+
+Six properties pinned by the suite:
+
+1. **`isRecognizedStreamChunk` accepts every known field in isolation.** Five one-liner assertions, one per field in `KNOWN_STREAM_CHUNK_FIELDS`: `{ text: 'hi' }`, `{ toolCalls: [{ index: 0 }] }`, `{ finishReason: 'stop' }`, `{ usage: { total_tokens: 1 } }`, `{ images: [] }`. Each must return `true`.
+2. **`isRecognizedStreamChunk` rejects empty / primitive / forward-rolled payloads.** `null`, `undefined`, string, number, and `{}` return `false`; a forward-rolled `{ imageChunkDelta: '...' }`, `{ speechDelta: '...' }`, or `{ type: 'image.chunk.delta', data: '...' }` all return `false`. These three cases mirror SST OpenCode #58596 / #58609 / #58608 verbatim.
+3. **`KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned.** `expect([...KNOWN_STREAM_CHUNK_FIELDS].sort()).toEqual(['finishReason', 'images', 'text', 'toolCalls', 'usage'].sort())`. Adding a new normalised channel to `StreamChunk` without also updating the snapshot and the field set fails this assertion immediately — the suite is the enforcement point for the "update both halves" discipline.
+4. **`streamChat` emits an empty-text yield for an unknown chunk between known chunks.** Provider yields `[{ text: 'hello ' }, { imageChunkDelta: 'base64-blob' }, { text: 'world' }]`. The consumer sees three iterator yields in order: `'hello '`, `''`, `'world'`. `final.text === 'hello world'`. `warnSpy` called exactly once with a message matching `/Unknown streaming chunk shape/`:
+
+    ```typescript
+    const iter = streamChat('hi', { modelOverride: 'gpt-4o' });
+    const emitted: string[] = [];
+    let final: { text: string } | undefined;
+
+    for (;;) {
+      const step = await iter.next();
+      if (step.done) {
+        final = step.value as { text: string };
+        break;
+      }
+      emitted.push(step.value.text);
+    }
+
+    expect(final?.text).toBe('hello world');
+    expect(emitted).toEqual(['hello ', '', 'world']);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0] as string).toMatch(/Unknown streaming chunk shape/);
+    ```
+
+5. **Multiple consecutive unknown chunks each produce one warn.** Provider yields `[{ text: 'A' }, { speechDelta: 'audio-1' }, { imageChunkDelta: 'image-1' }, { someFutureField: 'x' }, { text: 'B' }]`. `final.text === 'AB'` and `warnSpy` is called exactly three times — one per unknown chunk, never collapsed, never duplicated.
+6. **Usage recorded from a trailing known chunk after an unknown one still reaches the final `StreamingResult`.** Provider yields `[{ text: 'ok' }, { unknownField: 'ignored' }, { text: '', finishReason: 'stop', usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }]`. The final result exposes `final.text === 'ok'` and `final.usage?.total_tokens === 5`, so cost telemetry survives interleaved unknown shapes.
+
+Negative guard: a sequence of entirely-known chunks (`[{ text: 'a' }, { text: 'b' }, { finishReason: 'stop', usage: { ... } }]`) produces zero `warnSpy` calls. Prevents a future regression that would false-positive on healthy traffic.
+
+Spy pattern for the logger: `warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})` in `beforeEach` and `warnSpy.mockRestore()` in `afterEach`. Spying on `logger.warn` directly (not `console.warn`) keeps assertions stable regardless of log-level filtering in CI.
+
 ### Testing Network Disconnect Classification (`network.disconnected`)
 
 Introduced 2026-09-25 (ports upstream opencode/kilocode `d6bb0ef05`,
