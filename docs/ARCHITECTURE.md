@@ -297,7 +297,7 @@ Alexi uses a **single provider architecture** -- all LLM calls route exclusively
 | Transform | `src/providers/transform.ts` | Message-format transforms (image chunks, reasoning replay, schema lowering) |
 | Model Catalog | `src/providers/modelCatalog.ts` | Live deployment discovery from SAP AI Core (5-minute TTL) |
 | Model Fetch Errors | `src/providers/modelFetchErrors.ts` | Classified fetch errors (`ModelFetchError`, `classifyFetchError`, `fetchWithRetry`) plus actionable hint helpers (`formatCatalogErrorHint`, `hintForErrorMessage`, issue #1851) shared by the catalog refresh, `alexi models`, the Ink `ModelPicker`, and the legacy inquirer picker (issue #1886) — see [`docs/PROVIDERS.md#model-fetch-error-surfacing-issue-1824`](./PROVIDERS.md#model-fetch-error-surfacing-issue-1824), [`docs/PROVIDERS.md#actionable-hints-issue-1851`](./PROVIDERS.md#actionable-hints-issue-1851), and [`docs/PROVIDERS.md#surfacing-model-list-errors-everywhere-issue-1886`](./PROVIDERS.md#surfacing-model-list-errors-everywhere-issue-1886) |
-| Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments |
+| Model Match | `src/providers/model-match.ts` | Model ID resolution for deployments. Family predicates (`isAnthropicModel`, `isOpenAI`, `isGemini`, `isXaiModel`) are used by the provider layer to gate per-family sampling params so an xAI-only field (`min_p`) never leaks into an Anthropic/OpenAI SAP AI Core request. See [PROVIDERS.md — Provider-specific sampling parameters](./PROVIDERS.md#provider-specific-sampling-parameters-xai-min_p-anthropic-speed-openai-reasoning-issue-2150). |
 | Session Headers | `src/providers/sessionHeaders.ts` | HTTP header management for sessions |
 
 Provider resolution:

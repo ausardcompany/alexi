@@ -1029,6 +1029,95 @@ Patterns worth internalising:
 3. **Test `mergeUsage` sums reasoning tokens** when validating the empty-response retry loop (issue #1279) so cumulative attempts stay correct.
 4. **Do NOT set `AICORE_SERVICE_KEY` in these tests.** The provider constructor accepts an explicit `deploymentId`; `env('AICORE_RESOURCE_GROUP')` is mocked via `vi.mock('../../src/config/env.js', ...)` so the suite runs identically on a laptop with no credentials and in CI.
 
+### Testing provider-specific sampling param plumbing (`tests/providers/sapOrchestration-samplingParams.test.ts`, issue #2150)
+
+Pins the family-guarded forwarding contract for the three provider-specific sampling parameters introduced by commit `1a0b8a60` (ports SST OpenCode PRs #58868, #58870, #58872): xAI `min_p`, Anthropic `speed`, OpenAI Responses `reasoning` mode. The suite is deliberately shape-focused — it captures the `moduleConfig` the provider hands to `OrchestrationClient` and asserts on the exact `modelParams` the SDK would send, so a regression that moved the capability guard (or widened it to the wrong family) trips immediately.
+
+Four properties are pinned per parameter:
+
+1. **Positive case** — the correct family receives the field with the expected value.
+2. **Config fallback** — when no per-call option is set, `OrchestrationConfig.<field>` flows through unchanged.
+3. **Per-call override wins** — `complete([...], { minP: 0.2 })` beats `config.minP: 0.1` (matches the existing `topK` / `topP` precedence rule).
+4. **Capability guard** — two wrong families each independently drop the field (`expect('<field>' in modelParams).toBe(false)`), and the omit-both case also drops the field.
+
+The SDK is mocked at the module boundary with a `MockOrchestrationClient` that pushes every constructed `moduleConfig` into a `capturedModuleConfigs: Array<Record<string, unknown>>` array:
+
+```typescript
+// tests/providers/sapOrchestration-samplingParams.test.ts (excerpt)
+let capturedModuleConfigs: Array<Record<string, unknown>> = [];
+
+vi.mock('@sap-ai-sdk/orchestration', () => {
+  class MockOrchestrationClient {
+    constructor(
+      public _moduleConfig: Record<string, unknown>,
+      public _deploymentConfig: unknown
+    ) {
+      capturedModuleConfigs.push(_moduleConfig);
+    }
+
+    async chatCompletion(_params: { messages: unknown[] }) {
+      return {
+        getContent: () => 'ok',
+        getFinishReason: () => 'stop',
+        getTokenUsage: () => ({
+          completion_tokens: 1,
+          prompt_tokens: 1,
+          total_tokens: 2,
+        }),
+        getToolCalls: () => [],
+        getAllMessages: () => [],
+      };
+    }
+  }
+  return {
+    OrchestrationClient: MockOrchestrationClient,
+    OrchestrationEmbeddingClient: vi.fn(),
+    // ...other builders mocked to return {} so they do not drag SDK state
+  };
+});
+
+function getModelParams(mc: Record<string, unknown>): Record<string, unknown> {
+  const model = (mc as ModuleConfigShape).promptTemplating?.model;
+  return (model?.params ?? {}) as Record<string, unknown>;
+}
+```
+
+Positive and capability-guard cases for `min_p` (the pattern repeats verbatim for `speed` on Anthropic and `reasoning` on OpenAI):
+
+```typescript
+it('forwards per-call minP to modelParams.min_p for xAI (grok) models', async () => {
+  const provider = new SapOrchestrationProvider({
+    modelName: 'xai--grok-2',
+    deploymentId: 'test-deployment',
+  });
+  await provider.complete([{ role: 'user', content: 'hi' }], { minP: 0.05 });
+
+  expect(capturedModuleConfigs).toHaveLength(1);
+  const modelParams = getModelParams(capturedModuleConfigs[0]);
+  expect(modelParams.min_p).toBe(0.05);
+});
+
+it('does NOT forward min_p to Anthropic models (capability guard)', async () => {
+  const provider = new SapOrchestrationProvider({
+    modelName: 'anthropic--claude-4.7-opus',
+    deploymentId: 'test-deployment',
+  });
+  await provider.complete([{ role: 'user', content: 'hi' }], { minP: 0.05 });
+
+  const modelParams = getModelParams(capturedModuleConfigs[0]);
+  expect('min_p' in modelParams).toBe(false);
+});
+```
+
+Patterns worth internalising:
+
+1. **Capture the `moduleConfig`, do not re-derive it.** The guard logic lives in `SapOrchestrationProvider#buildModuleConfig`; asserting on a hand-constructed object would pass even if the guard moved to a different call site. Capturing the live `moduleConfig` is the only way to pin the actual request shape the SDK sends.
+2. **Use `expect('<field>' in modelParams).toBe(false)` for negative capability guards, not `toBeUndefined()`.** The former catches a regression that writes `{ min_p: undefined }` into the params (which still fails on strict SAP AI Core gateways) in addition to the "field entirely absent" case.
+3. **Reset `capturedModuleConfigs` in `beforeEach`.** Each case is a one-shot assertion against the first captured config; without a reset the array accumulates across tests and ordering becomes load-bearing.
+4. **Mock `env` to return `'default'` for `AICORE_RESOURCE_GROUP` only.** The provider constructor reads the resource group but no other env vars on this path, so a narrow `vi.mock('../../src/config/env.js', ...)` keeps the suite credential-free on both local and CI.
+
+See [docs/PROVIDERS.md — Provider-specific sampling parameters](./PROVIDERS.md#provider-specific-sampling-parameters-xai-min_p-anthropic-speed-openai-reasoning-issue-2150) for the production contract this suite pins.
+
 ### Testing content-filter short-circuit (issue #1888)
 
 The two-layer content-filter short-circuit (`retryEmptyResponse` in `src/providers/sapOrchestration.ts` and `agenticChat` in `src/core/agenticChat.ts`) is covered by two dependency-light unit suites — no live SAP AI Core call, no real timers.

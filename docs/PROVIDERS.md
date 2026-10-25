@@ -1764,6 +1764,88 @@ const result = await provider.complete(
 );
 ```
 
+### Provider-specific sampling parameters (xAI `min_p`, Anthropic `speed`, OpenAI `reasoning`) — issue #2150
+
+Introduced in commit `1a0b8a60` (2026-10-25, resolves issue #2150; ports SST OpenCode PRs #58868, #58870, #58872). Three sampling parameters that only one model family documents each are now plumbed through `OrchestrationConfig` / `CompletionOptions` and gated per family in `SapOrchestrationProvider#buildModuleConfig`. The forwarding rule is strict: a param is emitted into `modelParams` ONLY when the active model matches its documented family. Unknown params are never silently forwarded to a provider that would reject the request (OpenAI returns `400` on unknown sampling fields) or quietly ignore it (Anthropic drops `min_p`).
+
+| CLI flag       | `OrchestrationConfig` / `CompletionOptions` field | SAP AI Core `modelParams` key | Forwarded only when                      | Source PR         |
+| -------------- | ------------------------------------------------- | ----------------------------- | ---------------------------------------- | ----------------- |
+| `--min-p <n>`  | `minP?: number`                                   | `min_p`                       | `isXaiModel(modelName) === true`         | SST OpenCode #58870 |
+| `--speed <mode>` | `speed?: 'normal' \| 'fast'`                    | `speed`                       | `isAnthropicModel(modelName) === true`   | SST OpenCode #58868 |
+| `--reasoning <mode>` | `reasoningMode?: 'default' \| 'extended'`   | `reasoning: { mode }` (Responses) | `isOpenAI(modelName) && reasoningMode === 'extended'` | SST OpenCode #58872 |
+
+The `top_k` parameter already existed before this change — it stays in the universal table above and continues to forward on Anthropic + xAI, silently dropped by OpenAI.
+
+#### Family detection: `isXaiModel`
+
+```typescript
+// src/providers/model-match.ts:300
+export function isXaiModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return lower.includes('grok') || lower.includes('xai');
+}
+```
+
+Case-insensitive substring match on `grok` (`grok-2`, `grok-vision`, dated `grok-2-20250101`, prefixed `sap-ai-core/xai--grok-2`, …) or `xai` (SAP AI Core double-dash form `xai--grok-...`, provider-prefixed `sap-ai-core/xai/...`). Companion to `isAnthropicModel` / `isOpenAI` / `isGemini`; keeps capability routing in one module so a future provider-specific param lands with a single predicate rather than scattered `.includes('grok')` call sites.
+
+#### Dispatch at the provider boundary
+
+```typescript
+// src/providers/sapOrchestration.ts:1717-1743
+// Provider-specific sampling params (SST OpenCode PRs #58868, #58870,
+// #58872). Each field is guarded by the model family that documents
+// it so we never silently forward an unknown param to a provider
+// that would reject the request (OpenAI returns 400 on unknown
+// sampling fields) or quietly ignore it (Anthropic drops `min_p`).
+const effectiveMinP = options?.minP ?? this.config.minP;
+if (effectiveMinP !== undefined && isXaiModel(this.config.modelName)) {
+  modelParams.min_p = effectiveMinP;
+}
+const effectiveSpeed = options?.speed ?? this.config.speed;
+if (effectiveSpeed !== undefined && isAnthropicModel(this.config.modelName)) {
+  modelParams.speed = effectiveSpeed;
+}
+const effectiveReasoningMode = options?.reasoningMode ?? this.config.reasoningMode;
+if (effectiveReasoningMode === 'extended' && isOpenAI(this.config.modelName)) {
+  modelParams.reasoning = { mode: 'extended' };
+}
+```
+
+Precedence matches the existing `topK` / `topP` rule: per-call `CompletionOptions` overrides the construction-time `OrchestrationConfig` default (`options?.minP ?? this.config.minP`). The `--reasoning default` case is intentionally equivalent to omitting the flag — the Responses `reasoning` object is only emitted on explicit `'extended'` opt-in, so a caller that passes `--reasoning default` for symmetry does NOT force the Responses API into any non-default state.
+
+#### Why guard at the provider boundary, not the CLI
+
+The CLI layer parses the raw flag with a dedicated typed parser (`parseOptionalNumberFlag`, `parseSpeedFlag`, `parseReasoningFlag` in `src/cli/commands/chat.ts:123-160`) so bad input (e.g. `--top-k abc`) surfaces as a Commander error BEFORE any provider call is attempted. The CLI does NOT know which model will ultimately be selected (auto-routing or an inline `@provider/model` mention can swap the model mid-request), so it cannot gate on family at parse time. The provider boundary is the first point where the final `modelName` is known, which makes it the correct place to enforce the capability guard.
+
+#### Programmatic usage
+
+```typescript
+// xAI (Grok) with nucleus sampling floor
+const grok = getProviderForModel('xai--grok-2');
+await grok.complete(
+  [{ role: 'user', content: 'Draft a release note' }],
+  { minP: 0.05, topK: 40 } // both forwarded on xAI
+);
+
+// Anthropic Claude on the fast speed tier
+const claude = getProviderForModel('anthropic--claude-4.7-opus');
+await claude.complete(
+  [{ role: 'user', content: 'Summarize this transcript' }],
+  { speed: 'fast' } // forwarded; `min_p` would be silently dropped here
+);
+
+// OpenAI Responses extended-thinking mode
+const gpt = getProviderForModel('gpt-5');
+await gpt.complete(
+  [{ role: 'user', content: 'Prove the Pythagorean theorem' }],
+  { reasoningMode: 'extended' } // emits `reasoning: { mode: 'extended' }`
+);
+```
+
+#### Interaction with the portable `ReasoningConfig`
+
+`reasoningMode` is deliberately independent of the portable `ReasoningConfig` (`--reasoning-effort low|medium|high`) that `sendChat` resolves per family. `reasoningMode` is a direct per-call flip of the Responses `reasoning` field, used when a caller wants to opt into OpenAI extended-thinking without constructing a full portable config. Family-aware effort resolution continues to flow through the existing `src/core/reasoning/*` pipeline unchanged; the two paths do not collide because `reasoningMode` writes to `modelParams.reasoning` (Responses shape) while `ReasoningConfig` writes to `modelParams.reasoning_effort` / `modelParams.enable_thinking` depending on the family.
+
 ### Tool Calling
 
 ```typescript
