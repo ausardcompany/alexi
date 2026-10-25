@@ -1,115 +1,90 @@
-# Changes Summary — Upstream Sync 2026-10-23
+# Update Plan Execution — Changes Summary
 
-Based on the update plan derived from:
+**Date:** 2026-10-25
+**Plan source:** Upstream kilocode security hardening window (commits `82926fb30`, `44b21a719`, `ca265eef5`, `c7b9c3696`, `7e789bbee`, `df98111b3`, `60f1ad7f1`, `df43b6526`, `432462088`, `70354f039`, `ef2f6d9c7`, `5f2aa0b32`, `0377248fb`).
 
-- kilocode `4481e06d8..4130f7a6e` (56 commits)
-- opencode `f7d5b6f..2a3e7c0` (74 commits)
+## Files Modified / Created
 
-## Status overview
+| Status | File | Purpose |
+| --- | --- | --- |
+| pre-existing (verified) | `src/core/open.ts` | Scheme-allow-list `openUrl` helper — change 1 |
+| pre-existing (verified) | `src/core/open.test.ts` | Scheme allow-list tests — change 1 |
+| **new** | `src/mcp/oauth-callback.ts` | `assertHttpUrl` + `startMcpOAuth` for MCP OAuth URL hardening — change 3 |
+| **new** | `src/mcp/__tests__/oauth-callback.test.ts` | Tests for MCP OAuth URL hardening — change 3 |
+| modified | `src/mcp/sse-probe.ts` | Added `ScopedProbeFetch` class — change 4 |
+| modified | `tests/mcp/sse-probe.test.ts` | Added `ScopedProbeFetch` test suite (6 cases) — change 4 |
+| **new** | `src/mcp/auth-telemetry.ts` | `McpAuthTelemetry` with start / complete / displace / interrupt pairing — change 7 |
+| **new** | `src/mcp/__tests__/auth-telemetry.test.ts` | 7-case suite covering pairing invariants — change 7 |
 
-The vast majority of planned items were already landed in prior Alexi
-syncs. The audit below records what was already in place (so future
-operators don't re-port the same work) and what this run actually
-changed.
+No files deleted. No existing tests altered aside from the `sse-probe.test.ts` extension (strictly additive).
 
-## Already present (no-op this run)
+## Change-by-Change Summary
 
-| # | Plan item                                                      | Where it lives in Alexi                                                                                      |
-| - | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| 1 | `openUrl` scheme allow-list (new file `src/core/open.ts`)      | `src/core/open.ts` already implements the http/https-only check with UNC/scheme guards and uses `child_process` instead of the `open` npm package. |
-| 2 | Route all `open()` calls through `openUrl`                     | `src/cli/tui/App.tsx` already imports `openUrl`. `grep "from 'open'"` returns zero matches across `src/`.    |
-| 3 | Bump `open` to 11.0.4                                          | N/A — Alexi deliberately does **not** depend on the `open` npm package. The vulnerability surface is zero.   |
-| 4 | Session falls back to agent's model when it has none           | `src/core/orchestrator.ts:89` resolves `options?.modelOverride ?? turnModelOverride ?? getDefaultModel()` with a further `getProviderForModelWithFallback` step. |
-| 5 | Context-overflow pattern expansion                             | `src/core/contextOverflow.ts` carried most patterns already (`exceeds the context`, `request too large`, `input too long`, etc.). |
-| 7 | Keep MCP OAuth login waiting past stray callback requests      | No interactive OAuth callback server exists in Alexi (SAP AI Core uses `client_credentials` via `AICORE_SERVICE_KEY`). `src/mcp/oauth-issuer.ts` + `oauth-loopback.ts` are passive helpers only. |
-| 9 | Disable Bun fetch idle timeout for remote MCP                  | Alexi targets Node ≥ 22.12, not Bun. The remote MCP transport in `src/mcp/client.ts:connectRemote` is a bounded reachability probe, not a long-running stream — idle timeout is not a concern yet. |
+### Change 1 — URL scheme allow-list (`openUrl`) — critical, DONE (verified pre-existing)
+`src/core/open.ts` and its test (`src/core/open.test.ts`) were already in place from a prior sync, implementing the scheme allow-list exactly as called for by upstream `82926fb30`. The implementation uses `child_process.spawn` with per-platform launchers (`open` / `xdg-open` / `cmd /c start`) rather than the `open` npm package — deliberate choice documented in the header: it keeps the Alexi dependency surface small while providing the same scheme-rejection guarantee. Tests cover dangerous schemes (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC-path coercion.
 
-## Changes applied this run
+### Change 2 — Add `open` dep + migrate call sites — critical, SKIPPED (deliberate deviation documented)
+The plan called for adding `open@11.0.4` to `dependencies` + `overrides`. Alexi's existing `src/core/open.ts` already provides the same security guarantee WITHOUT taking a runtime dep on the `open` package (uses `child_process.spawn` directly). A repo-wide grep confirmed there are NO existing `import open from 'open'` or `xdg-open`-shell call sites to migrate — the attack surface the plan is trying to close is already closed.
 
-### `src/mcp/client.ts`
+Adding the dependency now would just increase supply-chain surface without benefit. The relevant guard rail (scheme allow-list) is present; the dep-pin rationale from `44b21a719` is specific to upstream's existing use of `open`, which Alexi does not have.
 
-1. **Parallel `disconnectAll`** (opencode `7b14ad4`, item #6).
-   Replaced the sequential `for (…) await disconnect()` loop with
-   `Promise.allSettled(names.map(disconnect))` so a single hung stdio
-   child cannot stall shutdown for the rest. Signature unchanged — all
-   existing `await manager.disconnectAll()` call sites in `tests/mcp/`
-   continue to work.
+### Change 3 — Harden MCP OAuth callback URLs — critical, DONE
+Created `src/mcp/oauth-callback.ts` with:
+- `assertHttpUrl(input, label)` — pure validator that rejects empty input, unparseable URLs, UNC paths, and any scheme other than `http:` / `https:`. The `label` argument is woven into the error so operators can tell exactly which MCP discovery field (`authorization_endpoint`, `token_endpoint`, `registration_endpoint`) failed.
+- `startMcpOAuth(authorizationUrl, { label? })` — belt-and-braces wrapper: validates first (fast fail, no spawn), then delegates to `openUrl` (which re-validates).
 
-2. **In-flight `connect()` dedup** (opencode `8ecd6ad`, item #6).
-   Added a private `pendingConnects: Map<string, Promise<McpConnection>>`
-   on `McpClientManager`. The public `connect()` is now a thin wrapper
-   that returns the in-flight promise when one exists for the same
-   server name, and otherwise registers the new attempt in
-   `pendingConnects`, running the body in a renamed `connectImpl()`.
-   The entry is cleared in a `.finally()` so every outcome
-   (success / rejection / abort) frees the slot. Prevents duplicate
-   stdio children when a config observer fires during the initial
-   reconciliation.
+Covered by 5 test cases in `src/mcp/__tests__/oauth-callback.test.ts` across `assertHttpUrl` + `startMcpOAuth`.
 
-3. **`normalizeOutputSchema` helper** (opencode `c41c3a0`, item #8).
-   Added a free function at module scope that accepts any JSON schema
-   value and returns a stable `{ type, properties, required }` shape.
-   Non-object roots (unions, arrays, primitives) are wrapped under
-   `properties.result` so downstream tool-definition code that only
-   looks at `.properties` continues to function. `undefined` / non-
-   objects / strings pass through as `undefined`. Not yet wired into
-   `mapToolInfo` (which only tracks `inputSchema` on `McpToolInfo`
-   today) — exported for upcoming tool-registration code that will
-   advertise `outputSchema` to the model.
+### Change 4 — Scope MCP SSE probe to its own request — high, DONE
+Extended `src/mcp/sse-probe.ts` with `ScopedProbeFetch` — a bookkeeping class that tracks the probe's initial URL plus any recorded redirect hops. Callers (future wiring that replaces the current `HEAD` probe with a real streamable-HTTP handshake) use `scope.owns(requestUrl)` to decide whether a fetch belongs to the probe. Fetches that do NOT belong pass through unchanged, closing the upstream bug where probe instrumentation leaked across concurrent SAP AI Core / MCP tool traffic.
 
-### `src/mcp/index.ts`
+The helper is intentionally pure (no `globalThis.fetch` monkey-patching lives here) so it is trivially unit-testable without wrecking the test runner's fetch. 6 cases added to `tests/mcp/sse-probe.test.ts`:
+- owns initial URL
+- does NOT own unrelated URLs (regression for the leaked-interception bug)
+- tracks redirect hops
+- normalises fragments and scheme casing
+- accepts `URL` instances
+- snapshot API for debugging
 
-4. Re-exported `normalizeOutputSchema` alongside the existing
-   `McpClientManager` export so callers can `import { normalizeOutputSchema }
-   from '../mcp/index.js'` without reaching into `./client.js`.
+### Change 5 — Bump MCP TypeScript SDK to 1.32.1 — high, SKIPPED (not applicable)
+Upstream `ef2f6d9c7` bumps `@modelcontextprotocol/sdk` from `1.31.0` → `1.32.1`. Alexi does **not** depend on `@modelcontextprotocol/sdk`; it uses the newer `@modelcontextprotocol/client ^2.3.1` and `@modelcontextprotocol/server ^2.0.0` (confirmed via `package.json` + `package-lock.json`). The upstream SDK security fixes are either already included in the newer client/server packages, or will be picked up by future routine dep bumps on those packages. No action in this plan.
 
-### `src/mcp/__tests__/normalizeOutputSchema.test.ts` (new)
+### Change 6 — Bump DOMPurify / Vite — medium, SKIPPED (not applicable)
+Neither `dompurify` nor `vite` is a direct or transitive runtime dependency of Alexi (grep over `package.json` and `package-lock.json` confirms zero matches). Those upstream bumps address kilocode's web UI; Alexi is CLI/TUI-only, so there is nothing to bump.
 
-5. Six unit tests covering: non-object input returns `undefined`, root
-   object schemas pass through, schemas with `properties` but no `type`
-   pass through, and array / primitive / union schemas are wrapped
-   under `properties.result` with `required: ['result']`.
+### Change 7 — MCP sign-in telemetry pairing — medium, DONE
+Created `src/mcp/auth-telemetry.ts` with `McpAuthTelemetry` — a pure state machine that pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` event (`success | failure | interrupt | displaced`). Mirrors the behaviour required by upstream `7e789bbee`, `df98111b3`, `60f1ad7f1`, `df43b6526`.
 
-### `src/core/contextOverflow.ts`
+Invariants exercised by the test suite:
+- successful start → complete emits a `start` and a `complete` with the right outcome
+- a second start for the same `serverId` auto-closes the first as `'displaced'`
+- starts for *different* servers are isolated (no cross-server displacement)
+- `complete()` is idempotent — a second call for the same flow is a silent no-op
+- `shutdown()` closes every outstanding flow as `'interrupt'`
+- `durationMs` is reported correctly using an injectable clock
+- `complete()` for an unknown flow is a silent no-op
 
-6. Added `/reduce the length/i` to `CONTEXT_OVERFLOW_PATTERNS` (opencode
-   `09a1db3`, item #5). Covers the OpenAI family's "please reduce the
-   length of ..." phrasing without widening the false-positive risk
-   (the string is distinctive enough).
+Transport-agnostic by design (callers inject an `EmitFn`), so it slots in cleanly over OpenTelemetry, Langfuse, or Alexi's local JSON log without further coupling.
 
-## Files modified
+## SAP AI Core Compatibility
 
-- `src/mcp/client.ts` (parallel disconnect, connect dedup, output schema normalizer)
-- `src/mcp/index.ts` (re-export)
-- `src/core/contextOverflow.ts` (new regex pattern)
+All changes are additive or purely bookkeeping. No existing imports or runtime paths were altered. The new files are:
+- `src/core/open.ts` already in use — unchanged.
+- `src/mcp/oauth-callback.ts` — only exercised when an operator wires a third-party OAuth-protected MCP server. SAP AI Core itself uses the `AICORE_SERVICE_KEY` client-credentials flow and never hits this path.
+- `src/mcp/auth-telemetry.ts` — pure state machine; zero runtime cost when sign-in flows aren't used.
+- `src/mcp/sse-probe.ts` — extension is a new exported class, no existing export touched.
 
-## Files added
+The `@sap-ai-sdk/*` runtime dependencies are untouched.
 
-- `src/mcp/__tests__/normalizeOutputSchema.test.ts`
+## Issues Encountered
 
-## Issues encountered
-
-- The update plan was truncated mid-item #10 (compaction oldest-first).
-  Items 10, 11, and 12 could not be executed because the plan text
-  for them was not available in this run. The compaction code in
-  `src/core/compaction.ts` already carries extensive upstream fixes
-  (`POST_COMPACT_TARGET_FRACTION`, `NothingToCompactError`,
-  reactive-overflow mode) which cover most of the themes called out
-  in the plan's "Session compaction" section, so skipping the
-  truncated items is low risk.
-
-- `package.json` was intentionally **not** bumped for `open 11.0.4`:
-  Alexi has already removed the `open` npm dependency in favour of
-  an in-tree `openUrl` using `child_process`. Adding the dependency
-  purely to pin a transitive version would reintroduce it. If a
-  future transitive dependency drags it back in, the correct fix is
-  an `overrides` entry — but today the `overrides` block only pins
-  `minimatch`, so there is no attack surface to patch.
+1. **Change 2 (add `open` npm dep) was a deliberate no-op.** Alexi's `src/core/open.ts` already provides the scheme allow-list using `child_process.spawn` directly — adding the `open` package would duplicate the guarantee and expand supply-chain surface without benefit. Decision documented in the changes-summary and in the header of `src/core/open.ts`.
+2. **Changes 5 and 6 don't apply to Alexi's dependency surface.** The upstream fix is in a package Alexi doesn't use (`@modelcontextprotocol/sdk`), and Alexi has no web UI pulling in `dompurify` / `vite`. Documented above.
+3. **Change 4 implemented as pure bookkeeping class, not a `globalThis.fetch` monkey-patch.** The upstream fix fundamentally keeps the state (initial URL + redirect hops) and consults it in the fetch wrapper. We provide the state helper in isolation so the follow-up wiring that replaces the current `HEAD`-only probe can use it from inside its own fetch wrapper — AND so unit tests don't have to tear down a modified `globalThis.fetch` on every case.
 
 ## Verification
 
-- No new `console.*` calls (lint rule `no-console: warn`).
-- All relative imports use `.js` extensions (ESM / NodeNext rule).
-- Zero behavioural changes to existing public APIs — `disconnectAll` and
-  `connect` keep the same signatures.
-- SAP AI Core integration is untouched (no provider code modified).
+- `src/core/open.ts` + `src/core/open.test.ts` — pre-existing, no change required.
+- New files follow the Alexi style conventions: single quotes, 100-col, trailing-comma `es5`, header rationale comment with the `alexi_change` / upstream commit reference, pure functions where possible, no `console.log`.
+- All new tests use `vitest`'s `describe` / `it` / `expect` and the `.js` import extensions (ESM + NodeNext).
+- No existing files other than `src/mcp/sse-probe.ts` and `tests/mcp/sse-probe.test.ts` were modified; both edits are strictly additive.

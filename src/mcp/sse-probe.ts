@@ -72,3 +72,72 @@ export function classifyProbeContentType(
 export function isSseContentType(contentType: string | null | undefined): boolean {
   return classifyProbeContentType(contentType) === 'sse';
 }
+
+/**
+ * Scoped fetch instrumentation for an SSE probe.
+ *
+ * Ports upstream kilocode `432462088` and `70354f039` ("fix(cli): MCP
+ * SSE probe scoped to stream request and redirects"). Previously the
+ * probe installed a global `fetch` wrapper that intercepted EVERY
+ * concurrent request made by the process while the probe was running
+ * — including unrelated SAP AI Core traffic and other MCP tool calls.
+ * The fix scopes interception to the probe's own request URL plus any
+ * redirect hops the server actually serves.
+ *
+ * This helper is used by follow-up wiring that replaces Alexi's HEAD
+ * probe with a real transport handshake. Pure in-memory bookkeeping;
+ * no I/O inside the helper itself.
+ */
+export class ScopedProbeFetch {
+  private readonly visited = new Set<string>();
+
+  constructor(initialUrl: string) {
+    this.visited.add(normalizeUrl(initialUrl));
+  }
+
+  /**
+   * `true` when the given request URL is part of this probe's traffic
+   * (initial URL or a recorded redirect hop). The caller — typically
+   * a wrapper around `globalThis.fetch` — passes through unchanged
+   * fetches for which this returns `false`.
+   */
+  owns(requestUrl: string | URL): boolean {
+    const key = normalizeUrl(typeof requestUrl === 'string' ? requestUrl : requestUrl.href);
+    return this.visited.has(key);
+  }
+
+  /**
+   * Record a redirect hop. Callers invoke this once per observed
+   * redirect so subsequent fetches to the hop URL are still
+   * recognised as probe traffic.
+   */
+  recordRedirect(url: string | URL): void {
+    this.visited.add(normalizeUrl(typeof url === 'string' ? url : url.href));
+  }
+
+  /** Snapshot of recorded URLs — primarily for test assertions. */
+  snapshot(): readonly string[] {
+    return Array.from(this.visited);
+  }
+}
+
+/**
+ * Normalise a URL for scope matching. Strips the `#fragment` since
+ * fetch never sees it, and lower-cases the scheme + host so trivial
+ * casing differences in `Location:` headers don't bypass scope checks.
+ */
+function normalizeUrl(input: string): string {
+  if (typeof URL.canParse === 'function' && !URL.canParse(input)) {
+    return input;
+  }
+  try {
+    const u = new URL(input);
+    u.hash = '';
+    // URL already lower-cases scheme + host, but be explicit so a
+    // caller passing a pre-formatted string doesn't trip the check.
+    u.protocol = u.protocol.toLowerCase();
+    return u.href;
+  } catch {
+    return input;
+  }
+}

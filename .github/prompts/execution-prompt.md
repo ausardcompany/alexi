@@ -4,44 +4,42 @@ You are an expert software developer. Your task is to execute the update plan be
 
 ## Update Plan to Execute
 
-```markdown
 # Update Plan for Alexi
 
-Generated: 2026-10-23
+Generated: 2026-10-25
 Based on upstream commits analyzed:
-- kilocode: 4481e06d8..4130f7a6e (56 commits)
-- opencode: f7d5b6f..2a3e7c0 (74 commits)
+- `82926fb30` - fix(cli): restrict browser and MCP OAuth URLs to HTTP(S)
+- `44b21a719` - fix(deps): override transitive open versions
+- `ca265eef5` - chore(deps): bump open to 11.0.4
+- `c7b9c3696` - fix(cli): block compromised eMudhra certificates
+- `7e789bbee` / `df98111b3` / `60f1ad7f1` / `df43b6526` - MCP sign-in telemetry hardening
+- `432462088` / `70354f039` - fix(cli): MCP SSE probe scoped to stream request and redirects
+- `ef2f6d9c7` - chore(deps): MCP TypeScript SDK updated due dependabot alerts (1.32.1)
+- `5f2aa0b32` - chore(deps): DOMPurify updated due dependabot alerts
+- `0377248fb` - chore(deps): vite updated due launch-editor dependabot alerts
 
 ## Summary
-- Total changes planned: 12
-- Critical: 2 | High: 4 | Medium: 4 | Low: 2
+- Total changes planned: 7
+- Critical: 2 | High: 3 | Medium: 2 | Low: 0
 
-## Key Themes Identified
-
-1. **Security hardening** — URL scheme validation for `open()` calls (kilocode CVE fix for `ms-msdt:`, `file://`, `javascript:` URLs via `open` package)
-2. **MCP improvements** — OAuth telemetry, OAuth callback hardening, parallel shutdown, idle-timeout handling, non-object output schemas, duplicate server dedup, elicitation forms
-3. **Session compaction** — Background (precompute) compaction, buffer safeguards, oldest-first shortening
-4. **Session runner** — Fallback to agent's model when session lacks one, context overflow error detection
-5. **Provider refactors** — ChatGPT context caps extracted into separate plugin, Codex model filtering
-6. **Agent file parsing** — V2 field detection, better unsupported-field warnings
-
----
+The predominant upstream theme in this window is **security hardening** (URL scheme validation to prevent exploits like `ms-msdt:` / `javascript:` / `file://` abuse, MCP SSE probe scoping, OAuth URL restrictions, and MCP SDK bump for CVE patches). The core change is a tiny-but-important `openUrl` wrapper added to `packages/core/src/open.ts`.
 
 ## Changes
 
-### 1. Add URL scheme validation helper for browser `open()` calls
+### 1. Add URL scheme validation wrapper (`openUrl`)
 **File**: `src/core/open.ts` (new file)
 **Priority**: critical
 **Type**: security
-**Reason**: Backport of kilocode security fix (commit `82926fb30`, upstream also hardens `open` to v11.0.4). Prevents attackers from supplying `file://`, `javascript:`, `ms-msdt:`, or UNC-style payloads that would execute via the browser-opener protocol handler. Any place in Alexi that passes external URLs (OAuth callbacks, MCP sign-in redirects, docs links) to `open` must route through this helper.
+**Reason**: Backports the upstream security fix from commit `82926fb30`. Prevents browser invocation of dangerous URL schemes (`file://`, `javascript:`, `ms-msdt:`, UNC paths) which can lead to local file disclosure, XSS, or RCE (e.g., CVE-2022-30190 "Follina" style exploits). Any code path in Alexi that opens a URL in a user's browser (OAuth callbacks, documentation links, MCP sign-in redirects) MUST route through this helper.
 
 **New code**:
 ```typescript
 // src/core/open.ts
-// Backport of upstream browser URL validation (kilocode #15383, opencode mcp/browser.ts).
+// Backport of upstream kilocode security fix: restrict browser URLs to http(s) only.
+// Prevents invocation of dangerous schemes (file://, javascript:, ms-msdt:, UNC paths).
 import open from "open"
 
-export function openUrl(input: string): Promise<ReturnType<typeof open>> {
+export function openUrl(input: string): Promise<unknown> {
   const url = URL.canParse(input) ? new URL(input) : undefined
   if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
     return Promise.reject(
@@ -52,270 +50,238 @@ export function openUrl(input: string): Promise<ReturnType<typeof open>> {
 }
 ```
 
-**Test file**: `src/core/open.test.ts`
+**Test file**: `src/core/__tests__/open.test.ts` (new)
 ```typescript
-import { describe, expect, test } from "bun:test"
-import { openUrl } from "./open"
+import { describe, expect, test } from "vitest" // or bun:test if applicable
+import { openUrl } from "../open"
 
 describe("openUrl", () => {
   test("rejects values that are not URLs", async () => {
     for (const input of ["not a url", ""]) {
-      const err = await openUrl(input).catch((e: unknown) => e)
-      expect(err).toMatchObject({ message: expect.stringContaining("Only http and https links") })
+      await expect(openUrl(input)).rejects.toThrow(/Only http and https links/)
     }
   })
 
   test("rejects non-http schemes", async () => {
-    for (const input of [
+    const dangerous = [
       "file:///etc/hosts",
       "javascript:alert(1)",
       "ms-msdt:/id PCWDiagnostic",
       "\\\\server\\share\\file.html",
-    ]) {
-      const err = await openUrl(input).catch((e: unknown) => e)
-      expect(err).toMatchObject({ message: expect.stringContaining("Only http and https links") })
+    ]
+    for (const input of dangerous) {
+      await expect(openUrl(input)).rejects.toThrow(/Only http and https links/)
     }
+  })
+
+  test("accepts http(s) URLs", () => {
+    // smoke test — don't actually open; just verify no sync reject
+    expect(URL.canParse("https://example.com")).toBe(true)
   })
 })
 ```
 
 ---
 
-### 2. Route all existing `open()` call sites through `openUrl`
-**File**: `src/cli/**/*.ts`, `src/mcp/**/*.ts`, any other callers of the `open` package
-**Priority**: critical
-**Type**: security
-**Reason**: Companion to change #1. The helper is useless unless every `import open from "open"` is replaced. Audit all call sites with `rg "from \"open\"" src/`.
-
-**Current code** (example pattern):
-```typescript
-import open from "open"
-// ...
-await open(authorizationUrl)
-```
-
-**New code**:
-```typescript
-import { openUrl } from "../core/open"
-// ...
-await openUrl(authorizationUrl)
-```
-
-**Audit checklist**:
-- MCP OAuth sign-in redirect (`src/mcp/oauth-provider.ts` or equivalent)
-- Browser-based auth flows (`src/cli/auth.ts`)
-- Any "open docs" / "open dashboard" commands
-- SAP AI Core login redirect if applicable (verify SAP SSO URL ultimately resolves to https:)
-
----
-
-### 3. Bump `open` dependency to 11.0.4
+### 2. Add `open` dependency and route all browser launches through `openUrl`
 **File**: `package.json`
 **Priority**: critical
 **Type**: security
-**Reason**: Transitive-dep vulnerability fix (kilocode #15383, commits `44b21a719`, `ca265eef5`). Older `open` versions did not validate URL schemes.
+**Reason**: Required dependency for the new wrapper. Also pins `open` to `11.0.4` which addresses transitive vulnerabilities (upstream `44b21a719`).
 
 **Current code**:
 ```json
-"open": "^10.x.x"  // or whatever the current pin is
+"dependencies": {
+  // ...existing deps...
+}
 ```
 
 **New code**:
 ```json
-"open": "11.0.4"
-```
-
-Also add an override to force transitive dependencies to the fixed version:
-```json
+"dependencies": {
+  "open": "11.0.4",
+  // ...existing deps...
+},
 "overrides": {
   "open": "11.0.4"
-},
-"pnpm": {
-  "overrides": {
-    "open": "11.0.4"
-  }
 }
 ```
 
----
+Then **audit and migrate** every `import open from "open"` or `child_process.exec("start"|"xdg-open"|"open" ...)` call site:
 
-### 4. Use agent's model when session has none
-**File**: `src/session/runner/model.ts` (or equivalent runner)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream opencode fix `4d30794` — when a session was created without an explicit model (e.g. created via API), subsequent runs crashed. Fallback to the agent's configured model. Important for SAP AI Core integration where sessions may be created programmatically.
-
-**Current code** (approximate):
+**Before (anywhere a URL is opened)**:
 ```typescript
-const model = session.model
-if (!model) throw new Error("Session has no model")
+import open from "open"
+await open(someUrl)
 ```
 
-**New code**:
+**After**:
 ```typescript
-const model = session.model ?? agent.model
-if (!model) {
-  throw new Error(`Session ${session.id} and agent ${agent.name} both lack a model`)
-}
+import { openUrl } from "@/core/open"
+await openUrl(someUrl)
 ```
+
+Likely call sites to audit in Alexi:
+- `src/cli/` — any `--open` / documentation / login flows
+- `src/providers/` — SAP AI Core console / auth redirect helpers
+- `src/router/` — OAuth callback handling for MCP
 
 ---
 
-### 5. Recognize additional context-overflow error patterns
-**File**: `src/providers/*/error-handling.ts` (or wherever context errors are mapped)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream opencode `09a1db3` broadens error detection so compaction triggers correctly on more providers. Relevant for SAP AI Core which may surface overflow with provider-specific wording.
+### 3. Harden MCP OAuth callback URLs
+**File**: `src/router/mcp/oauth-callback.ts` (or equivalent — mirrors upstream `packages/opencode/src/mcp/oauth-callback.ts`)
+**Priority**: critical
+**Type**: security
+**Reason**: Upstream `82926fb30` also restricts MCP OAuth redirect/authorization URLs to http(s). An attacker-controlled MCP server could otherwise supply `javascript:` or `file:` authorization URLs that would execute on callback open.
 
-**New code** (add to context-overflow matcher):
+**Current code** (illustrative):
 ```typescript
-const CONTEXT_OVERFLOW_PATTERNS = [
-  /context[_ ]length/i,
-  /maximum context/i,
-  /token.{0,20}limit/i,
-  /prompt is too long/i,
-  /input is too long/i,
-  // Added from upstream:
-  /exceeds.{0,20}context window/i,
-  /request.{0,20}too large/i,
-  /reduce the length/i,
-]
+import open from "open"
 
-export function isContextOverflow(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err)
-  return CONTEXT_OVERFLOW_PATTERNS.some((re) => re.test(msg))
-}
-```
-
----
-
-### 6. MCP server shutdown — parallelize + dedup on initial reconciliation
-**File**: `src/mcp/index.ts` (or server registry)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream opencode fixes `7b14ad4` (parallel shutdown) and `8ecd6ad` (prevent duplicate-start during initial reconciliation). Avoids multi-second shutdowns and duplicated MCP processes when config observers fire during startup.
-
-**Current code** (approximate):
-```typescript
-async function shutdown() {
-  for (const server of servers.values()) {
-    await server.stop()
-  }
+export async function startMcpOAuth(authorizationUrl: string) {
+  await open(authorizationUrl)
+  // ...
 }
 ```
 
 **New code**:
 ```typescript
-async function shutdown() {
-  await Promise.allSettled(
-    Array.from(servers.values()).map((s) => s.stop()),
-  )
-}
+import { openUrl } from "@/core/open"
 
-// Dedup starts during reconciliation:
-const starting = new Map<string, Promise<MCPServer>>()
-async function ensureStarted(id: string, config: MCPConfig): Promise<MCPServer> {
-  const existing = servers.get(id)
-  if (existing) return existing
-  let pending = starting.get(id)
-  if (pending) return pending
-  pending = startServer(id, config).finally(() => starting.delete(id))
-  starting.set(id, pending)
-  return pending
+export async function startMcpOAuth(authorizationUrl: string) {
+  // Reject non-http(s) authorization URLs supplied by the MCP server
+  await openUrl(authorizationUrl)
+  // ...
+}
+```
+
+Also validate on receipt (defense in depth):
+```typescript
+function assertHttpUrl(input: string, label: string): URL {
+  if (!URL.canParse(input)) throw new Error(`${label} is not a valid URL`)
+  const url = new URL(input)
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${label} must use http or https: ${input}`)
+  }
+  return url
 }
 ```
 
 ---
 
-### 7. Keep MCP OAuth login waiting after stray callback requests
-**File**: `src/mcp/oauth-callback.ts` (or equivalent)
+### 4. Scope MCP SSE probe to stream request & its redirect hops
+**File**: `src/router/mcp/sse-probe.ts` (equivalent to upstream `packages/opencode/src/kilocode/mcp/sse-probe.ts`)
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream opencode `309522f`. Stray/favicon requests to the callback server were resolving the login promise prematurely. Only resolve on a request that actually contains `code` or `error` query parameters.
+**Reason**: Commits `432462088` and `70354f039` fix a bug where the SSE probe's fetch instrumentation leaked across unrelated fetches when the MCP SDK followed redirects. Must scope the probe to the exact stream request URL (plus observed redirect hops) and tear down the hook afterward.
 
-**Current code** (approximate):
+**New code** (conceptual pattern — adapt to Alexi's probe implementation):
 ```typescript
-server.on("request", (req, res) => {
-  const url = new URL(req.url!, "http://localhost")
-  resolve(url.searchParams.get("code"))
-  res.end("ok")
+export async function probeSseEndpoint(initialUrl: string, opts: { signal?: AbortSignal } = {}) {
+  const visited = new Set<string>([initialUrl])
+  const originalFetch = globalThis.fetch
+
+  const scopedFetch: typeof fetch = async (input, init) => {
+    const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+    if (!visited.has(reqUrl)) {
+      // Not our probe traffic — pass through untouched
+      return originalFetch(input, init)
+    }
+    const res = await originalFetch(input, init)
+    // Record redirect hops so follow-ups stay scoped
+    if (res.redirected && res.url) visited.add(res.url)
+    return res
+  }
+
+  globalThis.fetch = scopedFetch
+  try {
+    return await doProbe(initialUrl, opts)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+```
+
+Add a regression test mirroring `packages/opencode/test/kilocode/mcp-sse-probe.test.ts`:
+```typescript
+test("probe does not intercept unrelated fetches", async () => {
+  // start probe for URL A, concurrently fetch URL B, assert B was unmodified
 })
-```
 
-**New code**:
-```typescript
-server.on("request", (req, res) => {
-  const url = new URL(req.url!, "http://localhost")
-  const code = url.searchParams.get("code")
-  const error = url.searchParams.get("error")
-  if (!code && !error) {
-    // Stray request (favicon, probe, prefetch) — ignore, keep waiting.
-    res.writeHead(404)
-    res.end()
-    return
-  }
-  if (error) {
-    reject(new Error(`OAuth error: ${error}`))
-  } else {
-    resolve(code!)
-  }
-  res.writeHead(200, { "content-type": "text/html" })
-  res.end("<html><body>You can close this tab.</body></html>")
+test("probe follows redirect chain", async () => {
+  // Server returns 302 → final SSE endpoint; assert probe stays attached
 })
 ```
 
 ---
 
-### 8. Accept MCP tools with non-root-object output schemas
-**File**: `src/mcp/client.ts` or tool-schema normalizer
-**Priority**: medium
-**Type**: bugfix
-**Reason**: Upstream opencode `c41c3a0`. Some MCP servers return union/array/primitive output schemas; previous code required a root `type: "object"`. This broke tool loading entirely for those servers.
+### 5. Bump MCP TypeScript SDK to 1.32.1
+**File**: `package.json`
+**Priority**: high
+**Type**: security
+**Reason**: Upstream `ef2f6d9c7` bumps `@modelcontextprotocol/sdk` from `1.31.0` → `1.32.1` for dependabot alerts. Alexi should match to pick up upstream security fixes.
+
+**Current code**:
+```json
+"@modelcontextprotocol/sdk": "1.31.0"
+```
 
 **New code**:
-```typescript
-function normalizeOutputSchema(schema: unknown): JSONSchema | undefined {
-  if (!schema || typeof schema !== "object") return undefined
-  // Previously: required (schema as any).type === "object"
-  // Now: accept any valid JSON schema node; wrap non-object roots so
-  // downstream code that expects .properties can still function.
-  const s = schema as JSONSchema
-  if (s.type === "object" || s.properties) return s
-  // Wrap unions/arrays/primitives so our runtime has a stable shape.
-  return { type: "object", properties: { result: s }, required: ["result"] }
-}
+```json
+"@modelcontextprotocol/sdk": "1.32.1"
+```
+
+Also check for and port the companion patch:
+`patches/@modelcontextprotocol%2Fsdk@1.32.1.patch` (31 insertions / 31 deletions in upstream) — if Alexi applies the same patch, rename and update.
+
+---
+
+### 6. Bump DOMPurify (if used) and Vite
+**File**: `package.json`
+**Priority**: medium
+**Type**: security
+**Reason**: Dependabot-driven security bumps in upstream (`5f2aa0b32`, `0377248fb`). DOMPurify 3.4.17 patches XSS bypasses; Vite update patches `launch-editor` transitive advisories. Only applies if Alexi consumes these (web UI / dev server).
+
+**New code** (apply only if dependency is present):
+```json
+"dompurify": "3.4.17",
+"vite": "7.3.7"
 ```
 
 ---
 
-### 9. Keep remote MCP requests open past Bun's fetch idle timeout
-**File**: `src/mcp/client.ts` (HTTP transport)
+### 7. (Optional) MCP sign-in telemetry pairing
+**File**: `src/router/mcp/auth-telemetry.ts` (new, if Alexi has MCP telemetry; otherwise skip)
 **Priority**: medium
 **Type**: bugfix
-**Reason**: Upstream opencode `e49157b`. Bun 1.4.x enforces a fetch idle timeout that kills long-running MCP streaming requests. Set `signal`/`idleTimeout: 0` or use a persistent abort controller.
+**Reason**: Upstream commits `60f1ad7f1`, `df98111b3`, `7e789bbee` ensure every MCP `sign_in_start` event is paired with a `sign_in_complete` (success | failure | interrupt | displaced) so metrics are not biased. If Alexi forwards MCP sign-in events to SAP telemetry/analytics, port the pairing logic.
 
-**New code**:
+**Pattern**:
 ```typescript
-async function callRemoteMcp(url: string, body: unknown) {
-  return fetch(url, {
-    method: "POST",
-    body: JSON.stringify(body),
-    headers: { "content-type": "application/json" },
-    // Bun-specific: disable idle timeout for streaming MCP sessions.
-    // @ts-expect-error — Bun extension
-    idleTimeout: 0,
-  })
-}
-```
+type SignInOutcome = "success" | "failure" | "interrupt" | "displaced"
 
----
+class McpAuthTelemetry {
+  private inflight = new Map<string, { startedAt: number; serverId: string }>()
 
-### 10. Compaction — oldest-first shortening and empty-buffer guard
-**
-{"prompt_tokens":32961,"completion_tokens":4096,"total_tokens":37057,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+  start(flowId: string, serverId: string) {
+    // If a flow for serverId already exists, close it as "displaced"
+    for (const [existingId, meta] of this.inflight) {
+      if (meta.serverId === serverId) {
+        this.complete(existingId, "displaced")
+      }
+    }
+    this.inflight.set(flowId, { startedAt: Date.now(), serverId })
+    emit("mcp.signin.start", { flowId, serverId })
+  }
 
-[Session: 4000bf53-4ccc-49a9-b5f5-f7031c41469a]
-[Messages: 2, Tokens: 37057]
+  complete(flowId: string, outcome: SignInOutcome) {
+    const meta = this.inflight.get(flowId)
+    if (!meta) return
+    this.inflight.delete
+{"prompt_tokens":11567,"completion_tokens":4096,"total_tokens":15663,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: ca7e98b4-f299-4694-bffe-b287707fc4b4]
+[Messages: 2, Tokens: 15663]
 
 ## Execution Instructions
 
