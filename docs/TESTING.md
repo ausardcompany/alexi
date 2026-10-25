@@ -26,6 +26,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing Rewind Command](#testing-rewind-command)
 - [Testing with SAP AI Core](#testing-with-sap-ai-core)
 - [Testing MCP Capability Validation (CIMD, issue #1877)](#testing-mcp-capability-validation-cimd-issue-1877)
+- [Testing MCP error classification (`tests/mcp/error-classifier.test.ts`)](#testing-mcp-error-classification-testsmcperror-classifiertestts)
 - [Testing the Automated Retention Lifecycle Runner](#testing-the-automated-retention-lifecycle-runner)
 - [Testing the commit-message rules wiring (issue #1953)](#testing-the-commit-message-rules-wiring-issue-1953)
   - [Testing commitlint `scope-enum` injection](#testing-commitlint-scope-enum-injection)
@@ -7235,6 +7236,95 @@ describe('resolveFileInclusions', () => {
 - `tests/mcp/sse-probe.test.ts` — case-insensitive `Content-Type` classification for the remote-transport connect probe (2026-09-21 sync)
 - `tests/mcp/cimd.test.ts` — pure-function coverage of Capability Interface Metadata Document validation (`validateCapabilities`, `buildManifestFromTools`, `CapabilityManifestSchema`, `McpCapabilityMismatchError`) covering the backward-compatibility, protocol-version, tool-removal, additive-change, schema-drift, description-drift, and composite-failure axes (issue #1877)
 - `tests/mcp/client-cimd.test.ts` — end-to-end integration of CIMD validation into `McpClientManager.connect`: manifest caching on every successful connect, warn-only behaviour when `cimdEnabled` is absent, permanent-failure behaviour when `cimdEnabled: true`, and the no-op path when `expectedCapabilities` is not pinned (issue #1877)
+- `tests/mcp/error-classifier.test.ts` — pure-function coverage of `classifyMcpError` across every supported signal (Node syscall `code`, HTTP status, named error class, message substring) and defensive-input shape (string / undefined / null errors, malformed URLs, missing command / url)
+- `tests/mcp/client-integration.test.ts` — end-to-end integration against a real stdio fixture (`tests/fixtures/slow-mcp-server.js`); the `populates classified error category + hint on a startup-timeout failure` case pins the manager-level wiring of `errorCategory` / `errorHint` on both the `McpConnection` object and the `getStatus()` snapshot
+
+The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+
+### Testing MCP error classification (`tests/mcp/error-classifier.test.ts`)
+
+Added in commit `dd4dd7c9`. `src/mcp/error-classifier.ts` exposes a pure `classifyMcpError(error, config)` function that maps any raised error into a stable `{ category, hint }` pair. Because it is pure (no SDK imports, no I/O, reads only the error and the `McpServerConfig`), the test suite can construct errors directly and assert the returned pair without booting a transport, mocking the SDK, or spawning a child process. Keep the tests under `tests/mcp/error-classifier.test.ts` and follow these patterns when extending them.
+
+Two helper builders at the top of the suite minimise per-case boilerplate: `stdioConfig(overrides)` returns a shape-only stdio config with `command: 'my-mcp-server'`, and `remoteConfig(overrides)` returns an `http`-transport config with `url: 'https://mcp.example.com:9443/sse'`. Both let callers pass a `Partial<McpServerConfig>` so a single branch (e.g. "malformed URL still classifies ECONNREFUSED") can be exercised without re-stating every field. The third helper, `errorWithCode(message, code)`, attaches a `code` field to a `new Error(...)` the way `child_process.spawn` and `net` do — returned as `unknown` so test assertions do not fight the function signature.
+
+```typescript
+// Excerpt from tests/mcp/error-classifier.test.ts
+function stdioConfig(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
+  return {
+    name: 'test-server',
+    transport: 'stdio',
+    command: 'my-mcp-server',
+    args: [],
+    enabled: true,
+    ...overrides,
+  };
+}
+
+function errorWithCode(message: string, code: string): unknown {
+  const err = new Error(message) as Error & { code: string };
+  err.code = code;
+  return err;
+}
+
+it('classifies ENOENT as missing-command and names the command in the hint', () => {
+  const result = classifyMcpError(
+    errorWithCode('spawn my-mcp-server ENOENT', 'ENOENT'),
+    stdioConfig()
+  );
+  expect(result.category).toBe('missing-command');
+  expect(result.hint).toContain("'my-mcp-server'");
+  expect(result.hint).toMatch(/installed and in PATH|'command' field/);
+});
+
+it('classifies ECONNREFUSED and names the port in the hint when the URL has one', () => {
+  const result = classifyMcpError(errorWithCode('ECONNREFUSED', 'ECONNREFUSED'), remoteConfig());
+  expect(result.category).toBe('connection-refused');
+  expect(result.hint).toContain('9443');
+  expect(result.hint).toContain('mcp.example.com');
+});
+```
+
+Key invariants exercised:
+
+1. **Node syscall `code` fields are the strongest signal and are checked first.** `ENOENT` → `missing-command`; `EACCES` and `EPERM` → `permission-denied`; `ENOTDIR` → `not-a-directory`; `ETIMEDOUT` → `timeout`; `ECONNREFUSED` → `connection-refused`; `ECONNRESET` / `EPIPE` → `connection-reset`; `EAGAIN` / `EBUSY` → `transient-network`. Each case constructs the error with `errorWithCode(...)` and asserts both the category AND that the hint quotes the configured `command` (stdio) or `url` + port (remote) via `expect(result.hint).toContain(...)`.
+2. **HTTP status fields (`status`, `statusCode`, `httpStatus`) are the second signal.** The suite exercises `401` with `{ status: 401 }` and `403` with `{ statusCode: 403 }` and asserts the category is `auth-failed` with the hint naming the `apiKey` field and echoing the HTTP code back to the operator.
+3. **Named error classes from `./client.ts` are recognised by name/substring, not import.** `McpConnectAuthError` and `McpConnectTimeoutError` cases set `err.name = ...` directly and assert the classifier picks up the branch — this avoids the circular dependency that would arise if the classifier imported the classes from `client.ts` (which imports this file).
+4. **Message substrings handle signals without a `code`.** Startup-timeout messages matching `/startup timeout for server .* timed out after/i` → `timeout` with a hint pointing at `timeout.startup`; `missing environment variable` → `missing-env-var` with a hint pointing at the `env` block; `fetch failed` / `getaddrinfo` / `ENOTFOUND` → `transient-network`; `HTTP 401` / `HTTP 403` embedded in the message → `auth-failed`.
+5. **Defensive-input cases are mandatory.** The classifier is called from log formatters that may receive any shape of error (`string`, `undefined`, `null`, `{ code: 123 }`, etc.). Dedicated cases pass `'plain string'`, `undefined`, and `null` and assert the category falls through to `unknown` without throwing. A malformed URL (`url: 'not-a-valid-url'`) is paired with `ECONNREFUSED` to assert port extraction fails closed — no numeric port in the hint, but the raw target descriptor still appears.
+6. **Fallback target naming is pinned explicitly.** A config with neither `command` nor `url` (`stdioConfig({ command: undefined, args: undefined })`) asserts the hint falls back to the server name, so a half-populated entry still produces a useful message.
+
+The integration-level counterpart lives in `tests/mcp/client-integration.test.ts` and pins the manager-level wiring that the pure test cannot cover:
+
+```typescript
+// Excerpt from tests/mcp/client-integration.test.ts
+it('populates classified error category + hint on a startup-timeout failure', async () => {
+  // Issue #2119: MCP connection failures must now carry a classified
+  // category and actionable hint so operators (and the TUI/CLI) can
+  // see WHAT went wrong without parsing the free-form error string.
+  manager = new McpClientManager();
+  const connection = await manager.connect(fixtureConfig('hint-check', -1, 1500));
+
+  expect(connection.status).toBe('failed');
+  expect(connection.errorCategory).toBe('timeout');
+  expect(connection.errorHint).toContain("'timeout.startup'");
+  expect(connection.error).toContain('Hint:');
+
+  // The same category + hint are exposed through getStatus() so the
+  // TUI and `alexi mcp status` can render them without reaching into
+  // the internal connection object.
+  const entry = manager.getStatus().find((s) => s.name === 'hint-check');
+  expect(entry?.errorCategory).toBe('timeout');
+  expect(entry?.errorHint).toContain("'timeout.startup'");
+});
+```
+
+Key patterns to reuse when extending the classifier suite:
+
+1. **Pin BOTH `connection.errorCategory` / `errorHint` AND the `error` string's `Hint:` suffix.** The `error` string is the backwards-compatible surface — removing the `Hint:` suffix would break every log scraper that already greps for it. The structured fields are the forward-compatible surface — removing them breaks the TUI label mapping. Both must stay observable, and the integration test asserts both in one case.
+2. **Assert `getStatus()` carries the same verdict.** The internal `McpConnection` object is implementation-detail; the TUI and `alexi mcp status` read from `manager.getStatus()`. Add a parallel assertion so a refactor that forgets to project the new fields into the snapshot fails CI.
+3. **Prefer `toContain` over `toBe` on hint strings.** Hints are allowed to evolve wording as long as the key field name (`'timeout.startup'`, `'apiKey'`, `'cwd'`) stays quoted. Pin the quoted field, not the surrounding prose.
+4. **Add one unit test per new category.** Any new `McpErrorCategory` string literal MUST land with a dedicated test case that pins both the category and at least one substring of the hint. The suite is small and runs in milliseconds — there is no reason to batch categories into shared cases.
+
 - `tests/mcp/parallel-shutdown.test.ts` — integration contract for `McpClientManager.disconnectAll` concurrency, fault tolerance, and idempotency (commit `89e7cb7b`); backed by the configurable mock in `tests/mcp/__mocks__/slow-server.ts`
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.

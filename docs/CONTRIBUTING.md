@@ -3369,6 +3369,76 @@ adding a new call site that reads the probe header or extending the classifier:
   budget starts being spent. Pushing the check into the transport layer
   would defeat that separation.
 
+## MCP Error Classification (`src/mcp/error-classifier.ts`)
+
+Added in commit `dd4dd7c9` (`feat(tools): add MCP error classification with
+actionable hints for connection failures`). The classifier replaces the previous
+"stringly-typed" MCP connection failure path: an `McpConnection` now exposes
+`errorCategory: McpErrorCategory` (stable literal union of
+`missing-command | permission-denied | not-a-directory | timeout |
+connection-refused | connection-reset | auth-failed | missing-env-var |
+transient-network | unknown`) and `errorHint: string` (one-line actionable
+hint pointing at the exact `mcp-servers.json` field or operator action to fix
+the cause) alongside the pre-existing free-form `error` string. The classifier
+is pure, lives in `src/mcp/error-classifier.ts`, and is called from both the
+retry loop and the `proc.on('error', ...)` path of `McpClientManager`. When
+extending it or adding a new call site:
+
+- **Keep the classifier a pure function.** `classifyMcpError(error, config)`
+  reads only its two arguments and never performs I/O, SDK calls, or logging.
+  The purity is what lets log formatters, status serializers, and tests call
+  it freely without stubbing. Do NOT add a provider lookup, a file read, or
+  a bus event emission here — the manager's call site owns side effects.
+- **Do NOT import the named error classes from `./client.ts` into the
+  classifier.** `client.ts` imports `error-classifier.ts`, so a reverse import
+  would create a circular dependency. The classifier recognises
+  `McpConnectAuthError` and `McpConnectTimeoutError` by `err.name` /
+  message substring, which is deliberate. If you add a new named error class
+  in `client.ts`, extend the classifier's name/substring switch rather than
+  the import graph.
+- **Check Node syscall `code` first, HTTP status second, name/message
+  third.** The signal order in `classifyMcpError` is load-bearing: `code`
+  is the single most reliable field when present (set by `child_process.spawn`
+  and `net`), HTTP status fields come next (`status` / `statusCode` /
+  `httpStatus` — checked in that order so SDK layers that use different
+  conventions all resolve), and the name / message branches run only when
+  the structured signals are absent. Preserve the ordering when adding
+  categories so a stray message substring never beats a well-formed `code`.
+- **Hints MUST quote the exact config field they point at.** The hint
+  strings are the operator-facing contract — tests use `expect(hint).toContain
+  ("'timeout.startup'")` to pin them. Use single quotes around the field name
+  (`'command'`, `'apiKey'`, `'cwd'`, `'env'`, `'timeout.startup'`,
+  `'connectTimeout'`) so the regex-grep-based assertions keep working.
+  ASCII only; no trailing punctuation beyond a terminating `.`.
+- **Clear `errorCategory` and `errorHint` on a successful connect.** The
+  manager clears all three fields (`error`, `errorCategory`, `errorHint`)
+  together when the connection flips to `connected`. If you add a new
+  error-shaped field to `McpConnection`, follow the same pattern — a
+  reconnect must not leave a stale verdict attached.
+- **Both the `error` string suffix AND the structured fields are surface
+  contracts.** The manager populates `connection.error` as
+  `` `${formatConnectError(name, err)} Hint: ${hint}` `` so existing substring
+  matchers (tests, log scrapers, CLI greps) keep working while gaining the
+  actionable hint as an inline suffix. The structured fields are the
+  forward-compatible surface for the TUI and `alexi mcp status`. Do NOT
+  drop the `Hint:` suffix in a cleanup pass, and do NOT remove the
+  structured fields from `getStatus()` — both are tested, both are read
+  by downstream code.
+- **The classifier is NOT the retry policy.** `classifyMcpError` returns
+  a UX category; `classifyConnectError` in `client.ts` returns
+  `'transient' | 'permanent'` and drives retry budgeting. The two share
+  no code intentionally — the retry policy must stay narrow (network
+  blips, HTTP 5xx, startup timeouts) while the UX classifier can grow
+  freely without changing retry behaviour. Never merge the two.
+- **Tests belong in `tests/mcp/error-classifier.test.ts` (unit) and the
+  `populates classified error category + hint on a startup-timeout
+  failure` case in `tests/mcp/client-integration.test.ts` (integration).**
+  Add a unit case for every new `McpErrorCategory` string literal pinning
+  both the category and at least one substring of the hint; extend the
+  integration case ONLY when the new category requires a new fixture
+  behaviour (e.g. a real `ECONNREFUSED` against a non-listening port).
+  See [TESTING.md — Testing MCP error classification](TESTING.md#testing-mcp-error-classification-testsmcperror-classifiertestts).
+
 ## Session Retention Policy (`getConfigSessionRetention` / `setConfigSessionRetention`)
 
 Added in the 2026-09-21 sync and extended in issue #1927 (archive / delete

@@ -25,6 +25,7 @@ import {
 } from './cimd.js';
 import { validateMcpResponse } from './validator.js';
 import { McpBreakageTracker, McpBreakageExceededError } from './breakage-tracker.js';
+import { classifyMcpError, type McpErrorCategory } from './error-classifier.js';
 // Alexi: on an interrupted MCP startup (abort, mid-handshake throw, or
 // a classified-transient failure that is about to be retried), the SDK
 // does not auto-cleanup the half-connected client or the spawned stdio
@@ -174,8 +175,31 @@ export interface McpConnection {
   prompts?: unknown[];
   /** Connection status */
   status: McpConnectionStatus;
-  /** Error message if any (actionable hint whenever possible) */
+  /**
+   * Error message if any (actionable hint whenever possible).
+   *
+   * For backwards compatibility this remains a flat string. On
+   * connection failures, the manager populates it with
+   * `${formatConnectError-message} Hint: ${classifier-hint}` so
+   * existing substring matchers (tests, CLI greps, log scrapers)
+   * continue to work while gaining the actionable classifier hint.
+   * Structured access to the category and hint is available via
+   * {@link errorCategory} and {@link errorHint}.
+   */
   error?: string;
+  /**
+   * Stable {@link McpErrorCategory} describing the last failure. Set
+   * on every connect failure (and cleared on a successful connect)
+   * so UIs/CLIs can render a user-friendly label without re-parsing
+   * the raw error string.
+   */
+  errorCategory?: McpErrorCategory;
+  /**
+   * One-line actionable hint pointing at the exact config field or
+   * operator action needed to resolve the last failure. Mirrors the
+   * `hint` returned by {@link classifyMcpError}.
+   */
+  errorHint?: string;
   /** Timestamp (ms since epoch) of the last recorded error, if any */
   lastErrorAt?: number;
   /**
@@ -1355,6 +1379,8 @@ export class McpClientManager {
         await this.attemptConnect(connection, options);
         connection.status = 'connected';
         connection.error = undefined;
+        connection.errorCategory = undefined;
+        connection.errorHint = undefined;
         // Phase 4: `ready`. All phases above completed and the
         // connection is now visible via `getConnection()`. Emit a
         // single phase-end log for the whole attempt so operators see
@@ -1380,7 +1406,10 @@ export class McpClientManager {
       } catch (error) {
         lastError = error;
         connection.lastErrorAt = Date.now();
-        connection.error = formatConnectError(config.name, error);
+        const { category, hint } = classifyMcpError(error, config);
+        connection.errorCategory = category;
+        connection.errorHint = hint;
+        connection.error = `${formatConnectError(config.name, error)} Hint: ${hint}`;
 
         // Clean up the half-connected client / stdio child before we
         // either retry (fresh Client built below) or give up. Without
@@ -1395,7 +1424,8 @@ export class McpClientManager {
           connection.status = 'failed';
           logger.error(
             `Failed to connect to MCP server ${config.name} ` +
-              `[attempt ${attempt}/${policy.maxAttempts}, ${classification}]: ${connection.error}`
+              `[attempt ${attempt}/${policy.maxAttempts}, ${classification}, ${category}]: ` +
+              `${connection.error}`
           );
           return connection;
         }
@@ -1407,7 +1437,7 @@ export class McpClientManager {
         connection.status = 'retrying';
         logger.warn(
           `MCP server ${config.name} connect attempt ${attempt}/${policy.maxAttempts} failed ` +
-            `(transient): ${connection.error} — retrying in ${delayMs}ms`
+            `(transient, ${category}): ${connection.error} — retrying in ${delayMs}ms`
         );
         // Structured companion to the human-readable warn above. Lets
         // log consumers tracking the `MCP startup [...]` vocabulary
@@ -1421,7 +1451,10 @@ export class McpClientManager {
     // attempt — but keep a defensive fallback that mirrors the failure
     // path so `connection.status` is never left as `retrying`.
     connection.status = 'failed';
-    connection.error = formatConnectError(config.name, lastError);
+    const fallbackClassified = classifyMcpError(lastError, config);
+    connection.errorCategory = fallbackClassified.category;
+    connection.errorHint = fallbackClassified.hint;
+    connection.error = `${formatConnectError(config.name, lastError)} Hint: ${fallbackClassified.hint}`;
     return connection;
   }
 
@@ -1491,7 +1524,10 @@ export class McpClientManager {
     proc.on('error', (error) => {
       if (connection.status === 'connected') {
         connection.status = 'failed';
-        connection.error = formatConnectError(config.name, error);
+        const { category, hint } = classifyMcpError(error, config);
+        connection.errorCategory = category;
+        connection.errorHint = hint;
+        connection.error = `${formatConnectError(config.name, error)} Hint: ${hint}`;
         connection.lastErrorAt = Date.now();
       }
     });
@@ -2321,12 +2357,16 @@ export class McpClientManager {
     status: string;
     tools: number;
     error?: string;
+    errorCategory?: McpErrorCategory;
+    errorHint?: string;
   }> {
     return Array.from(this.connections.entries()).map(([name, conn]) => ({
       name,
       status: conn.status,
       tools: conn.tools.length,
       error: conn.error,
+      errorCategory: conn.errorCategory,
+      errorHint: conn.errorHint,
     }));
   }
 

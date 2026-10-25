@@ -216,4 +216,27 @@ describe('McpClientManager (integration)', () => {
     expect(slow.error).toMatch(/startup timeout for server 'mixed-slow'/);
     expect(slow.error).toMatch(/timeout\.startup/);
   }, 15000);
+
+  it('populates classified error category + hint on a startup-timeout failure', async () => {
+    // Issue #2119: MCP connection failures must now carry a classified
+    // category and actionable hint so operators (and the TUI/CLI) can
+    // see WHAT went wrong without parsing the free-form error string.
+    // A hung server produces a startup-timeout error — the classifier
+    // maps it to the `timeout` category and recommends raising
+    // `timeout.startup`.
+    manager = new McpClientManager();
+    const connection = await manager.connect(fixtureConfig('hint-check', -1, 1500));
+
+    expect(connection.status).toBe('failed');
+    expect(connection.errorCategory).toBe('timeout');
+    expect(connection.errorHint).toContain("'timeout.startup'");
+    expect(connection.error).toContain('Hint:');
+
+    // The same category + hint are exposed through getStatus() so the
+    // TUI and `alexi mcp status` can render them without reaching into
+    // the internal connection object.
+    const entry = manager.getStatus().find((s) => s.name === 'hint-check');
+    expect(entry?.errorCategory).toBe('timeout');
+    expect(entry?.errorHint).toContain("'timeout.startup'");
+  }, 15000);
 });
