@@ -84,6 +84,25 @@
       "reasoning": false,
       "capabilities": ["image-generation"],
       "enabled": true
+    },
+    {
+      "id": "xai--grok-2",
+      "type": "xai",
+      "costTier": "medium",
+      "strengths": ["coding", "analysis"],
+      "maxTokens": 128000,
+      "reasoning": false,
+      "enabled": true,
+      "_providerParamsHelp": [
+        "Provider-specific sampling params are forwarded via CLI flags",
+        "(`alexi chat --min-p 0.05 --top-k 40 ...`) and guarded per family",
+        "in src/providers/sapOrchestration.ts#buildModuleConfig:",
+        "  xAI (grok/xai ids)    : min_p, top_k",
+        "  Anthropic (claude ids): speed (normal | fast)",
+        "  OpenAI (gpt/o1/...)   : reasoning (default | extended)",
+        "Unknown params are silently dropped so an xAI config never leaks",
+        "to an Anthropic/OpenAI deployment."
+      ]
     }
   ],
   "rules": [

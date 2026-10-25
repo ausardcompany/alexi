@@ -278,6 +278,30 @@ export function isGemini(modelId: string): boolean {
   return modelId.toLowerCase().includes('gemini');
 }
 
+/**
+ * Check if a model id refers to an xAI (Grok) model.
+ *
+ * SST OpenCode PRs #58870 and #58872 (2026-10) extend provider-specific
+ * sampling parameters that only xAI models accept: `min_p` (nucleus
+ * sampling floor) and `top_k` (constraint). Alexi uses this predicate to
+ * guard the forwarding of those params so they are NOT silently sent to
+ * other provider families — Anthropic silently ignores `min_p`, and
+ * OpenAI returns a `400` on unknown sampling fields.
+ *
+ * Matching rules (case-insensitive):
+ *  - `grok` as a substring (bare `grok-2`, `grok-vision`, dated
+ *    `grok-2-20250101`, prefixed `sap-ai-core/xai--grok-2`, ...).
+ *  - `xai` as a substring (SAP AI Core double-dash form `xai--grok-...`
+ *    and provider-prefixed `sap-ai-core/xai/...`).
+ *
+ * @param modelId - The model identifier to test
+ * @returns true when the model belongs to the xAI (Grok) family
+ */
+export function isXaiModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return lower.includes('grok') || lower.includes('xai');
+}
+
 /** Reasoning-effort capability for a given model id */
 export type ReasoningEffortMode = 'none' | 'binary' | 'levels';
 

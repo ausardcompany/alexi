@@ -47,7 +47,13 @@ import {
   initializeConnectorStore,
   type ConnectorState,
 } from './connectorStore.js';
-import { isClaudeOpus4, claudeFamilyMaxOutputTokens } from './model-match.js';
+import {
+  isAnthropicModel,
+  isClaudeOpus4,
+  isOpenAI,
+  isXaiModel,
+  claudeFamilyMaxOutputTokens,
+} from './model-match.js';
 import { extractImageChunks } from './transform.js';
 import { env } from '../config/env.js';
 import {
@@ -518,6 +524,30 @@ export interface OrchestrationConfig {
   topP?: number;
   /** Top-k sampling (honored by Anthropic Claude; silently dropped by OpenAI-family models) */
   topK?: number;
+  /**
+   * Nucleus sampling floor. Only forwarded for xAI (Grok) models; silently
+   * ignored for other families. See SST OpenCode PR #58870 and
+   * {@link isXaiModel}.
+   */
+  minP?: number;
+  /**
+   * Anthropic response speed tier. `'fast'` opts into the faster
+   * (lower-latency, same-quality) Claude 4.7+ tier when the deployment
+   * exposes it. Only forwarded for Anthropic models; silently dropped
+   * for other families. See SST OpenCode PR #58868.
+   */
+  speed?: 'normal' | 'fast';
+  /**
+   * OpenAI Responses extended-thinking mode. `'extended'` enables
+   * extended-thinking reasoning on reasoning-capable OpenAI models; only
+   * forwarded for OpenAI models and silently dropped for other families.
+   * See SST OpenCode PR #58872. Note that this field does NOT replace
+   * the portable {@link ReasoningConfig} resolution — it is a direct
+   * per-call hook for callers (CLI flag `--reasoning`) that want to
+   * flip the Responses `reasoning` field without constructing a full
+   * portable config.
+   */
+  reasoningMode?: 'default' | 'extended';
   /** Frequency penalty */
   frequencyPenalty?: number;
   /** Presence penalty */
@@ -555,6 +585,20 @@ export interface CompletionOptions {
   topP?: number;
   /** Top-k sampling (honored by Anthropic Claude; silently dropped by OpenAI-family models) */
   topK?: number;
+  /**
+   * Nucleus sampling floor (xAI-only; see {@link OrchestrationConfig.minP}).
+   */
+  minP?: number;
+  /**
+   * Anthropic response speed tier (Anthropic-only; see
+   * {@link OrchestrationConfig.speed}).
+   */
+  speed?: 'normal' | 'fast';
+  /**
+   * OpenAI Responses extended-thinking mode (OpenAI-only; see
+   * {@link OrchestrationConfig.reasoningMode}).
+   */
+  reasoningMode?: 'default' | 'extended';
   signal?: AbortSignal;
   /** Override tools for this call */
   tools?: ChatCompletionTool[];
@@ -1668,6 +1712,34 @@ export class SapOrchestrationProvider {
     }
     if (options?.topK !== undefined || this.config.topK !== undefined) {
       modelParams.top_k = options?.topK ?? this.config.topK;
+    }
+
+    // Provider-specific sampling params (SST OpenCode PRs #58868, #58870,
+    // #58872). Each field is guarded by the model family that documents
+    // it so we never silently forward an unknown param to a provider
+    // that would reject the request (OpenAI returns 400 on unknown
+    // sampling fields) or quietly ignore it (Anthropic drops `min_p`).
+    //
+    //   - xAI (Grok)   : `min_p`    nucleus-sampling floor (PR #58870).
+    //                    `top_k` is already forwarded above and xAI also
+    //                    accepts it (PR #58872).
+    //   - Anthropic    : `speed`    response-speed tier `'fast'`
+    //                    (PR #58868).
+    //   - OpenAI       : `reasoning` extended-thinking Responses mode
+    //                    (PR #58872). Emitted ONLY on an explicit opt-in
+    //                    (`reasoningMode: 'extended'`); `'default'` is
+    //                    equivalent to omitting the field.
+    const effectiveMinP = options?.minP ?? this.config.minP;
+    if (effectiveMinP !== undefined && isXaiModel(this.config.modelName)) {
+      modelParams.min_p = effectiveMinP;
+    }
+    const effectiveSpeed = options?.speed ?? this.config.speed;
+    if (effectiveSpeed !== undefined && isAnthropicModel(this.config.modelName)) {
+      modelParams.speed = effectiveSpeed;
+    }
+    const effectiveReasoningMode = options?.reasoningMode ?? this.config.reasoningMode;
+    if (effectiveReasoningMode === 'extended' && isOpenAI(this.config.modelName)) {
+      modelParams.reasoning = { mode: 'extended' };
     }
     if (this.config.frequencyPenalty !== undefined) {
       modelParams.frequency_penalty = this.config.frequencyPenalty;
