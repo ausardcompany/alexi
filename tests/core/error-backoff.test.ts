@@ -20,7 +20,13 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { ErrorBackoff, getRetryAfterMs, isRateLimitError } from '../../src/core/error-backoff.js';
+import {
+  ErrorBackoff,
+  classifyError,
+  getRetryAfterMs,
+  isKnownThrottle,
+  isRateLimitError,
+} from '../../src/core/error-backoff.js';
 import {
   FreeTierRateLimitError,
   ProviderRateLimitError,
@@ -255,5 +261,139 @@ describe('rate-limit UX end-to-end (issue #1534 acceptance)', () => {
     const upstream = { status: 429, headers: { 'Retry-After': '10' } };
     const classified = classifyRateLimitError(upstream, 'gpt-4o');
     expect(isRateLimitError(classified)).toBe(true);
+  });
+});
+
+describe('isKnownThrottle (issue #2152)', () => {
+  it('matches a bare HTTP 429 response (no code, no name)', () => {
+    expect(isKnownThrottle({ status: 429 })).toBe(true);
+    expect(isKnownThrottle({ statusCode: 429 })).toBe(true);
+    expect(isKnownThrottle({ response: { status: 429 } })).toBe(true);
+  });
+
+  it('matches the provider rate-limit code marker', () => {
+    expect(isKnownThrottle({ code: 'provider_rate_limit' })).toBe(true);
+  });
+
+  it('matches the free-tier rate-limit code marker', () => {
+    expect(isKnownThrottle({ code: 'free_tier_rate_limit' })).toBe(true);
+  });
+
+  it('matches by class name (cross-module safety)', () => {
+    expect(isKnownThrottle({ name: 'ProviderRateLimitError' })).toBe(true);
+    expect(isKnownThrottle({ name: 'FreeTierRateLimitError' })).toBe(true);
+  });
+
+  it('matches common rate-limit message patterns', () => {
+    expect(isKnownThrottle({ message: 'rate limit exceeded' })).toBe(true);
+    expect(isKnownThrottle({ message: 'quota exceeded for this project' })).toBe(true);
+    expect(isKnownThrottle({ message: 'Too Many Requests' })).toBe(true);
+    expect(isKnownThrottle({ message: 'HTTP 429: rate limit' })).toBe(true);
+  });
+
+  it('matches raw string errors from the fetch layer', () => {
+    expect(isKnownThrottle('rate limit reached')).toBe(true);
+    expect(isKnownThrottle('quota exceeded')).toBe(true);
+  });
+
+  it('returns false for non-throttle errors', () => {
+    expect(isKnownThrottle(null)).toBe(false);
+    expect(isKnownThrottle(undefined)).toBe(false);
+    expect(isKnownThrottle({})).toBe(false);
+    expect(isKnownThrottle({ status: 500 })).toBe(false);
+    expect(isKnownThrottle({ status: 403 })).toBe(false);
+    expect(isKnownThrottle({ message: 'permission denied' })).toBe(false);
+    expect(isKnownThrottle('socket hang up')).toBe(false);
+    expect(isKnownThrottle(42)).toBe(false);
+  });
+});
+
+describe('ErrorBackoff.isFatal honours known throttles (issue #2152)', () => {
+  it('mock HTTP 429 is non-fatal and schedules a retry', () => {
+    const b = new ErrorBackoff({ initialDelayMs: 500, maxDelayMs: 60_000, maxRetries: 5 });
+    const err = { status: 429, statusCode: 429 };
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(false);
+    expect(b.isFatal()).toBe(false);
+    // A retry is scheduled with a positive delay (exponential schedule
+    // kicked in because no Retry-After hint was attached).
+    expect(b.shouldBackoff()).toBe(true);
+    expect(b.getRemainingBackoffMs()).toBeGreaterThan(0);
+    expect(b.getConsecutiveErrors()).toBe(1);
+  });
+
+  it('known throttle message with a wrapper 400 status is still non-fatal', () => {
+    // Some provider SDKs normalise 429 to a 4xx envelope with a
+    // throttle message in the body. Without the known-throttle check
+    // this would fall into the generic fatal 4xx branch.
+    const b = new ErrorBackoff();
+    const err = { statusCode: 400, message: 'rate limit exceeded, retry later' };
+    b.recordError(400, err);
+    expect(b.isFatal(err)).toBe(false);
+    expect(b.isFatal()).toBe(false);
+  });
+
+  it('known throttle still becomes fatal once the transient retry budget is exhausted', () => {
+    const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+    const err = { status: 429 };
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(false);
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(true);
+  });
+
+  it('free-tier throttle remains fatal (permanent) even when known-throttle matches', () => {
+    const b = new ErrorBackoff();
+    const err = { code: 'free_tier_rate_limit', status: 429 };
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(true);
+  });
+});
+
+describe('classifyError tags known throttles distinctly (issue #2152)', () => {
+  it('classifies HTTP 429 as rate_limit (transient, retryable)', () => {
+    const result = classifyError({ status: 429 });
+    expect(result.type).toBe('rate_limit');
+    expect(result.fatal).toBe(false);
+    expect(result.retryable).toBe(true);
+    expect(result.statusCode).toBe(429);
+  });
+
+  it('classifies a provider_rate_limit code marker without a status as rate_limit', () => {
+    const result = classifyError({ code: 'provider_rate_limit' });
+    expect(result.type).toBe('rate_limit');
+    expect(result.fatal).toBe(false);
+    expect(result.retryable).toBe(true);
+  });
+
+  it('classifies a rate-limit message-only error as rate_limit (not validation)', () => {
+    // Without the known-throttle precedence in classifyError, this would
+    // fall through to the generic "unknown" bucket. With the fix it is
+    // tagged `rate_limit` so outer retry loops schedule the correct
+    // delay instead of overflow-compacting.
+    const result = classifyError(new Error('rate limit exceeded'));
+    expect(result.type).toBe('rate_limit');
+    expect(result.fatal).toBe(false);
+    expect(result.retryable).toBe(true);
+  });
+
+  it('classifies a "quota exceeded" message as rate_limit', () => {
+    const result = classifyError({ message: 'quota exceeded for today' });
+    expect(result.type).toBe('rate_limit');
+    expect(result.fatal).toBe(false);
+    expect(result.retryable).toBe(true);
+  });
+
+  it('still classifies free-tier throttle as fatal rate_limit (permanent)', () => {
+    const result = classifyError({ code: 'free_tier_rate_limit', status: 429 });
+    expect(result.type).toBe('rate_limit');
+    expect(result.fatal).toBe(true);
+    expect(result.retryable).toBe(false);
+  });
+
+  it('does not reclassify a 401 as rate_limit when message happens to say nothing', () => {
+    const result = classifyError({ status: 401 });
+    expect(result.type).toBe('auth');
+    expect(result.fatal).toBe(true);
   });
 });

@@ -210,6 +210,76 @@ export function isRateLimitError(err: unknown): boolean {
 }
 
 /**
+ * Message substrings that unambiguously name a provider-side throttling
+ * condition. Case-insensitive match. Ported in spirit from SST OpenCode
+ * PR #58866 — those projects keep "known throttles" out of overflow
+ * compaction and generic 4xx fatal classification so rate-limit
+ * responses retry with the correct delay instead of being treated as
+ * permanent configuration errors.
+ *
+ * Phrases are deliberately conservative:
+ *   - `rate limit` (optionally spaced) is the canonical substring.
+ *   - `quota exceeded` is the standard phrasing for provider daily/
+ *     per-minute caps.
+ *   - `too many requests` is the HTTP 429 reason phrase, which some
+ *     providers surface verbatim in the error message when the status
+ *     code did not propagate through intermediate wrappers.
+ */
+const THROTTLE_MESSAGE_RE = /\brate\s*limit\b|\bquota\s+exceeded\b|too many requests/i;
+
+/**
+ * Return true when `err` is a *known throttle* — i.e. a rate-limit /
+ * quota-exceeded response that must be treated as transient and not
+ * folded into generic 4xx fatal classification or overflow compaction.
+ *
+ * Supersedes {@link isRateLimitError} by also catching:
+ *   - string-only errors from the raw `fetch` layer (no `.statusCode`,
+ *     no machine-readable `.code`, just a message).
+ *   - errors whose only signal is a message substring (`rate limit`,
+ *     `quota exceeded`, `too many requests`) — common when a provider
+ *     SDK unwraps the response before reaching us.
+ *   - errors nesting status under `response.status` (axios-style
+ *     wrappers).
+ *
+ * This is the classifier used by {@link ErrorBackoff.isFatal} and
+ * {@link classifyError} to short-circuit the fatal fallback path for
+ * throttling signals. Both known-throttle variants (free-tier and paid)
+ * are matched; callers that need to distinguish quota-exhausted
+ * (permanent) from timing-throttled (transient) use the dedicated
+ * `isFreeTierRateLimitError` helper on top of this check.
+ */
+export function isKnownThrottle(err: unknown): boolean {
+  if (err === null || err === undefined) {
+    return false;
+  }
+  if (typeof err === 'string') {
+    return THROTTLE_MESSAGE_RE.test(err);
+  }
+  if (typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as {
+    code?: unknown;
+    name?: unknown;
+    message?: unknown;
+  };
+  if (candidate.code === FREE_TIER_RATE_LIMIT_CODE || candidate.code === PROVIDER_RATE_LIMIT_CODE) {
+    return true;
+  }
+  if (candidate.name === 'FreeTierRateLimitError' || candidate.name === 'ProviderRateLimitError') {
+    return true;
+  }
+  if (readStatus(err) === 429) {
+    return true;
+  }
+  const message = typeof candidate.message === 'string' ? candidate.message : '';
+  if (message.length > 0 && THROTTLE_MESSAGE_RE.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Return true when `err` looks like an xAI capacity-exceeded error.
  *
  * Ported from opencode 71d08e9. xAI (and some SAP proxies fronting
@@ -325,6 +395,14 @@ export class ErrorBackoff {
     // moderation, Google SAFETY, Anthropic content_policy, HTTP 451).
     if (isFreeTierRateLimitError(err) || isContentPolicyError(err)) {
       this.fatalNotified = true;
+    } else if (isKnownThrottle(err)) {
+      // Known throttles (HTTP 429, provider rate-limit codes, "rate
+      // limit" / "quota exceeded" messages) are always transient — the
+      // provider has told us to slow down, not that the request is
+      // malformed. Even if the status code the caller passed in happens
+      // to be a 4xx (some wrappers surface 400 with a rate-limit body),
+      // we must not fold it into the generic fatal 4xx branch. See
+      // SST OpenCode PR #58866 and issue #2152.
     } else if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) {
       // Generic 429 is transient per the AGENTS.md error contract: the
       // rate-limit window will eventually reset, so let the exponential
@@ -404,6 +482,18 @@ export class ErrorBackoff {
   isFatal(err?: unknown): boolean {
     if (err !== undefined && (isFreeTierRateLimitError(err) || isContentPolicyError(err))) {
       return true;
+    }
+    // Known throttle (HTTP 429, rate-limit codes, "rate limit" / "quota
+    // exceeded" messages) — transient per the AGENTS.md error contract.
+    // Short-circuit to false so the paid-tier throttle path never leaks
+    // into the generic `fatalNotified` fallback below. The only way a
+    // throttle becomes fatal is budget exhaustion (checked next). See
+    // SST OpenCode PR #58866 and issue #2152.
+    if (err !== undefined && isKnownThrottle(err) && !isFreeTierRateLimitError(err)) {
+      if (this.consecutiveErrors >= this.config.maxRetries) {
+        return true;
+      }
+      return false;
     }
     if (
       err !== undefined &&
@@ -573,6 +663,16 @@ export function classifyError(err: unknown): ErrorClassification {
   //    classification purposes, but permanent (not retryable).
   if (isFreeTierRateLimitError(err)) {
     return { type: 'rate_limit', fatal: true, retryable: false, statusCode };
+  }
+
+  // 3b. Known throttle (HTTP 429, provider rate-limit codes, "rate
+  //     limit"/"quota exceeded" messages) — must be tagged `rate_limit`
+  //     and classified as transient BEFORE the generic 4xx fallback
+  //     below folds a rate-limit-with-wrapper-4xx-status into
+  //     `validation` (fatal). See SST OpenCode PR #58866 and issue
+  //     #2152.
+  if (isKnownThrottle(err)) {
+    return { type: 'rate_limit', fatal: false, retryable: true, statusCode };
   }
 
   // 4. HTTP status mapping.
