@@ -7150,8 +7150,70 @@ describe('resolveFileInclusions', () => {
 - `tests/mcp/sse-probe.test.ts` — case-insensitive `Content-Type` classification for the remote-transport connect probe (2026-09-21 sync)
 - `tests/mcp/cimd.test.ts` — pure-function coverage of Capability Interface Metadata Document validation (`validateCapabilities`, `buildManifestFromTools`, `CapabilityManifestSchema`, `McpCapabilityMismatchError`) covering the backward-compatibility, protocol-version, tool-removal, additive-change, schema-drift, description-drift, and composite-failure axes (issue #1877)
 - `tests/mcp/client-cimd.test.ts` — end-to-end integration of CIMD validation into `McpClientManager.connect`: manifest caching on every successful connect, warn-only behaviour when `cimdEnabled` is absent, permanent-failure behaviour when `cimdEnabled: true`, and the no-op path when `expectedCapabilities` is not pinned (issue #1877)
+- `tests/mcp/parallel-shutdown.test.ts` — integration contract for `McpClientManager.disconnectAll` concurrency, fault tolerance, and idempotency (commit `89e7cb7b`); backed by the configurable mock in `tests/mcp/__mocks__/slow-server.ts`
 
 The MCP client tests verify connection management, tool discovery, and reconnection behavior.
+
+### Testing `McpClientManager.disconnectAll` parallel shutdown (`tests/mcp/parallel-shutdown.test.ts`)
+
+Introduced by commit `89e7cb7b` (`test(tests): add integration test for mcp parallel shutdown`). The suite is a verification-only regression guard that locks in the `Promise.allSettled`-based concurrent shutdown contract on `McpClientManager.disconnectAll` (`src/mcp/client.ts:1529-1550`) across three axes: concurrency, fault tolerance, and idempotency. All behaviour is already present in the manager — the suite exists so a future refactor that collapses the parallel shutdown back to a sequential `for ... await` loop, drops the up-front `Array.from(this.connections.keys())` snapshot, or converts `Promise.allSettled` into `Promise.all` trips CI immediately rather than silently serialising shutdown or stranding slow / throwing peers.
+
+The configurable mock in `tests/mcp/__mocks__/slow-server.ts` is deliberately independent from `@modelcontextprotocol/client`: a test does not have to boot a real MCP server to exercise the manager's shutdown orchestration. The exported `SlowMcpServer` exposes just the slice of the SDK `Client` surface `McpClientManager.disconnect` touches — a single `close(): Promise<void>` method plus two observable fields (`shutdownCalls`, `isShutdown`). The mock is wired into the manager via a bare `McpConnection` fixture that the suite injects directly through a one-location `connections` cast — the real SDK handshake is intentionally bypassed:
+
+```typescript
+// tests/mcp/parallel-shutdown.test.ts (helper)
+function buildFakeConnection(name: string, server: SlowMcpServer): McpConnection {
+  const config: McpServerConfig = {
+    name,
+    transport: 'stdio',
+    command: 'node',
+    args: ['server.js'],
+    enabled: true,
+  };
+  return {
+    config,
+    // The manager only ever calls `.close()` on this during disconnect;
+    // cast through unknown is required because `SlowMcpServer` is
+    // intentionally not a full SDK `Client`.
+    client: server as unknown as McpConnection['client'],
+    tools: [],
+    status: 'connected',
+    attemptCount: 1,
+  };
+}
+
+function registerFakeConnections(
+  manager: McpClientManager,
+  entries: Array<{ name: string; server: SlowMcpServer }>
+): void {
+  const connections = (manager as unknown as { connections: Map<string, McpConnection> })
+    .connections;
+  for (const { name, server } of entries) {
+    connections.set(name, buildFakeConnection(name, server));
+  }
+}
+```
+
+Five cases pin the contract:
+
+| Case                                                                        | What it pins                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shuts down all servers concurrently (total time ~1x, not Nx)`              | Five servers at 80 ms per-server delay. Elapsed time must be `< perServerDelayMs * 2` so a regression to sequential shutdown (which would be `>= 320 ms` here) trips the assertion. Every server reaches `isShutdown === true` and `shutdownCalls === 1`.                                                                                      |
+| `completes shutdown even when one server throws during close`               | Three servers (healthy / faulty / healthy); the faulty one has `throwOnShutdown: true`. `disconnectAll()` must resolve without rejecting. Healthy peers reach `isShutdown === true`; the faulty server's `shutdownCalls === 1` but `isShutdown === false` (the throw aborted before the assignment).                                           |
+| `is idempotent: a second disconnectAll is a no-op`                          | Two servers. After the first `disconnectAll()`, a second call must not re-close already-removed connections. `shutdownCalls` stays at `1` on each server.                                                                                                                                                                                      |
+| `handles an empty connection map without error`                             | A bare manager with no registered connections. `disconnectAll()` resolves to `undefined` without throwing.                                                                                                                                                                                                                                     |
+| `repeated disconnect(name) after cleanup is a no-op`                        | After `disconnect('solo')`, a second `disconnect('solo')` early-returns without throwing; `disconnect('never-existed')` for an unregistered name does the same. `shutdownCalls` stays at `1`.                                                                                                                                                  |
+
+Key patterns to reuse when extending the suite:
+
+1. **Mock the logger at four levels (`info`, `warn`, `error`, `debug`) via `vi.mock('../../src/utils/logger.js', ...)` with `importActual` as the base.** The manager's shutdown path logs on every `.disconnect(name)` success and on every `Promise.allSettled` rejection; without the mock the suite output is unreadable. Keeping `debug` mocked (not left as-is) is deliberate — the parallel-shutdown contract is a timing + state contract, not a logging contract, so an unexpected debug log is not a regression this suite watches for. If a future contract adds structured log fields, add dedicated assertions against the mocked function rather than relying on this suite.
+2. **Inject fake connections via a one-location cast, not through the real `connect` handshake.** The suite's `registerFakeConnections(manager, entries)` helper reaches into the private `connections` map with `(manager as unknown as { connections: Map<string, McpConnection> }).connections.set(...)`. Isolating the cast to a single helper keeps the test file free of repeated `as unknown as` noise and localises any future field-rename maintenance to one place. Do NOT drive the mock through `manager.connect(config)` — the real `connect` path boots a child process, performs the SDK handshake, and installs a real `Client`; none of that is needed to exercise `disconnectAll`.
+3. **Set `connection.process` to `undefined` so the manager's `process.kill()` branch is skipped.** The suite exercises the client-side shutdown orchestration (`Promise.allSettled` over the `connections.keys()` snapshot), not the stdio child-cleanup path. Real stdio child cleanup is covered by other integration tests under `tests/mcp/`. A reviewer who adds a `process: { kill: vi.fn() }` stub here is drifting the test scope — add a dedicated case under `client.test.ts` instead.
+4. **Keep the per-server delay small (10-80 ms) and the overhead budget generous (2x the per-server delay).** CI's noisy scheduler can add 20-50 ms of overhead per test on a cold worker; a tight overhead cap turns the suite into a flake generator. The 2x budget on the 80 ms five-server case is still a hard regression guard — a sequential shutdown would be `> 320 ms`, well above the `< 160 ms` ceiling. If you add a new concurrency case, size the delay so the sequential-regression case is at least 3x the parallel-case assertion.
+5. **Assert on observable state (`isShutdown`, `shutdownCalls`), not log calls.** The point of `SlowMcpServer` is that both fields are directly observable without introspecting manager internals. Asserting `expect(server.isShutdown).toBe(true)` is a stable contract; asserting `expect(logger.info).toHaveBeenCalledWith(...)` ties the suite to the log format and will break on cosmetic log rewording. The suite intentionally never asserts on log content.
+6. **Keep the mock independent from `@modelcontextprotocol/client`.** The whole value of `SlowMcpServer` is that it is a 45-line standalone file with zero SDK coupling. A reviewer who tries to extend it to implement `tools/list` or `callTool` is building the wrong thing — those code paths are covered by `client.test.ts` with the full SDK mock. The slow-server mock exists solely for shutdown-orchestration tests.
+
+The matching port-maintenance invariants for `disconnectAll` (why the up-front name snapshot and `Promise.allSettled` are both load-bearing, and what a reviewer should block) live in [CONTRIBUTING.md — Best-effort parallel shutdown (`McpClientManager.disconnectAll`)](CONTRIBUTING.md#best-effort-parallel-shutdown-mcpclientmanagerdisconnectall).
 
 ### Testing the `mcp-servers.example.json` schema guard (commit `ae461291`)
 
