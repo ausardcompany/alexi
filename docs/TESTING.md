@@ -7310,6 +7310,12 @@ contributors do not re-introduce them by hand:
    // columns once the first argument sat at 98 columns)
    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
 
+   // src/mcp/__tests__/oauth-callback.test.ts:33 (canonical form after the
+   // 2026-10-25 auto-fix pass in commit 0e133ffa — the synchronous
+   // expect(() => fn()).toThrow(/.../) variant of the above, which sat at
+   // 99 columns and fits under the 100-column ceiling)
+   expect(() => assertHttpUrl(bad, 'authorization_endpoint')).toThrow(/must use http or https/);
+
    // src/config/__tests__/overlay.test.ts:6 (canonical form after the
    // 2026-10-07 auto-fix pass in commit b02d6ad2 — a three-binding named
    // import plus the `from '../overlay.js';` clause sits at 97 columns and
