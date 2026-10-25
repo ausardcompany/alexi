@@ -4359,6 +4359,54 @@ If you extend `parseSchedule` (e.g. add `"weekly on Monday at 9am"`):
 
 See [docs/TESTING.md — Testing the todowrite scheduled-todo promotion hook](TESTING.md#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets) for the regression surface.
 
+## Step-scoped caches must be cleared from BOTH the top-of-loop AND post-loop paths
+
+Introduced by commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, issue #2143). The prompt-hook model resolution cache in `src/hooks/index.ts` is the first per-step cache wired into the `agenticChat` iteration loop. The pattern it uses is deliberate and should be reused verbatim by any future step-scoped cache.
+
+### Why two clear points
+
+The agent loop in `src/core/agenticChat.ts` can exit a step three ways:
+
+1. **Normal continuation** — control falls off the end of the iteration body and `while` re-evaluates. The cleanest path.
+2. **Early `break`** — triggered by the loop detector, mistake tracker, stop hook, malformed-tool-call guard, token-budget guard, or future early-exit conditions. There are at least five such break paths today.
+3. **Normal termination** — `iterations === maxIterations` and the loop condition goes false after the body completes.
+
+A single clear at the top of the loop body handles (1) and the "continue" family. A single clear after the loop handles (3) and (2). Together, both clears guarantee the cache is drained regardless of exit path, without wrapping the ~600-line iteration body in a `try/finally` (which would reach past locals declared inside the body and be hard to maintain as the body evolves).
+
+```typescript
+// src/core/agenticChat.ts
+let previousStepId: string | undefined;
+
+while (iterations < maxIterations) {
+  iterations++;
+
+  if (previousStepId !== undefined) {
+    clearStepCache(previousStepId); // drains the previous step
+  }
+
+  const sessionIdForStep =
+    options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+  previousStepId = `${sessionIdForStep}:${iterations}`;
+
+  // ... step body: model.complete, tool execution, hooks, break conditions ...
+}
+
+if (previousStepId !== undefined) {
+  clearStepCache(previousStepId); // drains the final step after any break
+}
+```
+
+### Rules for future step-scoped caches
+
+- **Compose the step id from `(sessionId, iterationNumber)`.** Falling back to `'default'` for the session id is OK inside a single `agenticChat` invocation (the iteration number disambiguates), but a cache that must be safe across concurrent agent loops MUST require a real session id — document it in the exported type.
+- **Key entries by `${stepId}:${payloadKey}` and clear by `${stepId}:` prefix.** The trailing colon is load-bearing. The naive `startsWith(stepId)` form will collapse `step-1` into `step-10` and drop both. A regression test similar to `tests/hooks/model-cache.test.ts` — `does NOT confuse a step id that is a prefix of another step id` — is a hard requirement; add it in the same commit as the cache.
+- **Store by reference identity.** Hook authors and other consumers rely on the "same resolver output across hits in the same step" contract. Do NOT structural-clone the cached value on return — the cache is cheap because it is a map lookup, not because it reshapes data.
+- **Export two `@internal` helpers.** `_reset<Name>Cache()` for `beforeEach`, and `_<name>CacheSize()` for growth / eviction assertions. The underscored names mark them as test-only; the actual lifetime hook (`clearStepCache` in this case) is the one production code uses. The current trio — `getModelForHook`, `clearStepCache`, `_resetModelResolutionCache`, `_modelResolutionCacheSize` — is the pattern.
+- **`clearStepCache` must be idempotent on an unknown step id.** The post-loop clear can run after a defensive early-exit path has already cleared the step; dropping an unknown id must be a no-op, not a throw.
+- **Update every hooks-module mock.** `agenticChat.ts` imports `clearStepCache` alongside `executeHooks` / `createHookContext` / `getBlockCap`. Any test that `vi.mock('../../src/hooks/index.js', ...)` MUST re-export `clearStepCache: vi.fn()` or the mock will not shadow the production surface and the loop crashes on the first iteration. Four tests were updated in the original commit — add new mocks to that list, do not fork a new pattern.
+
+See [docs/ARCHITECTURE.md — Prompt Hook Model Resolution Cache](ARCHITECTURE.md#prompt-hook-model-resolution-cache-srchooksindexts) for the cache design and [docs/TESTING.md — Testing the prompt-hook model resolution cache](TESTING.md#testing-the-prompt-hook-model-resolution-cache-testshooksmodel-cachetestts-issue-2143) for the eight-case regression surface this pattern mandates.
+
 ## MCP sign-in telemetry pairing (`src/mcp/auth-telemetry.ts`)
 
 Introduced in the 2026-10-25 upstream sync (ports kilocode `7e789bbee` / `df98111b3` / `60f1ad7f1` / `df43b6526`). The `McpAuthTelemetry` state machine pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` so dashboards computing OAuth success rates are not biased by orphaned starts.

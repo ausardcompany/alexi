@@ -89,6 +89,8 @@ vi.mock('../../src/hooks/index.js', () => ({
     return mockExecuteHooks(event, ...rest);
   },
   createHookContext: (...args: unknown[]) => mockCreateHookContext(...args),
+  getBlockCap: () => 8,
+  clearStepCache: vi.fn(),
 }));
 
 import { agenticChat } from '../../src/core/agenticChat.js';
