@@ -1370,6 +1370,28 @@ describe('Write Tool', () => {
 });
 ```
 
+### Alternative: direct `executeUnsafe` without a module mock
+
+Not every tool test needs the `vi.mock('../../../src/tool/index.js', ...)` shim shown above. When the suite imports a single `*Tool` export and only asserts on filesystem side effects, calling `tool.executeUnsafe(params, ctx)` directly is both shorter and avoids a module-level stub that other suites in the same file would inherit. `src/tool/tools/__tests__/edit.mixed-eol.test.ts` and `src/tool/tools/__tests__/edit.agentsmd.test.ts` follow this shape:
+
+```typescript
+async function runEdit(
+  ctx: MinimalContext,
+  params: { filePath: string; oldString: string; newString: string; replaceAll?: boolean }
+) {
+  // Use executeUnsafe so the test does not depend on the default `ask`
+  // permission rule for `write` (which has no interactive listener in a
+  // test run and would otherwise time out and reject every call).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (editTool as any).executeUnsafe(params, ctx);
+  return result;
+}
+```
+
+The cast to `as any` is required because `executeUnsafe` is not on the public `ToolDefinition` surface — it is added by `defineTool` at registration time. The cast is local to the test helper and does not leak into production typings.
+
+Regression history to be aware of: calling `editTool.execute(...)` from a non-interactive test suite will time out on the default `ask` rule for `write` and silently resolve every edit to a user rejection — the assertions then compare the file's original contents against the expected post-edit contents and fail. This is the exact mode `edit.mixed-eol.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)). When adding a new edit / write / delete test, pick either the `vi.mock('../../../src/tool/index.js', ...)` shim OR the direct `executeUnsafe` call — never the raw `.execute()` path.
+
 ### Tool Test Coverage
 
 | Tool | Test File | Test Cases |
@@ -11510,6 +11532,10 @@ Regression contract — four fixture cells all produced in-memory via `xlsx.util
 | Datetime                  | `YYYY-MM-DD HH:MM:SS`  | Space-separated upstream contract        |
 | Date-only (ISO midnight)  | `YYYY-MM-DD`           | Unchanged behaviour for backwards compat  |
 | Elapsed `[h]:mm`          | sheet-formatted `value.w` | Elapsed-time regex `/\[(h+|m+|s+)\]/i`   |
+
+#### Fixture note: elapsed-time durations are 1899-12-30 + N hours, not out-of-range ISO strings
+
+SheetJS stores an elapsed duration (e.g. `25:30`) as `1899-12-30T00:00:00Z` plus `N` hours — a `25:30` elapsed value therefore materialises as `1899-12-31T01:30:00.000Z`. Do NOT construct the fixture as `new Date('1899-12-30T25:30:00.000Z')`: hour `25` is not a legal ISO time-of-day, so JavaScript's `Date` constructor silently returns `Invalid Date` and the implementation's downstream `.toISOString()` call throws `RangeError: Invalid time value` before the assertion runs. This is the exact failure mode `read-office.xlsx-cell.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)); the fix is to compute the fixture against the real SheetJS epoch (1899-12-30 + hours) rather than to encode `h > 23` in the ISO literal itself.
 
 ### Running
 
