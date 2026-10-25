@@ -44,6 +44,7 @@ import {
   executeHooks,
   createHookContext,
   getBlockCap,
+  clearStepCache,
   type HookResult as HookExecResult,
 } from '../hooks/index.js';
 import { sanitizeHookContext } from '../utils/markup-sanitize.js';
@@ -671,8 +672,37 @@ export async function agenticChat(
   const MAX_MALFORMED_TOOL_CALLS_PER_TURN = 3;
   let malformedToolCallCount = 0;
 
+  // Alexi_change (ports SST OpenCode PR #58601, merged 2026-10-24):
+  // track the previous iteration's step id so the prompt-hook model
+  // resolution cache (`src/hooks/index.ts`) can be cleared at the
+  // boundary between steps. The clear happens at the TOP of the next
+  // iteration and once more after the while loop exits — covering
+  // both the continue-loop path and every `break` without wrapping
+  // the ~600-line iteration body in a try/finally.
+  let previousStepId: string | undefined;
+
   while (iterations < maxIterations) {
     iterations++;
+
+    // Clear the hook model-resolution cache for the step we just
+    // finished (if any). A step is "complete" the moment control
+    // returns to the top of the loop — the model may have called N
+    // tools, received N results, and either continued or decided to
+    // keep looping. Either way, the next step should resolve its
+    // model fresh so a mid-session routing change is not masked by
+    // a stale cache entry.
+    if (previousStepId !== undefined) {
+      clearStepCache(previousStepId);
+    }
+
+    // Alexi_change (ports SST OpenCode PR #58601, merged 2026-10-24):
+    // assign a per-step id used to key the prompt-hook model resolution
+    // cache (`src/hooks/index.ts` `getModelForHook`). Composing the
+    // session id (when present) with the iteration number keeps the id
+    // unique across concurrent sessions in the same process so step N
+    // of session A and step N of session B do not share cache entries.
+    const sessionIdForStep = options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+    previousStepId = `${sessionIdForStep}:${iterations}`;
 
     // When the loop is about to exhaust its budget, force the final turn to
     // be text-only: drop the tool schemas from the request and inject a
@@ -1296,6 +1326,15 @@ export async function agenticChat(
       finalText = result.text;
       break;
     }
+  }
+
+  // Clear the hook model-resolution cache for the final step. The
+  // top-of-loop clear only handles the previous iteration, so any
+  // path that `break`s out of the loop (normal completion, loop
+  // detector, mistake tracker, stop hook, malformed tool guard, ...)
+  // would otherwise leave the last step's entries behind.
+  if (previousStepId !== undefined) {
+    clearStepCache(previousStepId);
   }
 
   // Defensive fallback: any code path that drops out of the loop without
