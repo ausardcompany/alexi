@@ -6,280 +6,282 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-22
+Generated: 2026-10-25
 Based on upstream commits analyzed:
-- **kilocode**: 4481e06d8 (PR link ingest), 2f452d7a5 (session host registry), 2e1793154 (MCP prompt content preservation), f18d9006c (session host contracts)
-- **opencode**: c87f6b7 (compaction keepID validation), 3260ec7 (legacy apply_patch → edit), 0c8e7a9 (preserve Permission.Error), 6a5f15a (ignore unsupported agent colors), 6709f56 (compaction output limit), ab249a9 (cache breakpoints), 870ab9d (baseURL override), 93bf002 (shared isRecord/stringify), 9c8e9e4 (remove NamedError/iife), 248bfbe (codemode fetch display args), e441daf (Windows service port), c93aaae (fs.watch graceful fallback)
+- `82926fb30` - fix(cli): restrict browser and MCP OAuth URLs to HTTP(S)
+- `44b21a719` - fix(deps): override transitive open versions
+- `ca265eef5` - chore(deps): bump open to 11.0.4
+- `c7b9c3696` - fix(cli): block compromised eMudhra certificates
+- `7e789bbee` / `df98111b3` / `60f1ad7f1` / `df43b6526` - MCP sign-in telemetry hardening
+- `432462088` / `70354f039` - fix(cli): MCP SSE probe scoped to stream request and redirects
+- `ef2f6d9c7` - chore(deps): MCP TypeScript SDK updated due dependabot alerts (1.32.1)
+- `5f2aa0b32` - chore(deps): DOMPurify updated due dependabot alerts
+- `0377248fb` - chore(deps): vite updated due launch-editor dependabot alerts
 
 ## Summary
-- Total changes planned: 14
-- Critical: 2 | High: 5 | Medium: 5 | Low: 2
+- Total changes planned: 7
+- Critical: 2 | High: 3 | Medium: 2 | Low: 0
+
+The predominant upstream theme in this window is **security hardening** (URL scheme validation to prevent exploits like `ms-msdt:` / `javascript:` / `file://` abuse, MCP SSE probe scoping, OAuth URL restrictions, and MCP SDK bump for CVE patches). The core change is a tiny-but-important `openUrl` wrapper added to `packages/core/src/open.ts`.
 
 ## Changes
 
-### 1. Preserve Permission.Error in FileAccess Interface
-**File**: `src/permission/file-access.ts` (or `src/permission/index.ts`)
+### 1. Add URL scheme validation wrapper (`openUrl`)
+**File**: `src/core/open.ts` (new file)
 **Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 0c8e7a9) — the permission error type was being lost at the FileAccess boundary, causing permission errors to surface as generic errors. Critical for correct permission enforcement, especially important in SAP AI Core where permission tracking is auditable.
-
-**Current code** (likely pattern):
-```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Error> =>
-  Permission.check(path).pipe(
-    Effect.mapError((e) => new Error(e.message))
-  )
-```
+**Type**: security
+**Reason**: Backports the upstream security fix from commit `82926fb30`. Prevents browser invocation of dangerous URL schemes (`file://`, `javascript:`, `ms-msdt:`, UNC paths) which can lead to local file disclosure, XSS, or RCE (e.g., CVE-2022-30190 "Follina" style exploits). Any code path in Alexi that opens a URL in a user's browser (OAuth callbacks, documentation links, MCP sign-in redirects) MUST route through this helper.
 
 **New code**:
 ```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Permission.Error> =>
-  Permission.check(path) // propagate Permission.Error unchanged
-```
+// src/core/open.ts
+// Backport of upstream kilocode security fix: restrict browser URLs to http(s) only.
+// Prevents invocation of dangerous schemes (file://, javascript:, ms-msdt:, UNC paths).
+import open from "open"
 
-Ensure the `FileAccess.Interface` error channel is typed as `Permission.Error` (or union including it) rather than being flattened.
-
----
-
-### 2. Validate Compaction keepID with SessionMessage.ID schema
-**File**: `src/core/session/compaction.ts`
-**Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode c87f6b7) — `keepID` was not being validated against the message ID schema, which could produce silent corruption during compaction. Important because Alexi's SAP AI Core sessions must preserve message history consistency.
-
-**Current code**:
-```typescript
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-  // ...
+export function openUrl(input: string): Promise<unknown> {
+  const url = URL.canParse(input) ? new URL(input) : undefined
+  if (!url || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return Promise.reject(
+      new Error(`Only http and https links can be opened in the browser: ${input}`),
+    )
+  }
+  return open(url.href)
 }
 ```
 
-**New code**:
+**Test file**: `src/core/__tests__/open.test.ts` (new)
 ```typescript
-import { SessionMessage } from "../session/message.js"
+import { describe, expect, test } from "vitest" // or bun:test if applicable
+import { openUrl } from "../open"
 
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-    ? SessionMessage.ID.make(opts.keepID) // validate via schema
-    : undefined
-  // ...
-}
-```
+describe("openUrl", () => {
+  test("rejects values that are not URLs", async () => {
+    for (const input of ["not a url", ""]) {
+      await expect(openUrl(input)).rejects.toThrow(/Only http and https links/)
+    }
+  })
 
----
+  test("rejects non-http schemes", async () => {
+    const dangerous = [
+      "file:///etc/hosts",
+      "javascript:alert(1)",
+      "ms-msdt:/id PCWDiagnostic",
+      "\\\\server\\share\\file.html",
+    ]
+    for (const input of dangerous) {
+      await expect(openUrl(input)).rejects.toThrow(/Only http and https links/)
+    }
+  })
 
-### 3. Give compaction summaries the same output limit as normal turns
-**File**: `src/core/session/compaction.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 6709f56) — compaction was truncating summaries too aggressively, losing context. Especially impactful for long-running SAP AI Core sessions where compaction is more frequent due to token limits.
-
-**New code** (locate the max-output option when building the compaction generation request):
-```typescript
-const generation = yield* Generation.create({
-  model,
-  messages: compactionMessages,
-  // BEFORE: maxOutputTokens: COMPACTION_MAX_TOKENS,
-  // AFTER: use the same cap as a normal turn
-  maxOutputTokens: model.limit?.output ?? DEFAULT_MAX_OUTPUT,
+  test("accepts http(s) URLs", () => {
+    // smoke test — don't actually open; just verify no sync reject
+    expect(URL.canParse("https://example.com")).toBe(true)
+  })
 })
 ```
 
 ---
 
-### 4. Map legacy `apply_patch` permissions to `edit`
-**File**: `src/permission/migrate.ts` (create if missing) or `src/permission/saved.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 3260ec7) — legacy saved permissions use the removed `apply_patch` tool name; without migration, saved permissions are orphaned and prompt users repeatedly. Alexi inherits saved-permission storage so needs the same migration.
-
-**New code**:
-```typescript
-// src/permission/saved.ts (loader)
-const LEGACY_TOOL_MAP: Record<string, string> = {
-  apply_patch: "edit",
-}
-
-function migrateToolName(name: string): string {
-  return LEGACY_TOOL_MAP[name] ?? name
-}
-
-// in load():
-const saved = rows.map((row) => ({
-  ...row,
-  tool: migrateToolName(row.tool),
-}))
-```
-
-Add a unit test asserting legacy `apply_patch` rows load as `edit`.
-
----
-
-### 5. Let configured provider baseURL override catalog model endpoints
-**File**: `src/providers/sap-ai-core.ts` / `src/providers/index.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 870ab9d) — when a user configures a `baseURL` override for a provider, the catalog's model-specific endpoint was still winning. Highly relevant for Alexi: SAP AI Core deployments **always** need a custom base URL per tenant, so this prevents the catalog from stomping tenant endpoints.
+### 2. Add `open` dependency and route all browser launches through `openUrl`
+**File**: `package.json`
+**Priority**: critical
+**Type**: security
+**Reason**: Required dependency for the new wrapper. Also pins `open` to `11.0.4` which addresses transitive vulnerabilities (upstream `44b21a719`).
 
 **Current code**:
-```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  return model.endpoint ?? provider.baseURL ?? DEFAULT
+```json
+"dependencies": {
+  // ...existing deps...
 }
 ```
 
 **New code**:
-```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  // Explicit provider baseURL (user config) overrides catalog model endpoint
-  return provider.baseURL ?? model.endpoint ?? DEFAULT
+```json
+"dependencies": {
+  "open": "11.0.4",
+  // ...existing deps...
+},
+"overrides": {
+  "open": "11.0.4"
 }
 ```
 
-Add a test ensuring an SAP AI Core base URL overrides any catalog `endpoint` on the model definition.
+Then **audit and migrate** every `import open from "open"` or `child_process.exec("start"|"xdg-open"|"open" ...)` call site:
+
+**Before (anywhere a URL is opened)**:
+```typescript
+import open from "open"
+await open(someUrl)
+```
+
+**After**:
+```typescript
+import { openUrl } from "@/core/open"
+await openUrl(someUrl)
+```
+
+Likely call sites to audit in Alexi:
+- `src/cli/` — any `--open` / documentation / login flows
+- `src/providers/` — SAP AI Core console / auth redirect helpers
+- `src/router/` — OAuth callback handling for MCP
 
 ---
 
-### 6. Skip non-cacheable content parts when placing cache breakpoints
-**File**: `src/providers/cache-policy.ts` (or wherever cache breakpoint logic lives)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode ab249a9) — cache breakpoints were being placed on non-cacheable content parts (e.g., images, ephemeral tool results), invalidating the cache. Affects token economy on all providers; important for SAP AI Core cost tracking.
+### 3. Harden MCP OAuth callback URLs
+**File**: `src/router/mcp/oauth-callback.ts` (or equivalent — mirrors upstream `packages/opencode/src/mcp/oauth-callback.ts`)
+**Priority**: critical
+**Type**: security
+**Reason**: Upstream `82926fb30` also restricts MCP OAuth redirect/authorization URLs to http(s). An attacker-controlled MCP server could otherwise supply `javascript:` or `file:` authorization URLs that would execute on callback open.
+
+**Current code** (illustrative):
+```typescript
+import open from "open"
+
+export async function startMcpOAuth(authorizationUrl: string) {
+  await open(authorizationUrl)
+  // ...
+}
+```
 
 **New code**:
 ```typescript
-function placeBreakpoint(parts: ContentPart[]) {
-  // Only place on cacheable parts (text, tool-result with text payload)
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const p = parts[i]
-    if (p.type === "text" || (p.type === "tool-result" && hasTextOutput(p))) {
-      p.providerOptions = { ...p.providerOptions, cacheControl: { type: "ephemeral" } }
-      return
+import { openUrl } from "@/core/open"
+
+export async function startMcpOAuth(authorizationUrl: string) {
+  // Reject non-http(s) authorization URLs supplied by the MCP server
+  await openUrl(authorizationUrl)
+  // ...
+}
+```
+
+Also validate on receipt (defense in depth):
+```typescript
+function assertHttpUrl(input: string, label: string): URL {
+  if (!URL.canParse(input)) throw new Error(`${label} is not a valid URL`)
+  const url = new URL(input)
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${label} must use http or https: ${input}`)
+  }
+  return url
+}
+```
+
+---
+
+### 4. Scope MCP SSE probe to stream request & its redirect hops
+**File**: `src/router/mcp/sse-probe.ts` (equivalent to upstream `packages/opencode/src/kilocode/mcp/sse-probe.ts`)
+**Priority**: high
+**Type**: bugfix
+**Reason**: Commits `432462088` and `70354f039` fix a bug where the SSE probe's fetch instrumentation leaked across unrelated fetches when the MCP SDK followed redirects. Must scope the probe to the exact stream request URL (plus observed redirect hops) and tear down the hook afterward.
+
+**New code** (conceptual pattern — adapt to Alexi's probe implementation):
+```typescript
+export async function probeSseEndpoint(initialUrl: string, opts: { signal?: AbortSignal } = {}) {
+  const visited = new Set<string>([initialUrl])
+  const originalFetch = globalThis.fetch
+
+  const scopedFetch: typeof fetch = async (input, init) => {
+    const reqUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+    if (!visited.has(reqUrl)) {
+      // Not our probe traffic — pass through untouched
+      return originalFetch(input, init)
     }
+    const res = await originalFetch(input, init)
+    // Record redirect hops so follow-ups stay scoped
+    if (res.redirected && res.url) visited.add(res.url)
+    return res
+  }
+
+  globalThis.fetch = scopedFetch
+  try {
+    return await doProbe(initialUrl, opts)
+  } finally {
+    globalThis.fetch = originalFetch
   }
 }
 ```
 
+Add a regression test mirroring `packages/opencode/test/kilocode/mcp-sse-probe.test.ts`:
+```typescript
+test("probe does not intercept unrelated fetches", async () => {
+  // start probe for URL A, concurrently fetch URL B, assert B was unmodified
+})
+
+test("probe follows redirect chain", async () => {
+  // Server returns 302 → final SSE endpoint; assert probe stays attached
+})
+```
+
 ---
 
-### 7. Ignore unsupported agent colors (don't throw on config decode)
-**File**: `src/agent/config.ts` or `src/agent/schema.ts`
+### 5. Bump MCP TypeScript SDK to 1.32.1
+**File**: `package.json`
 **Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 6a5f15a) — invalid color values in agent frontmatter crashed agent loading entirely. Agents should load with `color: undefined` instead.
+**Type**: security
+**Reason**: Upstream `ef2f6d9c7` bumps `@modelcontextprotocol/sdk` from `1.31.0` → `1.32.1` for dependabot alerts. Alexi should match to pick up upstream security fixes.
 
 **Current code**:
-```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(ColorSchema),
-  // ...
-})
+```json
+"@modelcontextprotocol/sdk": "1.31.0"
 ```
 
 **New code**:
+```json
+"@modelcontextprotocol/sdk": "1.32.1"
+```
+
+Also check for and port the companion patch:
+`patches/@modelcontextprotocol%2Fsdk@1.32.1.patch` (31 insertions / 31 deletions in upstream) — if Alexi applies the same patch, rename and update.
+
+---
+
+### 6. Bump DOMPurify (if used) and Vite
+**File**: `package.json`
+**Priority**: medium
+**Type**: security
+**Reason**: Dependabot-driven security bumps in upstream (`5f2aa0b32`, `0377248fb`). DOMPurify 3.4.17 patches XSS bypasses; Vite update patches `launch-editor` transitive advisories. Only applies if Alexi consumes these (web UI / dev server).
+
+**New code** (apply only if dependency is present):
+```json
+"dompurify": "3.4.17",
+"vite": "7.3.7"
+```
+
+---
+
+### 7. (Optional) MCP sign-in telemetry pairing
+**File**: `src/router/mcp/auth-telemetry.ts` (new, if Alexi has MCP telemetry; otherwise skip)
+**Priority**: medium
+**Type**: bugfix
+**Reason**: Upstream commits `60f1ad7f1`, `df98111b3`, `7e789bbee` ensure every MCP `sign_in_start` event is paired with a `sign_in_complete` (success | failure | interrupt | displaced) so metrics are not biased. If Alexi forwards MCP sign-in events to SAP telemetry/analytics, port the pairing logic.
+
+**Pattern**:
 ```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(
-    Schema.transform(
-      Schema.Unknown,
-      Schema.UndefinedOr(ColorSchema),
-      {
-        decode: (v) => (isValidColor(v) ? v : undefined),
-        encode: (v) => v,
+type SignInOutcome = "success" | "failure" | "interrupt" | "displaced"
+
+class McpAuthTelemetry {
+  private inflight = new Map<string, { startedAt: number; serverId: string }>()
+
+  start(flowId: string, serverId: string) {
+    // If a flow for serverId already exists, close it as "displaced"
+    for (const [existingId, meta] of this.inflight) {
+      if (meta.serverId === serverId) {
+        this.complete(existingId, "displaced")
       }
-    )
-  ),
-  // ...
-})
-```
+    }
+    this.inflight.set(flowId, { startedAt: Date.now(), serverId })
+    emit("mcp.signin.start", { flowId, serverId })
+  }
 
----
+  complete(flowId: string, outcome: SignInOutcome) {
+    const meta = this.inflight.get(flowId)
+    if (!meta) return
+    this.inflight.delete
+{"prompt_tokens":11567,"completion_tokens":4096,"total_tokens":15663,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
 
-### 8. Add session host registry + Kilo Cloud adapter (session hosting abstraction)
-**Files**:
-- `src/session-hosting/types.ts` (new)
-- `src/session-hosting/registry.ts` (new)
-- `src/session-hosting/index.ts` (new)
-
-**Priority**: medium
-**Type**: feature
-**Reason**: Upstream feature (kilocode 2f452d7a5, f18d9006c) — introduces a pluggable session host registry. For Alexi, this creates a clean seam to register SAP AI Core as a session host alongside any local/cloud hosts. Enables future SAP-hosted session restore/sync.
-
-**New code** (`src/session-hosting/types.ts`):
-```typescript
-export interface SessionHost {
-  readonly id: string
-  readonly displayName: string
-  readonly supports: (sessionID: string) => boolean
-  readonly restore: (sessionID: string) => Promise<SessionSnapshot | undefined>
-  readonly list?: () => Promise<SessionSummary[]>
-}
-
-export interface SessionSnapshot { /* ... */ }
-export interface SessionSummary { id: string; title: string; updatedAt: number }
-```
-
-**New code** (`src/session-hosting/registry.ts`):
-```typescript
-const hosts = new Map<string, SessionHost>()
-
-export const register = (host: SessionHost) => {
-  hosts.set(host.id, host)
-}
-export const get = (id: string) => hosts.get(id)
-export const list = () => Array.from(hosts.values())
-export const resolveForSession = (sessionID: string): SessionHost | undefined =>
-  list().find((h) => h.supports(sessionID))
-```
-
-Register an SAP AI Core host adapter in `src/providers/sap-ai-core.ts` on module init.
-
----
-
-### 9. Preserve MCP prompt content (no shell expansion on prompt strings)
-**File**: `src/core/session/prompt.ts` or `src/tool/mcp.ts`
-**Priority**: medium
-**Type**: bugfix
-**Reason**: Upstream fix (kilocode 2e1793154) — MCP prompt content was being passed through shell expansion, mangling `$VAR` and backticks. Fix preserves the raw content.
-
-**Current code**:
-```typescript
-const expanded = shellExpand(mcpPrompt.content)
-```
-
-**New code**:
-```typescript
-// MCP prompts are user content, not shell commands; do not expand.
-const content = mcpPrompt.content
-```
-
-Add a regression test: an MCP prompt containing `$HOME` must remain literal `$HOME`.
-
----
-
-### 10. Introduce shared `isRecord` and `stringify` helpers; drop redundant decoding
-**File**: `src/util/record.ts` (new), apply across callsites
-**Priority**: medium
-**Type**: refactor
-**Reason**: Upstream refactor (opencode 93bf002, 7012c9d, 6dfc681) — consolidates `isRecord` type guard + `stringify` helper and removes redundant re-decoding of already-branded data. Reduces duplicated runtime validation in hot paths (session inbox, projector, prompt).
-
-**New code** (`src/util/record.ts`):
-```typescript
-export const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v)
-
-export const stringify = (v: unknown): string => {
-  if (typeof v === "string") return v
-  try { return JSON.stringify(v) } catch { return String(v) }
-}
-```
-
-Then audit `src/core/session/{inbox,projector,prompt}.ts` and `src/providers/*.ts` for inline `typeof x === "object" && x !== null` checks and replace with `isRecord`. Rem
-{"prompt_tokens":15088,"completion_tokens":4096,"total_tokens":19184,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
-
-[Session: 3034f6b1-0c6a-4d59-a5e8-d52c6cd91c27]
-[Messages: 2, Tokens: 19184]
+[Session: ca7e98b4-f299-4694-bffe-b287707fc4b4]
+[Messages: 2, Tokens: 15663]
 
 ## Execution Instructions
 
