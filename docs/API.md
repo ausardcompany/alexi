@@ -5280,7 +5280,103 @@ export function extractStatusCode(err: unknown): number | undefined;
 
 /** True for auth failures that will NOT recover on retry. */
 export function isPermanentAuthFailure(err: unknown): boolean;
+
+/**
+ * Broader structural check for a provider content-policy violation
+ * (issue #2134). Supersedes `isContentFilterError` by covering OpenAI
+ * moderation shapes, Google SAFETY, Anthropic content_policy, HTTP 451,
+ * and a message-regex fallback for raw string errors. Consumed by
+ * `ErrorBackoff.recordError` / `ErrorBackoff.isFatal` so a content
+ * policy block from any provider family short-circuits identically.
+ */
+export function isContentPolicyError(err: unknown): boolean;
+
+/** Coarse-grained taxonomy bucket for a provider failure. */
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+/** Result of `classifyError`. */
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+/**
+ * Fold any upstream error into a stateless {type, fatal, retryable,
+ * statusCode} record. Precedence (most-specific first):
+ *   1. isContentPolicyError  -> content_policy, fatal.
+ *   2. isPermanentAuthFailure -> auth, fatal.
+ *   3. isFreeTierRateLimitError -> rate_limit, fatal.
+ *   4. HTTP status mapping (401/403 auth; 400/422/other 4xx
+ *      validation; 429 rate_limit; 451 content_policy; 5xx network).
+ *   5. NETWORK_MESSAGE_RE   -> network, transient.
+ *   6. isRateLimitError / isXAICapacityError -> rate_limit, transient.
+ *   7. Fall-through -> unknown (cautiously retryable).
+ *
+ * Deliberately stateless — retry-budget bookkeeping stays with
+ * `ErrorBackoff`.
+ */
+export function classifyError(err: unknown): ErrorClassification;
 ```
+
+### Content-policy classification taxonomy (issue #2134)
+
+The `classifyError` helper is the "single-field decision" surface for telemetry attribution, user-facing error rendering, and outer retry loops that only need to know "is this transient or permanent?". `src/providers/index.ts` re-exports it (along with `ErrorType` and `ErrorClassification`) so callers importing from the canonical providers surface get a single entry point. Three provider-attribution helpers live on the providers side:
+
+```typescript
+// src/providers/index.ts
+
+/** HTTP 451 OR nested { error: { type: 'moderation' | code: 'content_policy_violation' } }. */
+export function isOpenAIContentPolicyError(err: unknown): boolean;
+
+/** finishReason === 'SAFETY' OR promptFeedback.blockReason === 'SAFETY'. */
+export function isGoogleSafetyError(err: unknown): boolean;
+
+/** error_type === 'content_policy' OR invalid_request_error + content_policy message. */
+export function isAnthropicContentPolicyError(err: unknown): boolean;
+```
+
+All three are subsumed by the generic `isContentPolicyError` for retry decisions; they exist for telemetry/logging paths that want to attribute a block to a specific provider.
+
+Example — classify once at the retry boundary and dispatch on `type`:
+
+```typescript
+import { classifyError } from './providers/index.js';
+
+async function callWithTaxonomy<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const c = classifyError(err);
+    switch (c.type) {
+      case 'content_policy':
+        // Permanent — surface the policy block to the user, do NOT retry.
+        throw err;
+      case 'auth':
+      case 'validation':
+        // Permanent — operator must fix credentials / request shape.
+        throw err;
+      case 'network':
+      case 'rate_limit':
+      case 'unknown':
+        // Transient — caller's retry budget decides.
+        if (c.retryable) {
+          /* retry with backoff */
+        }
+        throw err;
+    }
+  }
+}
+```
+
+See [docs/ARCHITECTURE.md — Content-policy classification across provider families](ARCHITECTURE.md#content-policy-classification-across-provider-families-issue-2134) for the precedence flowchart and [docs/PROVIDERS.md — Content-policy detection helpers](PROVIDERS.md#content-policy-detection-helpers-issue-2134) for the per-provider helper surface.
 
 ### `ErrorBackoff.isFatal(err?)` — three lookup paths (issue #1994)
 
@@ -9170,7 +9266,7 @@ Semantics:
 
 ## Stream Event Guards API
 
-Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). The `src/providers/protocols/stream-events.ts` module exposes forward-compatible SSE-event guards so a benign forward-rolled upstream provider does not turn into a hard failure.
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). Extended in commit `a482d950` (ports the SST OpenCode #58596 / #58608 / #58609 discipline) to cover the normalised-chunk shape consumed by the streaming orchestrator, not only raw SSE event decoders. The `src/providers/protocols/stream-events.ts` module exposes forward-compatible guards so a benign forward-rolled upstream provider never turns into a hard failure.
 
 ```typescript
 export interface TypedStreamEvent {
@@ -9186,12 +9282,32 @@ export function classifyStreamEvent(
   event: unknown,
   knownTypes: ReadonlySet<string>
 ): StreamEventClassification;
+
+/**
+ * The set of fields a normalised StreamChunk may carry. Keep in sync with
+ * the StreamChunk interface at src/providers/sapOrchestration.ts:238-250.
+ * Adding a new normalised channel (e.g. audio, reasoning) MUST update both
+ * halves; forgetting only causes a benign warn log, not a crash.
+ */
+export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>;
+
+/**
+ * Returns true when a stream chunk carries at least one field the
+ * orchestrator knows how to handle. Non-throwing by contract.
+ */
+export function isRecognizedStreamChunk(chunk: unknown): boolean;
 ```
 
 Semantics:
 
-- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
-- Structural `{ type: string }` shape — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` / `isRecognizedStreamChunk` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `warn` / `debug` and continue so the stream stays open for the next event.
+- Structural `{ type: string }` shape for events, duck-typed field-presence check for chunks — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+- `KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned by `tests/core/streaming-events.test.ts`. Widening the `StreamChunk` interface without updating the snapshot fails CI.
+
+Consumer wiring:
+
+- `src/providers/sapOrchestration.ts:1997-2019` wraps the SAP AI SDK's `chunk.getDeltaContent()` / `chunk.getDeltaToolCalls()` getters in a per-chunk `try/catch`, logs `logger.warn('Unknown streaming event, skipping chunk (<model>): ...')` on decode failure, and `continue`s to the next SDK chunk.
+- `src/core/streamingOrchestrator.ts:546-561` invokes `isRecognizedStreamChunk` before accumulating into `fullText` / `finalUsage`. On an unrecognised normalised shape it logs `logger.warn('Unknown streaming chunk shape, skipping: <JSON>', { modelUsed })` and returns `{ value: { text: '' }, done: false }` so `for await` consumers advance naturally.
 
 ## Transport Retry Classifier API
 
@@ -9672,3 +9788,49 @@ The allowlist is `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Missing /
 | anything else | `JSON.stringify(part)` |
 
 The embedded `resource` type used by the formatter is widened to `{ uri?: string; mimeType?: string; text?: string }`.
+
+## MCP Output-Schema Normaliser (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Normalises an MCP tool's `outputSchema` field so downstream code that only inspects `.properties` continues to work regardless of what the server declared:
+
+| Input shape | Output |
+|-------------|--------|
+| `undefined` / `null` / primitive (`string`, `number`, `boolean`) | `undefined` |
+| `{ type: 'object', properties: {...} }` | the schema verbatim |
+| `{ properties: {...} }` (no explicit `type`) | the schema verbatim |
+| `{ type: 'array', items: ... }` | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+| `{ type: 'string' }` and other primitive-root schemas | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+| `{ anyOf: [...] }` / `{ oneOf: [...] }` / `{ allOf: [...] }` | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+
+Call sites spread the result safely onto a tool definition: `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing. See [docs/ARCHITECTURE.md — MCP Output-Schema Normalisation](ARCHITECTURE.md#mcp-output-schema-normalisation-srcmcpclientts) for the full dispatch flowchart.
+
+## MCP Client Manager Connect Semantics (`src/mcp/client.ts`)
+
+The `McpClientManager.connect(config, options)` public method keeps its existing signature but now de-duplicates concurrent calls for the same `config.name` (2026-10-23 upstream sync, ports opencode `8ecd6ad`). A caller that invokes `connect` while a prior call for the same server name is still in flight joins the first promise instead of spawning a parallel transport.
+
+```typescript
+class McpClientManager {
+  async connect(
+    config: McpServerConfig,
+    options?: McpConnectOptions
+  ): Promise<McpConnection>;
+
+  async disconnectAll(): Promise<void>;
+  // ...
+}
+```
+
+The dedup lookup / insert happens before the handshake body (`connectImpl`), and the `.finally()` block in the public method removes the pending entry regardless of outcome so a failed connect does not leave a stale cache entry. For callers this means two legitimate behaviours:
+
+1. **Second call joins the first.** `const [a, b] = await Promise.all([mgr.connect(cfg), mgr.connect(cfg)])` resolves to the SAME `McpConnection` instance for both bindings; no second stdio child is spawned.
+2. **Subsequent calls after resolution still cache.** Once `connect` resolves the entry is removed from `pendingConnects`, but the underlying `connections` map still carries the connection — a third `connect(cfg)` after both prior calls complete returns the already-registered connection via the normal `this.connections.has(config.name)` early-return path.
+
+`disconnectAll()` now runs disconnects in parallel via `Promise.allSettled` (ports opencode `7b14ad4`). A slow or hung server cannot stall shutdown for the others; per-server errors are logged by `disconnect()` itself and never propagated through `allSettled`. See [docs/ARCHITECTURE.md — MCP Client Connect De-duplication](ARCHITECTURE.md#mcp-client-connect-de-duplication-srcmcpclientts) for the sequence diagram.

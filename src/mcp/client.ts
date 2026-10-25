@@ -34,6 +34,15 @@ import { cleanupInterrupted } from './cleanup.js';
 // alexi_change: opencode `7b5f1bd` — track per-server codemode support
 // so a server that rejects the probe is not re-queried on every call.
 import { forgetServer as forgetCodemodeSupport } from './codemode-support.js';
+// Structured startup logging: phase start/end + error context with
+// captured stderr. See `./startup-logger.ts` for the field vocabulary.
+import {
+  logPhaseEnd,
+  logPhaseStart,
+  logRetryScheduled,
+  logStartupError,
+  type StartupPhase,
+} from './startup-logger.js';
 
 /**
  * Bounds for `timeout` fields at runtime. Mirrored from `./config.js`
@@ -718,9 +727,62 @@ export function formatContentPart(part: unknown): string {
   }
 }
 
+/**
+ * Normalize an MCP tool's `outputSchema` field.
+ *
+ * MCP servers in the wild emit a mix of output schema shapes:
+ *   - a root `object` schema with `properties`
+ *   - a union / `anyOf` schema
+ *   - an `array` schema
+ *   - a primitive (`type: "string"`, `type: "number"`, ...)
+ *   - or no `outputSchema` at all
+ *
+ * Downstream code that only inspects `.properties` would previously
+ * silently drop tools whose output schema was anything other than a root
+ * object. Wrapping non-object roots in `{ type: 'object', properties:
+ * { result: <original> }, required: ['result'] }` preserves the shape
+ * contract so a server that returns a bare array / primitive still
+ * advertises its tool to the model. Mirrors opencode `c41c3a0`.
+ *
+ * Returns `undefined` when the input is not a usable JSON schema node,
+ * so callers can safely spread the result onto a tool definition.
+ */
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined {
+  if (!schema || typeof schema !== 'object') {
+    return undefined;
+  }
+  const s = schema as { type?: unknown; properties?: unknown };
+  if (s.type === 'object' || s.properties !== undefined) {
+    return s as { type?: string; properties?: Record<string, unknown>; required?: string[] };
+  }
+  // Wrap unions / arrays / primitives so the runtime has a stable
+  // `{ properties }` shape regardless of what the server declared.
+  return {
+    type: 'object',
+    properties: { result: s as Record<string, unknown> },
+    required: ['result'],
+  };
+}
+
 export class McpClientManager {
   private connections: Map<string, McpConnection> = new Map();
   private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * In-flight `connect()` promises keyed by server name.
+   *
+   * Prevents duplicate connect attempts when config observers fire
+   * concurrently during initial reconciliation (opencode `8ecd6ad`).
+   * Without this guard, a config-change event that lands while the
+   * startup `connectFromConfig()` is still running would spawn a second
+   * stdio child for the same server, resulting in zombie processes and
+   * confusing double-register notifications.
+   *
+   * Entry lifecycle: added when `connect()` begins, removed in its
+   * `finally` block regardless of outcome.
+   */
+  private pendingConnects: Map<string, Promise<McpConnection>> = new Map();
   /**
    * MCP protocol-breakage tracker. Counts validation violations per
    * server and surfaces a disable decision once the configured threshold
@@ -736,6 +798,14 @@ export class McpClientManager {
    * internal map key — it is never surfaced to callers.
    */
   private refreshDebounces: Map<string, RefreshDebounceEntry> = new Map();
+  /**
+   * Per-connection stderr buffer captured during the `spawn` phase.
+   * The structured startup logger reads this to append tail context to
+   * `logStartupError` so operators see what the server printed before
+   * dying without re-running the connect. Reset at the start of every
+   * attempt and discarded once the connection reaches `connected`.
+   */
+  private stderrBuffers: WeakMap<McpConnection, string> = new WeakMap();
   /**
    * Cached global timeout from {@link McpConfig.timeout}, used as the
    * fallback layer between per-server config and the `MCP_TOOL_TIMEOUT`
@@ -1017,6 +1087,7 @@ export class McpClientManager {
     options?: McpConnectOptions
   ): Promise<void> {
     const { config } = connection;
+    const attempt = connection.attemptCount;
 
     // Fail fast on obvious config errors so we don't burn the retry
     // budget on a request that can never succeed.
@@ -1033,6 +1104,16 @@ export class McpClientManager {
       }
     }
 
+    // Reset the per-connection stderr buffer for this attempt. The
+    // `spawn` phase (inside connectStdio / connectRemote) repopulates
+    // it; carry-over from a previous attempt would misattribute output
+    // to the current failure.
+    this.stderrBuffers.set(connection, '');
+
+    // Phases 1 + 2: `spawn` and `initialize`. The transport-specific
+    // helpers emit the structured `spawn` / `initialize` phase logs
+    // themselves so the handshake sub-phase is visible even when
+    // `connectStdio` or `connectRemote` has multiple side-effects.
     if (config.transport === 'stdio') {
       await this.connectStdio(connection, options);
     } else if (config.transport === 'sse' || config.transport === 'http') {
@@ -1041,14 +1122,28 @@ export class McpClientManager {
       throw new Error(`Transport ${config.transport} not yet implemented`);
     }
 
-    // Fetch available tools (with pagination support). Each page is
-    // bound by the per-server `request` timeout so a slow server can't
-    // stall startup indefinitely — the `startup` budget covered the
-    // handshake above; metadata fetches use the `request` budget going
-    // forward. Additional metadata endpoints (resources, prompts) are
-    // fetched in parallel with tools where the client supports them,
-    // so a slow endpoint on one axis does not block the others.
-    const rawTools = await this.fetchInitialMetadata(config.name, connection.client);
+    // Phase 3: `capabilities`. The MCP `initialize` handshake has
+    // completed; fetch the initial metadata (`tools/list` plus the
+    // optional parallel probes for `resources/list` and
+    // `prompts/list`). Each page is bound by the per-server `request`
+    // timeout so a slow server can't stall startup indefinitely — the
+    // `startup` budget covered the handshake above; metadata fetches
+    // use the `request` budget going forward.
+    const capsPhase: StartupPhase = {
+      server: config.name,
+      phase: 'capabilities',
+      attempt,
+      startedAt: Date.now(),
+    };
+    logPhaseStart(capsPhase);
+    let rawTools: Array<{ name: string; description?: string; inputSchema: unknown }>;
+    try {
+      rawTools = await this.fetchInitialMetadata(config.name, connection.client);
+    } catch (error) {
+      logStartupError(config.name, 'capabilities', error, this.stderrBuffers.get(connection));
+      throw error;
+    }
+    logPhaseEnd(capsPhase, Date.now() - capsPhase.startedAt);
     connection.tools = rawTools.map((tool) => this.mapToolInfo(tool, config.name));
 
     // Build and cache the observed capability manifest. The protocol
@@ -1189,6 +1284,32 @@ export class McpClientManager {
    * cause.
    */
   async connect(config: McpServerConfig, options?: McpConnectOptions): Promise<McpConnection> {
+    // Deduplicate concurrent connect requests for the same server. When
+    // the config observer and the initial reconciliation both fire a
+    // connect for `config.name`, the second caller joins the first
+    // promise instead of spawning a parallel transport. Mirrors opencode
+    // `8ecd6ad`.
+    const inFlight = this.pendingConnects.get(config.name);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const task = this.connectImpl(config, options).finally(() => {
+      this.pendingConnects.delete(config.name);
+    });
+    this.pendingConnects.set(config.name, task);
+    return task;
+  }
+
+  /**
+   * Internal implementation of {@link connect}. Separated so the public
+   * entry point can own in-flight dedup bookkeeping without re-indenting
+   * the (long) handshake body.
+   */
+  private async connectImpl(
+    config: McpServerConfig,
+    options?: McpConnectOptions
+  ): Promise<McpConnection> {
     if (this.connections.has(config.name)) {
       const existing = this.connections.get(config.name)!;
       if (existing.status === 'connected') {
@@ -1253,12 +1374,30 @@ export class McpClientManager {
         this.registerNotificationHandlers(connection);
       }
 
+      const attemptStartedAt = Date.now();
       try {
         await this.attemptConnect(connection, options);
         connection.status = 'connected';
         connection.error = undefined;
         connection.errorCategory = undefined;
         connection.errorHint = undefined;
+        // Phase 4: `ready`. All phases above completed and the
+        // connection is now visible via `getConnection()`. Emit a
+        // single phase-end log for the whole attempt so operators see
+        // a clear "connect fully done" signal and the overall wall
+        // time without having to sum the sub-phases themselves.
+        logPhaseEnd(
+          {
+            server: config.name,
+            phase: 'ready',
+            attempt,
+            startedAt: attemptStartedAt,
+          },
+          Date.now() - attemptStartedAt
+        );
+        // Discard the stderr buffer — the attempt succeeded, no
+        // operator needs to inspect it.
+        this.stderrBuffers.delete(connection);
         logger.info(
           `Connected to MCP server: ${config.name} (${connection.tools.length} tools)` +
             (attempt > 1 ? ` [after ${attempt} attempts]` : '')
@@ -1300,6 +1439,10 @@ export class McpClientManager {
           `MCP server ${config.name} connect attempt ${attempt}/${policy.maxAttempts} failed ` +
             `(transient, ${category}): ${connection.error} — retrying in ${delayMs}ms`
         );
+        // Structured companion to the human-readable warn above. Lets
+        // log consumers tracking the `MCP startup [...]` vocabulary
+        // see the retry schedule without parsing the free-form line.
+        logRetryScheduled(config.name, attempt + 1, delayMs);
         await this.delay(delayMs);
       }
     }
@@ -1355,6 +1498,19 @@ export class McpClientManager {
       spawnOptions.cwd = resolvedCwd;
     }
 
+    // Phase 1: `spawn`. Fork the subprocess and let the OS wire up
+    // the stdio pipes. A failure here (missing binary, EACCES, ...)
+    // surfaces as a `proc.on('error')` event; we surface it via the
+    // structured startup logger right before the SDK's `connect` call
+    // observes the broken pipe.
+    const spawnPhase: StartupPhase = {
+      server: config.name,
+      phase: 'spawn',
+      attempt: connection.attemptCount,
+      startedAt: Date.now(),
+    };
+    logPhaseStart(spawnPhase);
+
     // Spawn the MCP server process
     const proc = spawn(config.command, config.args || [], spawnOptions);
 
@@ -1383,9 +1539,15 @@ export class McpClientManager {
       }
     });
 
-    // Log stderr for debugging
+    // Log stderr for debugging AND accumulate it on the connection so
+    // `logStartupError` can include a tail snippet when the handshake
+    // or capabilities phase fails. Capped implicitly by `tailStderr`
+    // in `startup-logger.ts`.
     proc.stderr?.on('data', (data) => {
-      logger.warn(`[${config.name}] ${data.toString()}`);
+      const chunk = data.toString();
+      logger.warn(`[${config.name}] ${chunk}`);
+      const previous = this.stderrBuffers.get(connection) ?? '';
+      this.stderrBuffers.set(connection, previous + chunk);
     });
 
     // Create stdio transport - filter out undefined values from env
@@ -1402,11 +1564,24 @@ export class McpClientManager {
       env: cleanEnv,
     });
 
-    // Bind the handshake to the per-server `startup` budget. The SDK also
-    // honours `timeout` internally, but we additionally guard with an
-    // `AbortController` so a slow spawn produces a named, actionable error
-    // that points at `timeout.startup` in `mcp-servers.json` instead of a
-    // generic SDK message.
+    // End of the `spawn` phase. The subprocess has been forked and
+    // its stdio pipes are wired up; from here on the SDK drives the
+    // MCP handshake over those pipes.
+    logPhaseEnd(spawnPhase, Date.now() - spawnPhase.startedAt);
+
+    // Phase 2: `initialize`. The MCP handshake proper. Bind it to the
+    // per-server `startup` budget. The SDK also honours `timeout`
+    // internally, but we additionally guard with an `AbortController`
+    // so a slow spawn produces a named, actionable error that points
+    // at `timeout.startup` in `mcp-servers.json` instead of a generic
+    // SDK message.
+    const initPhase: StartupPhase = {
+      server: config.name,
+      phase: 'initialize',
+      attempt: connection.attemptCount,
+      startedAt: Date.now(),
+    };
+    logPhaseStart(initPhase);
     const { startup } = this.getTimeoutsForServer(config.name);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), startup);
@@ -1416,15 +1591,18 @@ export class McpClientManager {
         signal: controller.signal,
       });
     } catch (error) {
+      let thrown: unknown = error;
       if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
-        throw new Error(formatTimeoutError(config.name, 'connect', 'startup', startup), {
+        thrown = new Error(formatTimeoutError(config.name, 'connect', 'startup', startup), {
           cause: error,
         });
       }
-      throw error;
+      logStartupError(config.name, 'initialize', thrown, this.stderrBuffers.get(connection));
+      throw thrown;
     } finally {
       clearTimeout(timer);
     }
+    logPhaseEnd(initPhase, Date.now() - initPhase.startedAt);
   }
 
   /**
@@ -1465,66 +1643,95 @@ export class McpClientManager {
 
     const timeoutMs = this.getConnectTimeoutForServer(config.name);
 
-    await this.withConnectTimeout(config.name, timeoutMs, async (signal) => {
-      const headers: Record<string, string> = {};
-      if (config.apiKey) {
-        headers.Authorization = `Bearer ${config.apiKey}`;
-      }
-      // Probe the URL to surface connect failures within budget. HEAD
-      // is cheap and sufficient to verify reachability; SSE endpoints
-      // typically reject it with a 405 which still proves the peer
-      // responded within budget.
-      const response = await fetch(config.url!, {
-        method: 'HEAD',
-        headers,
-        signal,
-      });
-      // Drain / discard body if present so no socket lingers. `HEAD`
-      // responses are body-less per spec, but some servers still
-      // stream a hello frame back on the same connection.
-      if (response.body && typeof (response.body as ReadableStream).cancel === 'function') {
-        await (response.body as ReadableStream).cancel().catch(() => undefined);
-      }
-      // Reject explicit auth failures up-front so the retry loop does
-      // not burn its budget on a permanent misconfiguration. Any other
-      // status (including 405 from an SSE endpoint that rejects HEAD)
-      // is treated as "peer responded within budget" — reachability
-      // is what we care about at this layer.
-      if (response.status === 401 || response.status === 403) {
-        throw new McpConnectAuthError(config.name, response.status);
-      }
-      // When the peer DID advertise a `content-type` (some servers echo
-      // it on HEAD, some don't), classify it case-insensitively so
-      // `Text/Event-Stream; charset=utf-8`, `TEXT/EVENT-STREAM`, and
-      // `application/json` all resolve correctly. A truly unexpected
-      // content-type (`text/html`, a login page from an intercepting
-      // proxy, ...) is a permanent config error and MUST NOT be
-      // retried — the retry budget is reserved for transient network
-      // blips. When no content-type is set we let the fall-through
-      // "transport not yet implemented" error carry the classification.
-      const advertised = response.headers.get('content-type');
-      if (advertised) {
-        const kind = classifyProbeContentType(advertised);
-        if (kind === 'other') {
-          // Permanent: name the observed type in the message so the
-          // operator can spot a reverse-proxy misconfiguration
-          // (login page, HTML error, ...).
-          throw new Error(
-            `Failed to connect to MCP server '${config.name}': unexpected ` +
-              `Content-Type '${advertised}' on probe of ${config.url}. ` +
-              `Expected 'text/event-stream' (sse) or 'application/json' ` +
-              `(streamable HTTP). This is a permanent error and will NOT ` +
-              `be retried; check the 'url' field in mcp-servers.json.`
-          );
+    // Phase 1: `spawn` (remote). For remote transports there is no
+    // child process; the equivalent of "server is reachable" is the
+    // bounded HEAD probe below. We reuse the `spawn` phase name so log
+    // consumers see a consistent vocabulary across stdio and remote
+    // transports.
+    const spawnPhase: StartupPhase = {
+      server: config.name,
+      phase: 'spawn',
+      attempt: connection.attemptCount,
+      startedAt: Date.now(),
+    };
+    logPhaseStart(spawnPhase);
+    try {
+      await this.withConnectTimeout(config.name, timeoutMs, async (signal) => {
+        const headers: Record<string, string> = {};
+        if (config.apiKey) {
+          headers.Authorization = `Bearer ${config.apiKey}`;
         }
-      }
-    });
+        // Probe the URL to surface connect failures within budget. HEAD
+        // is cheap and sufficient to verify reachability; SSE endpoints
+        // typically reject it with a 405 which still proves the peer
+        // responded within budget.
+        const response = await fetch(config.url!, {
+          method: 'HEAD',
+          headers,
+          signal,
+        });
+        // Drain / discard body if present so no socket lingers. `HEAD`
+        // responses are body-less per spec, but some servers still
+        // stream a hello frame back on the same connection.
+        if (response.body && typeof (response.body as ReadableStream).cancel === 'function') {
+          await (response.body as ReadableStream).cancel().catch(() => undefined);
+        }
+        // Reject explicit auth failures up-front so the retry loop does
+        // not burn its budget on a permanent misconfiguration. Any other
+        // status (including 405 from an SSE endpoint that rejects HEAD)
+        // is treated as "peer responded within budget" — reachability
+        // is what we care about at this layer.
+        if (response.status === 401 || response.status === 403) {
+          throw new McpConnectAuthError(config.name, response.status);
+        }
+        // When the peer DID advertise a `content-type` (some servers echo
+        // it on HEAD, some don't), classify it case-insensitively so
+        // `Text/Event-Stream; charset=utf-8`, `TEXT/EVENT-STREAM`, and
+        // `application/json` all resolve correctly. A truly unexpected
+        // content-type (`text/html`, a login page from an intercepting
+        // proxy, ...) is a permanent config error and MUST NOT be
+        // retried — the retry budget is reserved for transient network
+        // blips. When no content-type is set we let the fall-through
+        // "transport not yet implemented" error carry the classification.
+        const advertised = response.headers.get('content-type');
+        if (advertised) {
+          const kind = classifyProbeContentType(advertised);
+          if (kind === 'other') {
+            // Permanent: name the observed type in the message so the
+            // operator can spot a reverse-proxy misconfiguration
+            // (login page, HTML error, ...).
+            throw new Error(
+              `Failed to connect to MCP server '${config.name}': unexpected ` +
+                `Content-Type '${advertised}' on probe of ${config.url}. ` +
+                `Expected 'text/event-stream' (sse) or 'application/json' ` +
+                `(streamable HTTP). This is a permanent error and will NOT ` +
+                `be retried; check the 'url' field in mcp-servers.json.`
+            );
+          }
+        }
+      });
+    } catch (error) {
+      logStartupError(config.name, 'spawn', error);
+      throw error;
+    }
+    logPhaseEnd(spawnPhase, Date.now() - spawnPhase.startedAt);
 
-    // Once the reachability probe succeeds, delegate to the not-yet-
-    // implemented transport wiring. The transport client itself must
-    // be added in a follow-up PR — but the connect-phase timeout is
-    // now correctly bounded.
-    throw new Error(`Transport ${config.transport} not yet implemented`);
+    // Phase 2: `initialize` (remote). The streamable HTTP / SSE
+    // transport is not yet wired to the MCP SDK client. We emit a
+    // phase-start + logStartupError so the structured log stream
+    // still reflects the current state honestly: `initialize` was
+    // reached, no attempt was made, and the error names the missing
+    // wiring.
+    const initPhase: StartupPhase = {
+      server: config.name,
+      phase: 'initialize',
+      attempt: connection.attemptCount,
+      startedAt: Date.now(),
+    };
+    logPhaseStart(initPhase);
+    const notWired = new Error(`Transport ${config.transport} not yet implemented`);
+    logStartupError(config.name, 'initialize', notWired);
+    throw notWired;
   }
 
   /**
@@ -1563,12 +1770,28 @@ export class McpClientManager {
   }
 
   /**
-   * Disconnect from all servers
+   * Disconnect from all servers in parallel.
+   *
+   * Uses {@link Promise.allSettled} so one slow or throwing server's
+   * `close()` does not block the cleanup of the remaining servers.
+   * Rejections are logged but never re-thrown — shutdown is a
+   * best-effort cleanup path and must always complete, even if a
+   * misbehaving transport throws partway through. (See opencode `7b14ad4` — a
+   * sequential loop here was observed to add multi-second latency on exit
+   * when any one stdio child was slow to acknowledge SIGTERM.)
+   *
+   * Snapshotting the names up-front is important: `disconnect` mutates
+   * `this.connections`, so iterating the live `keys()` while removing
+   * entries in parallel would skip servers non-deterministically.
    */
   async disconnectAll(): Promise<void> {
-    for (const name of this.connections.keys()) {
-      await this.disconnect(name);
-    }
+    const names = Array.from(this.connections.keys());
+    const results = await Promise.allSettled(names.map((name) => this.disconnect(name)));
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') {
+        logger.warn(`MCP server ${names[i]} disconnect failed: ${formatError(result.reason)}`);
+      }
+    });
   }
 
   /**

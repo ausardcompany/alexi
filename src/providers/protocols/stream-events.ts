@@ -91,3 +91,47 @@ export function classifyStreamEvent(
   }
   return knownTypes.has(event.type) ? 'known' : 'unknown';
 }
+
+/**
+ * The set of fields a normalised {@link
+ * import('../sapOrchestration.js').StreamChunk} may carry. Used by
+ * {@link isRecognizedStreamChunk} to decide whether a chunk surfaced to
+ * the orchestrator contains at least one piece of actionable content.
+ *
+ * Keep this list in sync with the `StreamChunk` interface definition in
+ * `src/providers/sapOrchestration.ts`. New normalised fields (e.g. a
+ * future `audio` or `reasoning` channel) MUST be added here; forgetting
+ * to update it only causes a benign warn log, not a crash.
+ */
+export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string> = new Set([
+  'text',
+  'toolCalls',
+  'finishReason',
+  'usage',
+  'images',
+]);
+
+/**
+ * Return true when a stream chunk carries at least one field the
+ * orchestrator knows how to handle. A chunk that does not match any
+ * known field is almost certainly from a forward-rolled provider that
+ * started emitting a new event kind (image delta, speech delta, custom
+ * finish reason, ...) that reaches the SDK's normalised chunk shape
+ * without a corresponding client-side renderer.
+ *
+ * Non-throwing by contract. The orchestrator uses this to log + skip
+ * such chunks instead of trying to merge them into `fullText` or the
+ * tool-call accumulator (SST OpenCode #58596 / #58608 / #58609).
+ */
+export function isRecognizedStreamChunk(chunk: unknown): boolean {
+  if (!chunk || typeof chunk !== 'object') {
+    return false;
+  }
+  const rec = chunk as Record<string, unknown>;
+  for (const field of KNOWN_STREAM_CHUNK_FIELDS) {
+    if (rec[field] !== undefined) {
+      return true;
+    }
+  }
+  return false;
+}

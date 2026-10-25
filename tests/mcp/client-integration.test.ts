@@ -16,11 +16,12 @@
  * `afterEach` via `disconnectAll()`. The full file should finish well
  * under 30s.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { McpClientManager } from '../../src/mcp/client.js';
 import type { McpServerConfig } from '../../src/mcp/config.js';
+import { logger } from '../../src/utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -131,6 +132,72 @@ describe('McpClientManager (integration)', () => {
     expect(connection.status).toBe('failed');
     expect(connection.error).toMatch(/startup timeout for server 'hung'/);
     expect(elapsed).toBeLessThan(4000);
+  }, 15000);
+
+  it('emits structured startup phase logs in order for a successful connect', async () => {
+    manager = new McpClientManager();
+
+    const infoLines: string[] = [];
+    const infoSpy = vi.spyOn(logger, 'info').mockImplementation((msg: string) => {
+      infoLines.push(msg);
+    });
+
+    try {
+      const connection = await manager.connect(fixtureConfig('phased', 0, 5000));
+      expect(connection.status).toBe('connected');
+
+      // The connect flow emits phase start+end logs for spawn,
+      // initialize, capabilities (phase=ready only emits an "end"
+      // marker summarising the whole attempt). Assert the sequence
+      // is consistent with the documented contract.
+      const startupLines = infoLines.filter((l) => l.startsWith('MCP startup ['));
+      const phaseEvents = startupLines.map((l) => {
+        const match = l.match(/phase=(\w+) attempt=(\d+) (started|completed)/);
+        return match ? `${match[1]}:${match[3]}` : l;
+      });
+      expect(phaseEvents).toEqual([
+        'spawn:started',
+        'spawn:completed',
+        'initialize:started',
+        'initialize:completed',
+        'capabilities:started',
+        'capabilities:completed',
+        'ready:completed',
+      ]);
+
+      // Every structured line must carry the server name so operators
+      // can grep a single server out of a multi-server log stream.
+      for (const line of startupLines) {
+        expect(line).toContain('[phased]');
+      }
+    } finally {
+      infoSpy.mockRestore();
+    }
+  }, 15000);
+
+  it('emits a structured startup error with the phase name on timeout', async () => {
+    manager = new McpClientManager();
+
+    const errorLines: string[] = [];
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation((msg: string) => {
+      errorLines.push(msg);
+    });
+
+    try {
+      const connection = await manager.connect(fixtureConfig('phased-timeout', 5000, 1500));
+      expect(connection.status).toBe('failed');
+
+      // The timeout surfaces during the `initialize` phase. The
+      // structured startup logger reports it with the phase name so
+      // operators can see where in the handshake the budget expired.
+      const structured = errorLines.find((l) => l.startsWith('MCP startup ['));
+      expect(structured).toBeDefined();
+      expect(structured!).toContain('phase=initialize');
+      expect(structured!).toContain('[phased-timeout]');
+      expect(structured!).toMatch(/startup timeout for server 'phased-timeout'/);
+    } finally {
+      errorSpy.mockRestore();
+    }
   }, 15000);
 
   it('connects a fast server and rejects a slow one when both use mixed configs', async () => {
