@@ -5883,6 +5883,76 @@ The eleven cases run inside the mocked-SDK unit suite — no new integration-lev
 - `tests/hooks/blockCap.test.ts` -- Tests consecutive Stop hook rejection cap
 - `tests/hooks/continueOnBlock.test.ts` -- Tests rejection feedback to model
 - `tests/hooks/dispatcher-coverage.test.ts` -- Pins that `HookManagerImpl.execute()` dispatches every `HookEvent` without falling through to an unknown branch (see [Testing hook dispatcher coverage per `HookEvent`](#testing-hook-dispatcher-coverage-per-hookevent-testshooksdispatcher-coveragetestts))
+- `tests/hooks/model-cache.test.ts` -- Pins the step-scoped prompt-hook model resolution cache (`getModelForHook` / `clearStepCache`), see [Testing the prompt-hook model resolution cache](#testing-the-prompt-hook-model-resolution-cache-testshooksmodel-cachetestts-issue-2143)
+
+### Testing the prompt-hook model resolution cache (`tests/hooks/model-cache.test.ts`, issue #2143)
+
+Added by commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, merged 2026-10-24). The 165-line suite exercises `getModelForHook`, `clearStepCache`, and the two `@internal` test helpers (`_resetModelResolutionCache`, `_modelResolutionCacheSize`) exported from `src/hooks/index.ts`. Each test starts from a clean slate via a `beforeEach(() => _resetModelResolutionCache())` block so one test's cache state cannot leak into another.
+
+Pattern — mock-free, direct unit test. The module under test exposes a module-level `Map` as cache state. The suite imports the public API plus the two `@internal` probes and asserts behaviour by observing resolver call counts (via `vi.fn<[], ModelConfig>(...)`) and `_modelResolutionCacheSize()`. There is no provider mock, no agent-loop harness, and no fs setup — the cache is pure and the test honours that purity.
+
+Seven cases, each pinning a distinct contract:
+
+1. **`resolves the model config on first call and caches the result`** — the resolver fires once, `_modelResolutionCacheSize()` becomes `1`, and the returned value matches the resolver output. Baseline happy path.
+2. **`returns the cached config on subsequent calls without invoking the resolver`** — three sequential `getModelForHook('step-1', 'gpt-4o', resolver)` calls fire the resolver once, and the three returned references are reference-identical (`toBe`, not `toEqual`). This pins the "store by reference identity" contract — hook authors can rely on `===` between hits in the same step.
+3. **`isolates caches between different steps for the same model name`** — two different step ids with the same `modelName` cache independently, both resolvers fire once, and the two cached objects are NOT reference-identical. This pins the composite-key contract.
+4. **`caches different models within the same step independently`** — two different `modelName`s within one step cache independently; a single step can resolve a routing primary and a fallback without evicting entries.
+5. **`clears only entries for the specified step on clearStepCache`** — after seeding three entries across two steps, `clearStepCache('step-1')` drops two entries and leaves one. Follow-up resolution confirms step-2 is still cached (resolver call count unchanged) and step-1 is a cache miss (resolver call count incremented).
+6. **`clearStepCache is a no-op for an unknown step id`** — pins idempotency on an unknown step id, so a defensive double-clear in a `break` path cannot corrupt state.
+7. **`does NOT confuse a step id that is a prefix of another step id`** — the critical regression guard. Keys `step-1:gpt-4o` and `step-10:gpt-4o` coexist; `clearStepCache('step-1')` must only drop the first. The implementation matches on `${stepId}:` (trailing colon), not `${stepId}`, and this test fails hard if a refactor removes the colon.
+8. **`refreshes after a clear — a routing change mid-session is visible`** — the behavioural scenario the whole feature exists for. A `resolver` that reads a mutable `currentConfig` first returns `{ deployment: 'old' }`, then `currentConfig` changes between steps, then step-2 picks up `{ deployment: 'new' }` after `clearStepCache('step-1')`. This pins that the cache cannot mask a mid-session routing change.
+
+Minimum assertion shape (abbreviated from the actual file):
+
+```typescript
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  getModelForHook,
+  clearStepCache,
+  _resetModelResolutionCache,
+  _modelResolutionCacheSize,
+  type ModelConfig,
+} from '../../src/hooks/index.js';
+
+describe('Prompt hook model resolution cache', () => {
+  beforeEach(() => {
+    _resetModelResolutionCache();
+  });
+
+  it('returns the cached config on subsequent calls without invoking the resolver', () => {
+    const resolver = vi.fn<[], ModelConfig>(() => ({ provider: 'sap-ai-core', version: 'v1' }));
+    const first = getModelForHook('step-1', 'gpt-4o', resolver);
+    const second = getModelForHook('step-1', 'gpt-4o', resolver);
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(second).toBe(first); // reference identity, not equality
+    expect(_modelResolutionCacheSize()).toBe(1);
+  });
+
+  it('does NOT confuse a step id that is a prefix of another step id', () => {
+    const resolver = vi.fn<[], ModelConfig>(() => ({ ok: true }));
+    getModelForHook('step-1', 'gpt-4o', resolver);
+    getModelForHook('step-10', 'gpt-4o', resolver);
+    expect(_modelResolutionCacheSize()).toBe(2);
+    clearStepCache('step-1');
+    expect(_modelResolutionCacheSize()).toBe(1); // step-10 survives
+  });
+});
+```
+
+### Mocking `clearStepCache` in agent-loop tests
+
+`src/core/agenticChat.ts` now imports `clearStepCache` alongside `executeHooks`, `createHookContext`, and `getBlockCap`. Tests that mock the whole hooks module to inspect `agenticChat` behaviour MUST re-export `clearStepCache: vi.fn()` or the mock will not shadow the real module and the import will resolve to `undefined`, crashing the loop at the top-of-iteration clear.
+
+```typescript
+vi.mock('../../src/hooks/index.js', () => ({
+  executeHooks: (...args: unknown[]) => mockExecuteHooks(...args),
+  createHookContext: (...args: unknown[]) => mockCreateHookContext(...args),
+  getBlockCap: () => 8,
+  clearStepCache: vi.fn(), // required by src/core/agenticChat.ts
+}));
+```
+
+The four touched files in commit `5b2a00e5` are `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, and `tests/orchestrator-hooks.test.ts` — use any of them as a reference when adding a new agent-loop mock.
 
 ### Testing Block Cap
 

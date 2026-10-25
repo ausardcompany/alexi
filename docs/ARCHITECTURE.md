@@ -2213,6 +2213,82 @@ Contract:
 - `SessionManager.addMessage(role, content, tokens?, options?)` accepts either the raw `displayRole` string or an options object (`{ displayRole }`) as its fourth argument for backwards compatibility with three-argument call sites.
 - Auto-title generation (`activeSession.metadata.title` from the first user message) skips messages carrying any `displayRole` value, so hook payloads cannot end up as the session title.
 
+### Prompt Hook Model Resolution Cache (`src/hooks/index.ts`)
+
+Introduced in commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, merged 2026-10-24; resolves issue #2143). Prompt hooks that resolve model configuration on every invocation become expensive and noisy when the same model is reused across many hook calls inside a single agent step — routing lookups, deployment-registry hits, variant selection, and capability probes are all amortizable per step but were being redone per call. The cache lives in `src/hooks/index.ts` and is driven by the agent loop in `src/core/agenticChat.ts`.
+
+```typescript
+// src/hooks/index.ts
+export type ModelConfig = Record<string, unknown>;
+
+export function getModelForHook(
+  stepId: string,
+  modelName: string,
+  resolver: () => ModelConfig
+): ModelConfig;
+
+export function clearStepCache(stepId: string): void;
+```
+
+#### Keying scheme and lifetime
+
+The module-local `modelResolutionCache: Map<string, ModelConfig>` stores entries under the composite key `${stepId}:${modelName}`. The composite is deliberate:
+
+- Two different steps that happen to use the same `modelName` do NOT share state — a mid-session routing change that redirects `gpt-4o` to a different deployment on step N+1 is visible as a cache miss, not masked by a stale entry from step N.
+- A single step can resolve multiple models (routing + fallback + auxiliary task) without evicting entries from one another. The `getModelForHook` body is `O(1)` on hit, `O(resolver)` on miss, and never evicts.
+- `ModelConfig = Record<string, unknown>` is deliberately open — hook authors can thread arbitrary provider / deployment / capability fields through the cache without coupling it to a single provider shape. Callers are expected to produce the resolved object once and reuse it; the cache stores values by reference identity, so a subsequent lookup returns `===` the first result.
+
+`clearStepCache(stepId)` drops every entry whose key starts with `${stepId}:`. The implementation iterates `modelResolutionCache.keys()` and matches on the `${stepId}:` prefix — the trailing colon is load-bearing, because the naive `startsWith(stepId)` form would collapse `step-1` into `step-10` and drop both. The dedicated regression test (`tests/hooks/model-cache.test.ts` — `does NOT confuse a step id that is a prefix of another step id`) pins the correct behaviour. The function is idempotent on an unknown step id.
+
+#### Agent loop integration
+
+The `while (iterations < maxIterations)` body in `src/core/agenticChat.ts` tracks `let previousStepId: string | undefined` and clears the previous step's entries at the TOP of each iteration — the moment control returns to the loop head, regardless of whether the previous iteration completed normally, `continue`d, or threaded through one of the inline tool-call branches. A second clear fires once after the loop exits, so every `break` path (normal completion, loop detector, mistake tracker, stop hook, malformed-tool-call guard) still releases its cached entries.
+
+```mermaid
+flowchart TD
+    Enter["agenticChat() entry<br/>previousStepId = undefined"] --> Loop{"iterations < max?"}
+    Loop -- yes --> ClearPrev{"previousStepId<br/>defined?"}
+    ClearPrev -- yes --> Clear["clearStepCache(previousStepId)"]
+    ClearPrev -- no --> AssignId["sessionIdForStep = session.id ?? 'default'<br/>previousStepId = `${sessionId}:${iterations}`"]
+    Clear --> AssignId
+    AssignId --> Body["Step body:<br/>model.complete, tool calls,<br/>hook executions, ..."]
+    Body -- continue --> Loop
+    Body -- break --> PostLoop["clearStepCache(previousStepId)"]
+    Loop -- no --> PostLoop
+    PostLoop --> Return["return finalText"]
+```
+
+The two-point clear covers every exit without wrapping the ~600-line iteration body in a `try/finally`. The `let previousStepId` closure is intentional — a `try/finally` wrapping the body would need to reach past local variables declared in that body, and the loop head is where the next iteration's step id gets assigned anyway.
+
+#### Step-id composition
+
+```typescript
+const sessionIdForStep =
+  options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+previousStepId = `${sessionIdForStep}:${iterations}`;
+```
+
+The session id (when present) composed with the iteration number keeps the step id unique across concurrent sessions in the same process. Step N of session A and step N of session B therefore do NOT share cache entries — important for the server mode and for any in-process scenario where multiple agent loops run concurrently (sub-agent delegation, parallel task workers).
+
+Sessions without a bound `SessionManager` fall back to the literal `'default'` scope. This is safe within a single `agenticChat` invocation because the iteration number is monotonically increasing, so step N and step N+1 keys differ by the suffix. It is UNSAFE to run two anonymous (`'default'`-scoped) agent loops concurrently against the same cache; in practice every call site inside Alexi binds a session manager, and the anonymous path exists only for direct unit-test invocation.
+
+#### Test-only helpers (`@internal`)
+
+Two helpers are exported for tests:
+
+- `_resetModelResolutionCache(): void` — empties the full map. Used in `beforeEach` so each unit test starts from a clean slate.
+- `_modelResolutionCacheSize(): number` — returns the live entry count so tests can assert growth / eviction without peeking at module-private state.
+
+Production code must prefer `clearStepCache(stepId)` because the reset helper breaks concurrent-step isolation. The underscored names mark them as internal; agent-authored tooling should NOT depend on them.
+
+#### Hook-mock patches
+
+Four companion test files mock `../../src/hooks/index.js` and had to be updated so `agenticChat.ts`'s new `clearStepCache` import resolves against the mock surface: `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, and `tests/orchestrator-hooks.test.ts`. Each now exposes `clearStepCache: vi.fn()`. The `continueOnBlock.test.ts` mock additionally adds `getBlockCap: () => 8` to keep parity with the production module surface.
+
+#### Why not a `WeakMap` keyed by step object
+
+A `WeakMap<StepObject, Map<string, ModelConfig>>` would deliver the same lifetime guarantees without the explicit `clearStepCache` call, but it requires an actual step object to key on. The agent loop today does not materialize a `Step` struct — it tracks iteration state in locals — and introducing one just to anchor a `WeakMap` would be a larger refactor than the explicit-clear approach. The current design matches the upstream OpenCode PR and keeps the agent-loop diff to ~40 lines.
+
 ## Compaction System
 
 Context compaction manages conversation length when approaching token limits:
