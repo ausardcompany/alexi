@@ -9672,3 +9672,49 @@ The allowlist is `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Missing /
 | anything else | `JSON.stringify(part)` |
 
 The embedded `resource` type used by the formatter is widened to `{ uri?: string; mimeType?: string; text?: string }`.
+
+## MCP Output-Schema Normaliser (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Normalises an MCP tool's `outputSchema` field so downstream code that only inspects `.properties` continues to work regardless of what the server declared:
+
+| Input shape | Output |
+|-------------|--------|
+| `undefined` / `null` / primitive (`string`, `number`, `boolean`) | `undefined` |
+| `{ type: 'object', properties: {...} }` | the schema verbatim |
+| `{ properties: {...} }` (no explicit `type`) | the schema verbatim |
+| `{ type: 'array', items: ... }` | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+| `{ type: 'string' }` and other primitive-root schemas | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+| `{ anyOf: [...] }` / `{ oneOf: [...] }` / `{ allOf: [...] }` | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+
+Call sites spread the result safely onto a tool definition: `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing. See [docs/ARCHITECTURE.md — MCP Output-Schema Normalisation](ARCHITECTURE.md#mcp-output-schema-normalisation-srcmcpclientts) for the full dispatch flowchart.
+
+## MCP Client Manager Connect Semantics (`src/mcp/client.ts`)
+
+The `McpClientManager.connect(config, options)` public method keeps its existing signature but now de-duplicates concurrent calls for the same `config.name` (2026-10-23 upstream sync, ports opencode `8ecd6ad`). A caller that invokes `connect` while a prior call for the same server name is still in flight joins the first promise instead of spawning a parallel transport.
+
+```typescript
+class McpClientManager {
+  async connect(
+    config: McpServerConfig,
+    options?: McpConnectOptions
+  ): Promise<McpConnection>;
+
+  async disconnectAll(): Promise<void>;
+  // ...
+}
+```
+
+The dedup lookup / insert happens before the handshake body (`connectImpl`), and the `.finally()` block in the public method removes the pending entry regardless of outcome so a failed connect does not leave a stale cache entry. For callers this means two legitimate behaviours:
+
+1. **Second call joins the first.** `const [a, b] = await Promise.all([mgr.connect(cfg), mgr.connect(cfg)])` resolves to the SAME `McpConnection` instance for both bindings; no second stdio child is spawned.
+2. **Subsequent calls after resolution still cache.** Once `connect` resolves the entry is removed from `pendingConnects`, but the underlying `connections` map still carries the connection — a third `connect(cfg)` after both prior calls complete returns the already-registered connection via the normal `this.connections.has(config.name)` early-return path.
+
+`disconnectAll()` now runs disconnects in parallel via `Promise.allSettled` (ports opencode `7b14ad4`). A slow or hung server cannot stall shutdown for the others; per-server errors are logged by `disconnect()` itself and never propagated through `allSettled`. See [docs/ARCHITECTURE.md — MCP Client Connect De-duplication](ARCHITECTURE.md#mcp-client-connect-de-duplication-srcmcpclientts) for the sequence diagram.
