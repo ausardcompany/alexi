@@ -821,6 +821,80 @@ recordRouteOutcome(modelId, { kind: 'success' });
 
 **No route-health penalty, no cost under-count.** The check runs BEFORE `recordRouteOutcome(modelId, { kind: 'success' })`, so a filtered response does not spuriously reset the route failure counter. `provider.complete()` already reported usage BEFORE throwing, so the caller can still bill the prompt tokens the policy block consumed — the telemetry event carries `promptTokens` / `completionTokens` for the operator trace. The error object carries `partialText` when the model produced any output before the filter fired, so a surface that wants to show "model produced N tokens before the block" can read it off `(err as ContentFilterError & { partialText?: string }).partialText`.
 
+### Content-policy classification across provider families (issue #2134)
+
+The content-filter machinery above covers the SAP AI Core orchestration path that normalises every rejection into a `ContentFilterError` with the `content_filter` machine code. That path is sufficient for Alexi's single supported provider — but the error-backoff surface is also consumed by raw-fetch call sites, telemetry/logging helpers, and tests that stage upstream provider payloads directly. Before issue #2134 those payloads bypassed the fatal check and were retried against the same prompt until the budget was spent. `isContentPolicyError(err)` in [`src/core/error-backoff.ts:100-170`](../src/core/error-backoff.ts) closes the gap by covering four additional shapes:
+
+- **OpenAI**: `error.type === 'moderation'`, `error.code === 'content_policy_violation'`, HTTP `451` ("Unavailable For Legal Reasons" — reused by OpenAI for moderation blocks).
+- **Google (Gemini / Vertex)**: `finishReason === 'SAFETY'` or `finishReason === 'content-filter'`, and `promptFeedback.blockReason === 'SAFETY' | 'OTHER'`.
+- **Anthropic**: `error_type === 'content_policy'`, and `type === 'invalid_request_error'` with a `content_policy` message substring.
+- **Message-regex fallback** for raw string errors wrapped in bare `Error` objects without structured fields:
+
+  ```typescript
+  const CONTENT_POLICY_MESSAGE_RE =
+    /\bmoderation\b|content[_\s-]filter|content[_\s-]policy|\bsafety filter\b|\bsafety setting|safety_rating|\bsafety\b/i;
+  ```
+
+  Word boundaries bracket `moderation` and `safety` to avoid false positives on unrelated 5xx telemetry text like `safety-related` or `moderation-note`.
+
+`ErrorBackoff.recordError(statusCode?, err?)` and `ErrorBackoff.isFatal(err?)` consume `isContentPolicyError` alongside `isFreeTierRateLimitError`, so a content-policy rejection flips `fatalNotified` and short-circuits the retry loop identically regardless of which provider family staged the payload — the pre-existing `isContentFilterError` SAP-orchestration path is checked first and short-circuits before the broader detector pays any extra scan cost.
+
+```mermaid
+flowchart TB
+    Err[Provider error] --> ContentPolicy{isContentPolicyError?}
+    ContentPolicy -->|yes| Fatal1[fatal: true<br/>retryable: false<br/>type: content_policy]
+    ContentPolicy -->|no| Auth{isPermanentAuthFailure?}
+    Auth -->|yes| Fatal2[fatal: true<br/>type: auth]
+    Auth -->|no| FreeTier{isFreeTierRateLimitError?}
+    FreeTier -->|yes| Fatal3[fatal: true<br/>type: rate_limit]
+    FreeTier -->|no| Status{HTTP status?}
+    Status -->|451| Fatal1
+    Status -->|401/403| Fatal2
+    Status -->|400/422/other 4xx| Fatal4[fatal: true<br/>type: validation]
+    Status -->|429| Transient1[fatal: false<br/>type: rate_limit]
+    Status -->|5xx| Transient2[fatal: false<br/>type: network]
+    Status -->|none/other| MessageRe{NETWORK_MESSAGE_RE match?}
+    MessageRe -->|yes| Transient2
+    MessageRe -->|no| RateLimit{isRateLimitError /<br/>isXAICapacityError?}
+    RateLimit -->|yes| Transient1
+    RateLimit -->|no| Unknown[fatal: false<br/>retryable: true<br/>type: unknown]
+```
+
+**Stateless `classifyError(err): ErrorClassification` taxonomy.** `src/core/error-backoff.ts:559-617` folds any upstream error into a single `{ type, fatal, retryable, statusCode? }` record for callers that only need a one-line decision (telemetry attribution, user-facing error rendering, outer retry loops without session-level bookkeeping). The signature:
+
+```typescript
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+export function classifyError(err: unknown): ErrorClassification;
+```
+
+Precedence is most-specific first, matching the flowchart above. The function is deliberately stateless — retry-budget bookkeeping across multiple attempts stays with the `ErrorBackoff` instance. Both `ErrorType` and `ErrorClassification` are re-exported from [`src/providers/index.ts:405-410`](../src/providers/index.ts) so callers importing from the canonical providers surface get a single entry point.
+
+**Provider-attribution helpers.** Three thin wrappers in [`src/providers/index.ts:327-401`](../src/providers/index.ts) isolate the structural pattern per provider family for telemetry and logging paths that want to attribute a block to a specific provider:
+
+| Helper                            | Shapes covered                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| `isOpenAIContentPolicyError(err)` | HTTP `451`; `{ error: { type: 'moderation' } }`; `{ error: { code: 'content_policy_violation' } }` |
+| `isGoogleSafetyError(err)`        | `finishReason === 'SAFETY'`; `promptFeedback.blockReason === 'SAFETY'`         |
+| `isAnthropicContentPolicyError`   | `error_type === 'content_policy'`; `invalid_request_error` + `content_policy` message |
+
+All three are subsumed by the generic `isContentPolicyError` for retry decisions; they exist purely for attribution. The generic detector is the single source of truth for `ErrorBackoff` and `classifyError`.
+
+**Non-retry contract pinned by regression suite.** [`tests/core/error-classification.test.ts`](../tests/core/error-classification.test.ts) (294 lines, 32 cases across four describe blocks) locks in: (1) every `classifyError` branch, (2) every content-policy message substring and shape plus negatives, (3) every provider-specific helper branch, and (4) that `ErrorBackoff.isFatal` short-circuits for a content-policy error from any provider family *without* a prior `recordError` call (and that a transient `503` or `ECONNRESET` does NOT flip the flag). See [docs/TESTING.md — Testing content-policy classification (issue #2134)](./TESTING.md#testing-content-policy-classification-issue-2134).
+
 ### Environment Details Fence
 
 The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.

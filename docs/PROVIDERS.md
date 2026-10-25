@@ -2629,6 +2629,62 @@ import {
 
 The error carries the `content_filter` machine code recognised by `ErrorBackoff.isFatal()` (`src/core/error-backoff.ts`), so any outer retry budget (CLI `KILO_RETRIES`, provider-layer `ErrorBackoff`) stops on first inspection — a content-filter block is a permanent policy decision and retrying the same prompt will hit the same block. Partial text produced before the block is preserved on `(err as ContentFilterError & { partialText?: string }).partialText`.
 
+### Content-policy detection helpers (issue #2134)
+
+Alexi routes exclusively through SAP AI Core, which already normalises every content-policy rejection into a `ContentFilterError` with the `content_filter` machine code. The 2026-10 refresh of the error-backoff surface extends non-retry coverage to the raw upstream shapes that leak through test fixtures, telemetry probes, and future proxy providers that forward unmapped payloads. Three provider-attribution helpers are exported from `src/providers/index.ts` alongside a re-export of the generic `isContentPolicyError` detector and the stateless `classifyError` taxonomy from `src/core/error-backoff.ts`.
+
+```typescript
+import {
+  isOpenAIContentPolicyError,
+  isGoogleSafetyError,
+  isAnthropicContentPolicyError,
+  isContentPolicyError,
+  classifyError,
+  type ErrorClassification,
+  type ErrorType,
+} from './providers/index.js';
+```
+
+**Per-provider helpers.** Each helper matches ONLY the structural shapes a specific upstream family emits. They exist for telemetry attribution — not for retry decisions, which must go through the generic detector.
+
+| Helper                              | Shapes covered                                                                                             |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `isOpenAIContentPolicyError(err)`   | HTTP `451`; `{ error: { type: 'moderation' } }`; `{ error: { code: 'content_policy_violation' } }`         |
+| `isGoogleSafetyError(err)`          | `{ finishReason: 'SAFETY' }`; `{ promptFeedback: { blockReason: 'SAFETY' } }`                              |
+| `isAnthropicContentPolicyError(err)`| `{ error_type: 'content_policy' }`; `{ type: 'invalid_request_error', message: '... content_policy ...' }` |
+
+**Generic cross-provider detector.** `isContentPolicyError(err)` in `src/core/error-backoff.ts` is the single source of truth for retry decisions. It subsumes `isContentFilterError`, every per-provider helper above, and a message-regex fallback for raw string errors wrapped in bare `Error` objects:
+
+```typescript
+const CONTENT_POLICY_MESSAGE_RE =
+  /\bmoderation\b|content[_\s-]filter|content[_\s-]policy|\bsafety filter\b|\bsafety setting|safety_rating|\bsafety\b/i;
+```
+
+`ErrorBackoff.recordError(statusCode?, err?)` and `ErrorBackoff.isFatal(err?)` consume `isContentPolicyError` so a content-policy error from any provider family flips `fatalNotified` identically — the outer retry loop (`KILO_RETRIES`, `retryProviderCall`, `NetworkManager`) short-circuits without burning provider budget.
+
+**Stateless `classifyError` taxonomy.** When a caller only needs a one-line decision (telemetry, user-facing error rendering, outer retry loops without session-level bookkeeping), `classifyError(err)` returns a single record:
+
+```typescript
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+```
+
+Precedence is content-policy → permanent auth failures → free-tier rate limits → HTTP status mapping (`401`/`403` → `auth` fatal, `400`/`422`/other `4xx` → `validation` fatal, `429` → `rate_limit` transient, `451` → `content_policy` fatal, `5xx` → `network` transient) → transient-network message regex → generic rate-limit markers → `unknown` (cautiously `retryable: true, fatal: false`). The function is deliberately stateless; retry-budget bookkeeping across multiple attempts stays with the `ErrorBackoff` instance.
+
+See [docs/ARCHITECTURE.md — Content-policy classification across provider families](ARCHITECTURE.md#content-policy-classification-across-provider-families-issue-2134) for the full precedence flowchart and [docs/TESTING.md — Testing content-policy classification](TESTING.md#testing-content-policy-classification-issue-2134) for the 32-case regression suite.
+
 ## Performance Considerations
 
 ### Token Optimization

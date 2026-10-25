@@ -5280,7 +5280,103 @@ export function extractStatusCode(err: unknown): number | undefined;
 
 /** True for auth failures that will NOT recover on retry. */
 export function isPermanentAuthFailure(err: unknown): boolean;
+
+/**
+ * Broader structural check for a provider content-policy violation
+ * (issue #2134). Supersedes `isContentFilterError` by covering OpenAI
+ * moderation shapes, Google SAFETY, Anthropic content_policy, HTTP 451,
+ * and a message-regex fallback for raw string errors. Consumed by
+ * `ErrorBackoff.recordError` / `ErrorBackoff.isFatal` so a content
+ * policy block from any provider family short-circuits identically.
+ */
+export function isContentPolicyError(err: unknown): boolean;
+
+/** Coarse-grained taxonomy bucket for a provider failure. */
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+/** Result of `classifyError`. */
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+/**
+ * Fold any upstream error into a stateless {type, fatal, retryable,
+ * statusCode} record. Precedence (most-specific first):
+ *   1. isContentPolicyError  -> content_policy, fatal.
+ *   2. isPermanentAuthFailure -> auth, fatal.
+ *   3. isFreeTierRateLimitError -> rate_limit, fatal.
+ *   4. HTTP status mapping (401/403 auth; 400/422/other 4xx
+ *      validation; 429 rate_limit; 451 content_policy; 5xx network).
+ *   5. NETWORK_MESSAGE_RE   -> network, transient.
+ *   6. isRateLimitError / isXAICapacityError -> rate_limit, transient.
+ *   7. Fall-through -> unknown (cautiously retryable).
+ *
+ * Deliberately stateless — retry-budget bookkeeping stays with
+ * `ErrorBackoff`.
+ */
+export function classifyError(err: unknown): ErrorClassification;
 ```
+
+### Content-policy classification taxonomy (issue #2134)
+
+The `classifyError` helper is the "single-field decision" surface for telemetry attribution, user-facing error rendering, and outer retry loops that only need to know "is this transient or permanent?". `src/providers/index.ts` re-exports it (along with `ErrorType` and `ErrorClassification`) so callers importing from the canonical providers surface get a single entry point. Three provider-attribution helpers live on the providers side:
+
+```typescript
+// src/providers/index.ts
+
+/** HTTP 451 OR nested { error: { type: 'moderation' | code: 'content_policy_violation' } }. */
+export function isOpenAIContentPolicyError(err: unknown): boolean;
+
+/** finishReason === 'SAFETY' OR promptFeedback.blockReason === 'SAFETY'. */
+export function isGoogleSafetyError(err: unknown): boolean;
+
+/** error_type === 'content_policy' OR invalid_request_error + content_policy message. */
+export function isAnthropicContentPolicyError(err: unknown): boolean;
+```
+
+All three are subsumed by the generic `isContentPolicyError` for retry decisions; they exist for telemetry/logging paths that want to attribute a block to a specific provider.
+
+Example — classify once at the retry boundary and dispatch on `type`:
+
+```typescript
+import { classifyError } from './providers/index.js';
+
+async function callWithTaxonomy<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const c = classifyError(err);
+    switch (c.type) {
+      case 'content_policy':
+        // Permanent — surface the policy block to the user, do NOT retry.
+        throw err;
+      case 'auth':
+      case 'validation':
+        // Permanent — operator must fix credentials / request shape.
+        throw err;
+      case 'network':
+      case 'rate_limit':
+      case 'unknown':
+        // Transient — caller's retry budget decides.
+        if (c.retryable) {
+          /* retry with backoff */
+        }
+        throw err;
+    }
+  }
+}
+```
+
+See [docs/ARCHITECTURE.md — Content-policy classification across provider families](ARCHITECTURE.md#content-policy-classification-across-provider-families-issue-2134) for the precedence flowchart and [docs/PROVIDERS.md — Content-policy detection helpers](PROVIDERS.md#content-policy-detection-helpers-issue-2134) for the per-provider helper surface.
 
 ### `ErrorBackoff.isFatal(err?)` — three lookup paths (issue #1994)
 
