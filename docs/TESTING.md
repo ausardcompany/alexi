@@ -8899,6 +8899,105 @@ The transient-vs-permanent guard is the load-bearing invariant: a Google `SAFETY
 
 When adding a new upstream content-policy shape (e.g. a new provider family in a future `providers.<id>` adapter), extend Block 2 with one positive detection case, Block 3 with the per-provider helper if one is added, and Block 4 with one integration case that pins `ErrorBackoff.isFatal` through both the record-then-ask and the no-record paths.
 
+### Testing the known-throttle classifier (issue #2152)
+
+`tests/core/error-backoff.test.ts` (lines 265–399, +142 lines in the issue #2152 PR) adds three cooperating `describe` blocks that pin `isKnownThrottle`, the `ErrorBackoff.isFatal` short-circuit, and the `classifyError` precedence step 3b. The suite is pure state-assertion — no fake timers, no mocked network, no provider-SDK stubs — so it composes with every other error-classification suite and does not interact with the exponential-backoff schedule.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+
+import {
+  ErrorBackoff,
+  classifyError,
+  getRetryAfterMs,
+  isKnownThrottle,
+  isRateLimitError,
+} from '../../src/core/error-backoff.js';
+```
+
+**Block 1 — `isKnownThrottle` detector matrix (eight positive, eight negative, 16 cases total in `describe('isKnownThrottle (issue #2152)')`).** Covers every structural branch of the detector in isolation. Positive cases pin the three un-normalised shapes the pre-existing `isRateLimitError` could not catch: bare HTTP 429 via `status`, `statusCode`, AND `response.status` (axios-style wrapper); provider rate-limit code (`code: 'provider_rate_limit'`); free-tier code (`code: 'free_tier_rate_limit'`); both class names (`FreeTierRateLimitError`, `ProviderRateLimitError`); every message substring (`'rate limit exceeded'`, `'quota exceeded for this project'`, `'Too Many Requests'`, `'HTTP 429: rate limit'`); raw-string errors (`'rate limit reached'`, `'quota exceeded'`). Reference positive:
+
+```typescript
+it('matches a bare HTTP 429 response (no code, no name)', () => {
+  expect(isKnownThrottle({ status: 429 })).toBe(true);
+  expect(isKnownThrottle({ statusCode: 429 })).toBe(true);
+  expect(isKnownThrottle({ response: { status: 429 } })).toBe(true);
+});
+
+it('matches raw string errors from the fetch layer', () => {
+  expect(isKnownThrottle('rate limit reached')).toBe(true);
+  expect(isKnownThrottle('quota exceeded')).toBe(true);
+});
+```
+
+The negative cases are the load-bearing regression guard — a future refactor that over-broadens the detector would silently stop retrying real transient failures as rate limits (benign) OR silently stop classifying real auth / 5xx failures correctly (not benign). Negative inputs: `null`, `undefined`, `{}`, `{ status: 500 }`, `{ status: 403 }`, `{ message: 'permission denied' }`, `'socket hang up'` (network transient, not a throttle), `42`. Reference:
+
+```typescript
+it('returns false for non-throttle errors', () => {
+  expect(isKnownThrottle(null)).toBe(false);
+  expect(isKnownThrottle(undefined)).toBe(false);
+  expect(isKnownThrottle({})).toBe(false);
+  expect(isKnownThrottle({ status: 500 })).toBe(false);
+  expect(isKnownThrottle({ status: 403 })).toBe(false);
+  expect(isKnownThrottle({ message: 'permission denied' })).toBe(false);
+  expect(isKnownThrottle('socket hang up')).toBe(false);
+  expect(isKnownThrottle(42)).toBe(false);
+});
+```
+
+**Block 2 — `ErrorBackoff.isFatal` honours known throttles (four cases in `describe('ErrorBackoff.isFatal honours known throttles (issue #2152)')`).** Pins the end-to-end state transition from `recordError` through to `isFatal`:
+
+1. **A bare HTTP 429 is non-fatal AND schedules a positive-delay retry.** Drives `b.recordError(429, { status: 429, statusCode: 429 })` on `maxRetries: 5` and asserts `isFatal(err) === false`, `isFatal() === false`, `shouldBackoff() === true`, `getRemainingBackoffMs() > 0`, `getConsecutiveErrors() === 1`. Confirms the delay-computation block still runs under the new empty-bodied throttle branch.
+2. **A known-throttle message with a wrapper 400 status is still non-fatal.** The SDK-wrapper regression case: `{ statusCode: 400, message: 'rate limit exceeded, retry later' }`. Without the fix this falls into the generic fatal 4xx branch. With the fix `isFatal(err) === false` and `isFatal() === false`.
+3. **A known throttle flips to fatal once the retry budget is exhausted.** Pins the issue #1994 interaction: on `maxRetries: 2`, the first `recordError(429, { status: 429 })` leaves `isFatal(err) === false`; the second flips it to `true`. The budget-exhaustion short-circuit from issue #1994 is NOT silently defeated by the new throttle branch.
+4. **A free-tier throttle remains fatal (permanent) even when `isKnownThrottle` matches.** `{ code: 'free_tier_rate_limit', status: 429 }` — both detectors match, but the free-tier short-circuit at the top of `isFatal` wins. Pins that the known-throttle branch does NOT accidentally reclassify free-tier quota exhaustion as transient.
+
+Reference:
+
+```typescript
+it('mock HTTP 429 is non-fatal and schedules a retry', () => {
+  const b = new ErrorBackoff({ initialDelayMs: 500, maxDelayMs: 60_000, maxRetries: 5 });
+  const err = { status: 429, statusCode: 429 };
+  b.recordError(429, err);
+  expect(b.isFatal(err)).toBe(false);
+  expect(b.shouldBackoff()).toBe(true);
+  expect(b.getRemainingBackoffMs()).toBeGreaterThan(0);
+  expect(b.getConsecutiveErrors()).toBe(1);
+});
+
+it('known throttle still becomes fatal once the transient retry budget is exhausted', () => {
+  const b = new ErrorBackoff({ maxRetries: 2, initialDelayMs: 10 });
+  const err = { status: 429 };
+  b.recordError(429, err);
+  expect(b.isFatal(err)).toBe(false);
+  b.recordError(429, err);
+  expect(b.isFatal(err)).toBe(true);
+});
+```
+
+**Block 3 — `classifyError` tags known throttles distinctly (six cases in `describe('classifyError tags known throttles distinctly (issue #2152)')`).** Pins the new precedence step 3b: HTTP 429 as transient `rate_limit`; `provider_rate_limit` code without a status as `rate_limit`; message-only rate-limit `Error` as `rate_limit` (**not** `unknown`); `'quota exceeded for today'` as `rate_limit`; free-tier throttle still fatal `rate_limit` (precedence step 3 wins); plain `{ status: 401 }` is NOT reclassified as `rate_limit` (the auth branch still wins — regression guard against over-broadening). Reference:
+
+```typescript
+it('classifies a rate-limit message-only error as rate_limit (not validation)', () => {
+  // Without the known-throttle precedence in classifyError, this would
+  // fall through to the generic "unknown" bucket. With the fix it is
+  // tagged `rate_limit` so outer retry loops schedule the correct
+  // delay instead of overflow-compacting.
+  const result = classifyError(new Error('rate limit exceeded'));
+  expect(result.type).toBe('rate_limit');
+  expect(result.fatal).toBe(false);
+  expect(result.retryable).toBe(true);
+});
+
+it('does not reclassify a 401 as rate_limit when message happens to say nothing', () => {
+  const result = classifyError({ status: 401 });
+  expect(result.type).toBe('auth');
+  expect(result.fatal).toBe(true);
+});
+```
+
+**When adding a new throttle shape to `isKnownThrottle` (e.g. a new provider SDK that leaves a throttle marker under a different field), extend each block in lockstep:** Block 1 with one positive detection case AND one negative counter-case drawn from the same field (so a future over-broadening breaks a test); Block 2 with one end-to-end case that pins `isFatal(err) === false` on first contact AND `=== true` on budget exhaustion; Block 3 with one `classifyError` case that pins `type === 'rate_limit'` AND `fatal === false`. The three-block structure is deliberate — a classifier change that passes Block 1 but breaks Block 2 or Block 3 means the detector widened in isolation without wiring the behaviour through `ErrorBackoff` and `classifyError`.
+
 ### Hook `contextModification` persistence tests
 
 `tests/orchestrator-hooks.test.ts` gained a persistence test asserting that hook `contextModification` payloads are written to the session with `displayRole: 'system'`. The pattern:

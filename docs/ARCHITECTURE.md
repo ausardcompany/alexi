@@ -895,6 +895,68 @@ All three are subsumed by the generic `isContentPolicyError` for retry decisions
 
 **Non-retry contract pinned by regression suite.** [`tests/core/error-classification.test.ts`](../tests/core/error-classification.test.ts) (294 lines, 32 cases across four describe blocks) locks in: (1) every `classifyError` branch, (2) every content-policy message substring and shape plus negatives, (3) every provider-specific helper branch, and (4) that `ErrorBackoff.isFatal` short-circuits for a content-policy error from any provider family *without* a prior `recordError` call (and that a transient `503` or `ECONNRESET` does NOT flip the flag). See [docs/TESTING.md — Testing content-policy classification (issue #2134)](./TESTING.md#testing-content-policy-classification-issue-2134).
 
+### Known-throttle classification (issue #2152)
+
+The `isRateLimitError` detector documented above is sufficient for every error that has already been normalised by the SAP orchestration adapter — it dispatches on the `free_tier_rate_limit` / `provider_rate_limit` machine codes, the two typed `Error` class names, and `statusCode === 429`. In practice, however, throttle responses reach the error-backoff layer in three *un-normalised* shapes that the coarse detector cannot catch:
+
+1. **Raw `fetch`-layer throws** carrying only a `.message` string (`"rate limit exceeded, retry later"`, `"quota exceeded for today"`, `"Too Many Requests"`). The response envelope was consumed before Alexi saw the error, so no `statusCode` and no machine code survived.
+2. **Axios-style wrappers** that nest the status under `response.status` instead of exposing it as a top-level `.status` or `.statusCode`. The coarse detector only inspects `statusCode`, so a `{ response: { status: 429 } }` payload slips through.
+3. **Provider SDK wrappers that normalise 429 to a 4xx envelope with a throttle message in the body** — e.g. `{ statusCode: 400, message: 'rate limit exceeded' }`. Without a second check, the generic 4xx fallback in `recordError` flips `fatalNotified = true` and the circuit breaker opens on what was actually a transient throttle.
+
+`isKnownThrottle(err)` in [`src/core/error-backoff.ts:251-280`](../src/core/error-backoff.ts) is the broadened detector that closes all three gaps. It is a strict superset of `isRateLimitError`: every shape the coarse detector matches is also matched here, plus the three un-normalised shapes above. The message regex is deliberately conservative so the detector cannot over-broaden:
+
+```typescript
+const THROTTLE_MESSAGE_RE = /\brate\s*limit\b|\bquota\s+exceeded\b|too many requests/i;
+```
+
+Word boundaries bracket `rate limit` with optional interior whitespace (`rate\s*limit`) and required interior whitespace on `quota\s+exceeded`, so false-positive strings like `rate-limited yesterday` or `queue overflowed` do not trip the detector. HTTP status is resolved via the private `readStatus(err)` helper, which consults `err.status`, `err.statusCode`, AND `err.response.status` so axios wrappers classify identically to native-fetch throws.
+
+```mermaid
+flowchart TB
+    Err[Provider error] --> IsKnown{isKnownThrottle?}
+    IsKnown -->|null/undefined| No[false]
+    IsKnown -->|string| MsgRe1{THROTTLE_MESSAGE_RE?}
+    IsKnown -->|non-object| No
+    IsKnown -->|object| Code{code === free_tier_<br/>or provider_rate_limit?}
+    Code -->|yes| Yes[true]
+    Code -->|no| Name{name === FreeTier-<br/>or ProviderRateLimitError?}
+    Name -->|yes| Yes
+    Name -->|no| Status{readStatus === 429?}
+    Status -->|yes| Yes
+    Status -->|no| MsgRe2{THROTTLE_MESSAGE_RE<br/>matches err.message?}
+    MsgRe1 -->|yes| Yes
+    MsgRe1 -->|no| No
+    MsgRe2 -->|yes| Yes
+    MsgRe2 -->|no| No
+```
+
+**`ErrorBackoff` wiring (ordering matters).** The `recordError` branch order in [`src/core/error-backoff.ts:396-414`](../src/core/error-backoff.ts) is now:
+
+1. `isFreeTierRateLimitError(err) || isContentPolicyError(err)` → `fatalNotified = true` (PERMANENT).
+2. `isKnownThrottle(err)` → **empty body** (short-circuits the generic 4xx branch so the throttle stays transient).
+3. `statusCode >= 400 && statusCode < 500 && statusCode !== 429` → `fatalNotified = true` (generic 4xx validation).
+
+The new branch 2 is deliberately empty-bodied. Its only purpose is to prevent a wrapper-4xx throttle (`{ statusCode: 400, message: 'rate limit exceeded' }`) from falling into branch 3 — the exponential backoff schedule and `Retry-After` precedence still run normally in the delay-computation block below, so a throttle still gets the correct retry delay, just not the fatal flag.
+
+`isFatal(err?)` adds a symmetric short-circuit at [`src/core/error-backoff.ts:492-497`](../src/core/error-backoff.ts): when `err` is a known throttle but NOT a free-tier variant, return `false` so the paid-tier throttle path cannot leak into the generic `fatalNotified` fallback. The one exception is retry-budget exhaustion — when `consecutiveErrors >= maxRetries` the throttle flips to fatal (same contract as `isRetryableError` + budget exhaustion from issue #1994), so an outer retry layer stops instead of looping forever on a flaky throttle.
+
+**`classifyError` precedence step 3b.** [`src/core/error-backoff.ts:668-676`](../src/core/error-backoff.ts) inserts a new precedence step BETWEEN the free-tier short-circuit (step 3, `fatal: true`) and the HTTP status mapping (step 4):
+
+| Step  | Check                                                        | Outcome                                                           |
+| ----- | ------------------------------------------------------------ | ----------------------------------------------------------------- |
+| 1     | `isContentPolicyError(err)`                                  | `{ type: 'content_policy', fatal: true }`                         |
+| 2     | `isPermanentAuthFailure(err)`                                | `{ type: 'auth', fatal: true }`                                   |
+| 3     | `isFreeTierRateLimitError(err)`                              | `{ type: 'rate_limit', fatal: true }`                             |
+| **3b**| **`isKnownThrottle(err)`**                                   | **`{ type: 'rate_limit', fatal: false, retryable: true }`**       |
+| 4     | HTTP status map (401/403, 400/422, 429, 451, 5xx, other 4xx) | per-status outcome                                                |
+| 5     | `NETWORK_MESSAGE_RE` on message                              | `{ type: 'network', fatal: false }`                               |
+| 6     | `isRateLimitError(err) \|\| isXAICapacityError(err)`         | `{ type: 'rate_limit', fatal: false }`                            |
+| 7     | fall-through                                                 | `{ type: 'unknown', fatal: false, retryable: true }`              |
+
+Without step 3b, a message-only `new Error('rate limit exceeded')` fell into step 7 (`unknown`) and a `{ statusCode: 400, message: 'rate limit' }` wrapper fell into step 4's "other 4xx" validation branch (`fatal: true`). Both are now correctly tagged `rate_limit` transient. The step order preserves the pre-existing permanent short-circuits above (free-tier quota exhaustion stays `fatal: true`, HTTP 401/403 still wins the `auth` bucket) and does not alter network / unknown behaviour.
+
+**Why `isRateLimitError` is kept.** The coarse `isRateLimitError` predicate stays as the user-facing "rate limit reached" UX detector — CLI renderers that need to decide whether to show the rate-limit-specific banner continue to call it. The two detectors never contradict each other because `isKnownThrottle` is a strict superset by construction; the broader detector is the retry-decision classifier, and the narrower one is the UX-decision classifier. When both are involved in the same code path (e.g. the agent-mode error-rendering helper), order the calls as `isRateLimitError` first for the banner and `isKnownThrottle` second for the retry decision.
+
 ### Environment Details Fence
 
 The volatile prompt blocks — memory context, session context, repo map — are appended after the stable assembled system prompt and wrapped in a single `<environment_details>\n...\n</environment_details>` fence. This separation guards two concerns simultaneously: it stops environment context from bleeding into the stable prompt prefix (which would break cache reuse) and it prevents the model from mistaking environment metadata for authored user text on the next turn.

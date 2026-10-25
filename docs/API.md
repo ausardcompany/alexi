@@ -5254,6 +5254,19 @@ export function getDefaultWatcherInstance(): InstanceWatcher;
 export function isRateLimitError(err: unknown): boolean;
 
 /**
+ * Broader structural detector (issue #2152). Returns true for every
+ * shape `isRateLimitError` matches, PLUS: raw string errors with a
+ * throttle message substring, axios-style wrappers nesting status under
+ * `response.status`, and SDK envelopes that leave a wrapper 4xx with a
+ * rate-limit body. The message regex is
+ *   /\brate\s*limit\b|\bquota\s+exceeded\b|too many requests/i
+ * — conservative on purpose. Consumed by `ErrorBackoff.recordError`,
+ * `ErrorBackoff.isFatal`, and `classifyError` to keep paid-tier
+ * throttles out of the generic fatal 4xx branch.
+ */
+export function isKnownThrottle(err: unknown): boolean;
+
+/**
  * True when `err.message` matches /xai.*capacity|capacity.*exceeded/i.
  * xAI (and some SAP proxies fronting xAI-family models) occasionally
  * emits a mid-stream "capacity exceeded" error that is semantically the
@@ -5314,6 +5327,9 @@ export interface ErrorClassification {
  *   1. isContentPolicyError  -> content_policy, fatal.
  *   2. isPermanentAuthFailure -> auth, fatal.
  *   3. isFreeTierRateLimitError -> rate_limit, fatal.
+ *   3b. isKnownThrottle -> rate_limit, transient (issue #2152). Runs
+ *      before the status map so a wrapper 4xx with a rate-limit body
+ *      does not fall into the validation bucket.
  *   4. HTTP status mapping (401/403 auth; 400/422/other 4xx
  *      validation; 429 rate_limit; 451 content_policy; 5xx network).
  *   5. NETWORK_MESSAGE_RE   -> network, transient.
@@ -5377,6 +5393,69 @@ async function callWithTaxonomy<T>(fn: () => Promise<T>): Promise<T> {
 ```
 
 See [docs/ARCHITECTURE.md — Content-policy classification across provider families](ARCHITECTURE.md#content-policy-classification-across-provider-families-issue-2134) for the precedence flowchart and [docs/PROVIDERS.md — Content-policy detection helpers](PROVIDERS.md#content-policy-detection-helpers-issue-2134) for the per-provider helper surface.
+
+### `isKnownThrottle` broad throttle detector (issue #2152)
+
+`isKnownThrottle(err)` is the broadened throttle classifier that `ErrorBackoff.recordError`, `ErrorBackoff.isFatal`, and `classifyError` consume to keep paid-tier rate limits out of the generic fatal 4xx branch. It is a strict superset of `isRateLimitError`: every shape the coarse detector matches is also matched here. The three additional shapes:
+
+| Shape                                                                            | Example                                                                     | Pre-fix classification                 | With `isKnownThrottle` |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------------------------------- | ---------------------- |
+| Raw `fetch`-layer string throw                                                   | `'rate limit exceeded'`                                                     | `classifyError → { type: 'unknown' }`  | `rate_limit` transient |
+| Axios-style wrapper with nested status                                           | `{ response: { status: 429 } }`                                             | missed (no top-level `.statusCode`)    | `rate_limit` transient |
+| SDK envelope with 4xx wrapper + throttle message                                 | `{ statusCode: 400, message: 'rate limit' }`                                | `fatalNotified = true` (fatal)         | `rate_limit` transient |
+| Pre-existing: free-tier / provider rate-limit codes, class names, `code === 429` | `{ code: 'provider_rate_limit' }`                                           | already matched                        | still matched          |
+
+The message regex is deliberately conservative:
+
+```typescript
+const THROTTLE_MESSAGE_RE = /\brate\s*limit\b|\bquota\s+exceeded\b|too many requests/i;
+```
+
+Word boundaries bracket `rate limit` (optional interior whitespace) and `quota exceeded` (required interior whitespace), so random telemetry strings like `rate-limited yesterday` or `queue overflowed` do not trip the detector.
+
+**`ErrorBackoff.isFatal(err?)` short-circuit (`src/core/error-backoff.ts:492-497`).** When `err` is a known throttle but NOT a free-tier variant, `isFatal(err)` returns `false` so the paid-tier throttle path never leaks into the generic `fatalNotified` fallback. The retry-budget exhaustion path from issue #1994 still applies: when `consecutiveErrors >= maxRetries`, the throttle flips to fatal so an outer retry layer (`NetworkManager`, agent-workflow `KILO_RETRIES`) stops instead of looping forever.
+
+**Semantic layering.**
+
+- `isRateLimitError(err)` — the **UX-decision** classifier. CLI renderers call it to decide whether to show the rate-limit-specific banner. Matches only on normalised markers (`code`, `name`, `statusCode === 429`).
+- `isKnownThrottle(err)` — the **retry-decision** classifier. The error-backoff layer, `classifyError`, and outer retry drivers consume it. Matches on every shape above.
+
+The two detectors never contradict each other because `isKnownThrottle` is a strict superset by construction. When both are involved in the same code path (e.g. an agent-mode error-rendering helper), order the calls as `isRateLimitError` first for the banner decision and `isKnownThrottle` second for the retry decision.
+
+Example — the full retry-decision path, matching the `recordError` branch order and the `classifyError` precedence table:
+
+```typescript
+import {
+  ErrorBackoff,
+  classifyError,
+  isKnownThrottle,
+  isRateLimitError,
+} from './core/error-backoff.js';
+
+const backoff = new ErrorBackoff({ maxRetries: 5 });
+
+async function callWithThrottleAware<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    // UX branch: show the rate-limit banner for shapes CLI knows about.
+    if (isRateLimitError(err)) {
+      // render user-facing "rate limit reached" copy
+    }
+    // Retry branch: broader detector covers raw-fetch, axios, wrapper 4xx.
+    backoff.recordError(undefined, err);
+    const classified = classifyError(err);
+    // classified.type === 'rate_limit' for every throttle shape (free-tier
+    // stays fatal:true; paid-tier is fatal:false until budget exhaustion).
+    if (!backoff.isFatal(err) && classified.retryable) {
+      // caller may retry; honour getRetryAfterMs(err) for the delay hint.
+    }
+    throw err;
+  }
+}
+```
+
+See [docs/ARCHITECTURE.md — Known-throttle classification (issue #2152)](ARCHITECTURE.md#known-throttle-classification-issue-2152) for the detection flowchart and precedence table, and [docs/TESTING.md — Testing the known-throttle classifier (issue #2152)](TESTING.md#testing-the-known-throttle-classifier-issue-2152) for the regression-suite walkthrough.
 
 ### `ErrorBackoff.isFatal(err?)` — three lookup paths (issue #1994)
 
