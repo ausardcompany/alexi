@@ -30,9 +30,7 @@ describe('assertHttpUrl', () => {
       'data:text/html,<script>alert(1)</script>',
       'vbscript:msgbox(1)',
     ]) {
-      expect(() => assertHttpUrl(bad, 'authorization_endpoint')).toThrow(
-        /must use http or https/
-      );
+      expect(() => assertHttpUrl(bad, 'authorization_endpoint')).toThrow(/must use http or https/);
     }
   });
 
