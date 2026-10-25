@@ -36,6 +36,10 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing provider health check (`src/providers/health.ts`, issue #2067)](#testing-provider-health-check-srcprovidershealthts-issue-2067)
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
+- [Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)](#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts)
+- [Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)](#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts)
+- [Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)](#testing-the-scoped-sse-probe-fetch-testsmcpsse-probetestts)
+- [Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)](#testing-the-mcp-output-schema-normaliser-srcmcp__tests__normalizeoutputschematestts)
 - [Best Practices](#best-practices)
 
 ## Testing Strategy
@@ -1368,6 +1372,28 @@ describe('Write Tool', () => {
   });
 });
 ```
+
+### Alternative: direct `executeUnsafe` without a module mock
+
+Not every tool test needs the `vi.mock('../../../src/tool/index.js', ...)` shim shown above. When the suite imports a single `*Tool` export and only asserts on filesystem side effects, calling `tool.executeUnsafe(params, ctx)` directly is both shorter and avoids a module-level stub that other suites in the same file would inherit. `src/tool/tools/__tests__/edit.mixed-eol.test.ts` and `src/tool/tools/__tests__/edit.agentsmd.test.ts` follow this shape:
+
+```typescript
+async function runEdit(
+  ctx: MinimalContext,
+  params: { filePath: string; oldString: string; newString: string; replaceAll?: boolean }
+) {
+  // Use executeUnsafe so the test does not depend on the default `ask`
+  // permission rule for `write` (which has no interactive listener in a
+  // test run and would otherwise time out and reject every call).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result = await (editTool as any).executeUnsafe(params, ctx);
+  return result;
+}
+```
+
+The cast to `as any` is required because `executeUnsafe` is not on the public `ToolDefinition` surface — it is added by `defineTool` at registration time. The cast is local to the test helper and does not leak into production typings.
+
+Regression history to be aware of: calling `editTool.execute(...)` from a non-interactive test suite will time out on the default `ask` rule for `write` and silently resolve every edit to a user rejection — the assertions then compare the file's original contents against the expected post-edit contents and fail. This is the exact mode `edit.mixed-eol.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)). When adding a new edit / write / delete test, pick either the `vi.mock('../../../src/tool/index.js', ...)` shim OR the direct `executeUnsafe` call — never the raw `.execute()` path.
 
 ### Tool Test Coverage
 
@@ -7377,6 +7403,12 @@ contributors do not re-introduce them by hand:
    // columns once the first argument sat at 98 columns)
    await expect(openUrl('ms-msdt:/id PCWDiagnostic')).rejects.toThrow(/Only http and https links/);
 
+   // src/mcp/__tests__/oauth-callback.test.ts:33 (canonical form after the
+   // 2026-10-25 auto-fix pass in commit 0e133ffa — the synchronous
+   // expect(() => fn()).toThrow(/.../) variant of the above, which sat at
+   // 99 columns and fits under the 100-column ceiling)
+   expect(() => assertHttpUrl(bad, 'authorization_endpoint')).toThrow(/must use http or https/);
+
    // src/config/__tests__/overlay.test.ts:6 (canonical form after the
    // 2026-10-07 auto-fix pass in commit b02d6ad2 — a three-binding named
    // import plus the `from '../overlay.js';` clause sits at 97 columns and
@@ -11580,6 +11612,10 @@ Regression contract — four fixture cells all produced in-memory via `xlsx.util
 | Date-only (ISO midnight)  | `YYYY-MM-DD`           | Unchanged behaviour for backwards compat  |
 | Elapsed `[h]:mm`          | sheet-formatted `value.w` | Elapsed-time regex `/\[(h+|m+|s+)\]/i`   |
 
+#### Fixture note: elapsed-time durations are 1899-12-30 + N hours, not out-of-range ISO strings
+
+SheetJS stores an elapsed duration (e.g. `25:30`) as `1899-12-30T00:00:00Z` plus `N` hours — a `25:30` elapsed value therefore materialises as `1899-12-31T01:30:00.000Z`. Do NOT construct the fixture as `new Date('1899-12-30T25:30:00.000Z')`: hour `25` is not a legal ISO time-of-day, so JavaScript's `Date` constructor silently returns `Invalid Date` and the implementation's downstream `.toISOString()` call throws `RangeError: Invalid time value` before the assertion runs. This is the exact failure mode `read-office.xlsx-cell.test.ts` landed in before commit `94c9f8a4` (see [CHANGELOG.md — Fixed](../CHANGELOG.md#fixed)); the fix is to compute the fixture against the real SheetJS epoch (1899-12-30 + hours) rather than to encode `h > 23` in the ISO literal itself.
+
 ### Running
 
 ```bash
@@ -13677,3 +13713,152 @@ afterEach(() => {
 - **Use `resetTaskScheduler()` in both `beforeEach` and `afterEach`.** The scheduler is a module-level singleton; a lingering `TaskScheduler` from the previous suite will persist its tasks to the next test's `tasks.json` because the singleton is reused.
 - **Do NOT mock `src/core/task-scheduler.js`.** The promotion contract is the regression surface — a mock collapses the `registerWorkspace` → `scheduleTask` → `parseSchedule` chain and hides the "unsupported schedule format must not leak a half-promoted task" invariant.
 - **Allow ±10s slack when comparing `nextRun` to `parseSchedule(..., Date.now())`.** The two `Date.now()` reads are not simultaneous; a strict equality assertion will flake on slow CI workers.
+
+### Testing MCP sign-in telemetry pairing (`src/mcp/__tests__/auth-telemetry.test.ts`)
+
+`src/mcp/__tests__/auth-telemetry.test.ts` (101 lines, 7 cases) pins the three invariants of `McpAuthTelemetry` (`src/mcp/auth-telemetry.ts`). The suite is pure — no `vi.mock`, no temp directory, no I/O. It uses a tiny in-memory recorder and an injectable clock so `durationMs` assertions are deterministic.
+
+**Shared fixture.** A `recorder()` helper returns `{ events, emit }`. The `emit` is the `EmitFn` passed to the tracker; `events` is the array every emitted `SignInEvent` is pushed into, so each case can match against the full ordered sequence:
+
+```typescript
+function recorder(): { events: SignInEvent[]; emit: (e: SignInEvent) => void } {
+  const events: SignInEvent[] = [];
+  return { events, emit: (e) => events.push(e) };
+}
+```
+
+**Injectable clock.** Each case constructs the tracker as `new McpAuthTelemetry(emit, () => <fixedTime>)` so the recorded `durationMs` is a function of controllable timestamps rather than wall-clock skew. The sixth case flips a mutable `let clock = 1000` to `1750` between `start` and `complete` to assert `durationMs === 750`.
+
+**Minimum coverage.**
+
+1. **Successful start/complete pair.** `start('flow-1', 'server-a')` then `complete('flow-1', 'success')` emits exactly two events, in the expected order, and leaves `inflightCount() === 0`.
+2. **Displacement.** Starting a second flow for the SAME `serverId` auto-completes the first with `outcome: 'displaced'` BEFORE the second `start` event is emitted. The ordered sequence `start:flow-1 → complete:flow-1:displaced → start:flow-2` is asserted via `events.map(e => '${e.kind}:${e.flowId}:${e.outcome ?? ''}')`.
+3. **No cross-server displacement.** Starting flows for `server-a` and `server-b` concurrently produces two `start` events only (no `complete` from displacement). `inflightCount() === 2`.
+4. **Idempotent `complete`.** A second `complete` call for the same `flowId` is a silent no-op — the suite asserts `events` has exactly 2 entries after `complete(..., 'failure')` + `complete(..., 'success')`, and the recorded outcome is the FIRST one.
+5. **`shutdown()` closes outstanding flows as `interrupt`.** `start('flow-1', ...)` + `start('flow-2', ...)` + `shutdown()` emits two `complete` events, both with `outcome: 'interrupt'`, and `inflightCount() === 0`.
+6. **`durationMs` is wall-clock from start to complete.** Advance the injectable clock between `start` and `complete`; assert `complete.durationMs === 750` exactly.
+7. **`complete()` for an unknown flow is silently ignored.** No events emitted — the tracker never records a `start` so there is nothing to pair.
+
+**Pitfalls.**
+
+- **Do not share recorders across cases.** Each `it(…)` constructs a fresh `recorder()` + `McpAuthTelemetry`. Reusing a recorder would leak events from the previous case into the sequence assertion.
+- **Assert on the event sequence, not just the final state.** `inflightCount()` reports the current gauge, but the pairing contract is a property of the emitted stream. The displacement case specifically asserts the ORDER of `start → complete:displaced → start`, not just that two start events eventually landed.
+- **Do not re-import `src/mcp/auth-telemetry.ts` across cases.** The module exports a class, not a singleton — each case constructs its own instance. A regression that introduced module-local state would be caught by the "no cross-server displacement" case.
+
+### Testing MCP OAuth authorization-URL scheme allow-list (`src/mcp/__tests__/oauth-callback.test.ts`)
+
+`src/mcp/__tests__/oauth-callback.test.ts` (61 lines, 5 cases across two `describe` blocks) pins the scheme allow-list exported by `src/mcp/oauth-callback.ts`. The suite exercises `assertHttpUrl` directly and gates `startMcpOAuth` against the launcher — actually spawning `xdg-open` / `open` / `start` in CI would be flaky and platform-specific, so only the pre-launcher rejection path is covered here.
+
+**Minimum coverage for `assertHttpUrl`.**
+
+1. **`http:` and `https:` are accepted.** `assertHttpUrl('http://example.com', 'authorization_endpoint').href === 'http://example.com/'`; `assertHttpUrl('https://auth.example.com/oauth/authorize', 'authorization_endpoint').href` round-trips verbatim. The returned `URL` is the parsed object, usable by downstream OAuth code.
+2. **Empty and non-URL inputs reject with the label.** `assertHttpUrl('', 'authorization_endpoint')` throws `/authorization_endpoint/`; `assertHttpUrl('not a url', 'token_endpoint')` throws `/token_endpoint/`. The field label is the key operator-facing hint for identifying which discovery-metadata field failed.
+3. **Dangerous schemes reject with `must use http or https`.** A parametrised loop asserts over five known hostile schemes: `file:///etc/hosts`, `javascript:alert(1)`, `ms-msdt:/id PCWDiagnostic`, `data:text/html,<script>alert(1)</script>`, `vbscript:msgbox(1)`. Each throws a message containing `must use http or https`.
+4. **UNC paths reject BEFORE `URL` parse.** `\\server\share\file.html` (Windows UNC) and `//server/share/file.html` both throw `must use http or https`. The check is explicit because some Node versions on Windows normalise UNC into a valid `file:` URL post-parse, which would bypass a scheme check that only inspected `url.protocol`.
+
+**Minimum coverage for `startMcpOAuth`.**
+
+5. **Non-http(s) URLs reject before the launcher spawns.** `startMcpOAuth('file:///etc/hosts')` rejects with `/http or https/`; `startMcpOAuth('javascript:alert(1)')` rejects with `/http or https/`; `startMcpOAuth('')` rejects with `/not a valid URL/`. The error surfaces *before* `openUrl` is called, so a bad URL never round-trips through logging / telemetry.
+6. **The configured label surfaces in the error.** `startMcpOAuth('file:///etc/hosts', { label: 'authorization_endpoint' })` rejects with `/authorization_endpoint/`, so a nested OAuth-discovery parse localises to the offending field.
+
+**Pitfalls.**
+
+- **Do NOT exercise `openUrl` directly in this suite.** `startMcpOAuth` validates first, so the suite needs to assert only on the pre-spawn rejection path. A test that attempts to spawn a browser subprocess in CI will time out on headless workers.
+- **Keep the dangerous-scheme list in sync with the implementation.** The source file enumerates the known-hostile schemes in a module-level comment (CVE-2022-30190 "Follina" for `ms-msdt:`, XSS for `javascript:` and `data:`, local file disclosure for `file:`); when adding a new scheme to the rejection list, extend both the suite's loop AND the module docblock.
+- **Match on the message substring, not the full string.** Use `/must use http or https/` and `/authorization_endpoint/` regex matchers rather than exact string equality — the error-message format may evolve (e.g. adding the offending URL to the message) and the suite should only pin the substrings operators actually read.
+
+### Testing the scoped SSE probe fetch (`tests/mcp/sse-probe.test.ts`)
+
+`tests/mcp/sse-probe.test.ts` (102 lines, 11 cases across three `describe` blocks) covers `classifyProbeContentType`, `isSseContentType`, and the newer `ScopedProbeFetch` helper (`src/mcp/sse-probe.ts`). The suite is pure — no `vi.mock`, no network, no temp directory.
+
+**`classifyProbeContentType` cases.** Six cases parameterise the content-type matrix:
+
+1. Canonical `text/event-stream` classifies as `'sse'`.
+2. Case-varying `Text/Event-Stream` and `TEXT/EVENT-STREAM` classify as `'sse'` — classification is case-insensitive.
+3. Trailing parameters (`text/event-stream; charset=utf-8`) are stripped before matching.
+4. `application/json` classifies as `'json'` (streamable HTTP transport).
+5. Unrelated types (`text/html`, `application/xml`) classify as `'other'`.
+6. Missing / `null` / `undefined` / empty-string content types classify as `'other'` — defensive against SDKs that omit the header on error responses.
+
+**`isSseContentType` cases.** Two cases confirm the predicate wraps the classifier correctly for the common "am I talking to an SSE endpoint?" check.
+
+**`ScopedProbeFetch` cases.** The new cases cover the scoping contract introduced in the 2026-10-25 upstream sync (ports kilocode `432462088` / `70354f039`):
+
+7. **The initial URL is owned.** `new ScopedProbeFetch('https://mcp.example.com/sse').owns('https://mcp.example.com/sse') === true`.
+8. **Unrelated URLs are NOT owned.** The scoped probe does not claim ownership of `https://sap-aicore.example.com/v2/inference` or an unrelated MCP endpoint — this is the direct regression guard against the "leaked fetch interception" bug the upstream commit names in its message. Pre-fix, the probe installed a global fetch wrapper that intercepted EVERY concurrent request made by the process, including unrelated SAP AI Core traffic.
+9. **Redirect hops stay scoped.** `recordRedirect('https://mcp.example.com/sse/v2')` adds the hop to the owned-URL set; subsequent `owns(hop)` returns `true`, but owns on `https://unrelated.example.com` still returns `false`.
+10. **URL normalisation ignores fragments.** `#fragment` is stripped before scope matching — fetch never sees the fragment, so a `Location:` header that adds one must not break scope recognition.
+11. **Case-varying schemes still match.** `URL` already lower-cases scheme and host, but the normalisation is explicit so a caller passing a pre-formatted string (unusual, but possible) does not trip the scope check.
+
+**Pitfalls.**
+
+- **Test ownership through `owns`, not by inspecting the private Set.** `snapshot()` is exposed for test assertions and is the sanctioned way to inspect state. The private `visited` field is implementation detail.
+- **Do not install a global `fetch` wrapper in this suite.** `ScopedProbeFetch` is a pure in-memory bookkeeping helper — the actual fetch-interception wiring lives in follow-up code paths. Mocking `globalThis.fetch` here would conflate the two layers and leak the mock across parallel test files.
+- **Keep the `URL.canParse` fallback test honest.** The private `normalizeUrl` falls back to the raw string when `URL.canParse(input)` returns `false`. A regression that silently coerces unparseable strings would evade scope checks. The suite's "owns a non-URL string" scenario relies on this fallback staying deterministic.
+
+### Testing the MCP output-schema normaliser (`src/mcp/__tests__/normalizeOutputSchema.test.ts`)
+
+Added in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). A 57-line pure-function test suite that pins the six shape contracts enforced by `normalizeOutputSchema` (`src/mcp/client.ts:717-734`), the normaliser that lets MCP servers advertise tools whose `outputSchema` is not a root object. Co-located with the module under `src/mcp/__tests__/` so it ships alongside the implementation and runs under the same `vitest` sweep as the rest of the MCP suite.
+
+### Why normalise at all
+
+MCP servers in the wild emit a mix of `outputSchema` shapes: root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: 'string'`, `type: 'number'`), or no schema at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object — a `{ type: 'array', items: ... }` schema would be filtered out at registration time with no actionable error. The normaliser wraps non-object roots into a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape; the suite audits that six distinct input shapes produce the right six outputs.
+
+### Minimum coverage (the six-case shape audit)
+
+```typescript
+import { describe, expect, it } from 'vitest';
+import { normalizeOutputSchema } from '../client.js';
+
+describe('normalizeOutputSchema', () => {
+  it('returns undefined for non-object input', () => {
+    expect(normalizeOutputSchema(undefined)).toBeUndefined();
+    expect(normalizeOutputSchema(null)).toBeUndefined();
+    expect(normalizeOutputSchema('string')).toBeUndefined();
+    expect(normalizeOutputSchema(42)).toBeUndefined();
+  });
+
+  it('passes root object schemas through unchanged', () => {
+    const schema = { type: 'object', properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('passes schemas with properties through even without explicit type', () => {
+    const schema = { properties: { foo: { type: 'string' } } };
+    expect(normalizeOutputSchema(schema)).toEqual(schema);
+  });
+
+  it('wraps array schemas under properties.result', () => {
+    const schema = { type: 'array', items: { type: 'string' } };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+
+  it('wraps primitive schemas under properties.result', () => {
+    expect(normalizeOutputSchema({ type: 'string' })).toEqual({
+      type: 'object',
+      properties: { result: { type: 'string' } },
+      required: ['result'],
+    });
+  });
+
+  it('wraps union (anyOf) schemas under properties.result', () => {
+    const schema = { anyOf: [{ type: 'string' }, { type: 'number' }] };
+    expect(normalizeOutputSchema(schema)).toEqual({
+      type: 'object',
+      properties: { result: schema },
+      required: ['result'],
+    });
+  });
+});
+```
+
+### Pitfalls
+
+- **Do NOT drop the "passes-with-properties-only" case.** The `{ properties: {...} }` without explicit `type: 'object'` branch is a real-world shape — some MCP servers omit `type` when `properties` is present, assuming the JSON Schema default. The normaliser treats that branch as a root object and returns the schema verbatim; a regression that normalised it would wrap a perfectly valid root schema under `properties.result` and break downstream tooling.
+- **Do NOT replace the primitive case with a parametrised loop over every primitive.** A single `{ type: 'string' }` case is enough to pin the wrap path; iterating over `['string', 'number', 'boolean', 'integer']` just inflates the suite without exercising a different code path (the normaliser's dispatch does not care about the primitive's own `type` string).
+- **`undefined` vs `null` vs primitive are the same branch.** The suite covers all four values in a single `it` block because the module's guard `if (!schema || typeof schema !== 'object')` collapses them. Splitting them into four `it` blocks is noise.
+- **Assert `.toEqual(...)` not `.toMatchObject(...)` for the wrap cases.** `toMatchObject` would silently accept extra keys on the output; `toEqual` pins the exact `{ type, properties, required }` triple so a future addition (e.g. `description` or `title`) surfaces as a test failure that forces the author to decide whether the addition is intentional.
