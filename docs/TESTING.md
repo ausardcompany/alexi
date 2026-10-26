@@ -38,6 +38,7 @@ This document provides comprehensive testing guidelines for Alexi, including tes
 - [Testing subagent tool allowlist inheritance (`tests/agent/inheritance.test.ts`, issue #2104)](#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104)
 - [Testing subagent `allowedTools` array-shape preservation (`tests/agent/subagent-permissions.test.ts`, issue #2108)](#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108)
 - [Testing structured MCP startup logging (`tests/mcp/startup-logger.test.ts`, `tests/mcp/client-integration.test.ts`)](#testing-structured-mcp-startup-logging-testsmcpstartup-loggertestts-testsmcpclient-integrationtestts)
+- [Testing the per-server shutdown timeout (`src/mcp/__tests__/shutdown.test.ts`, issue #2160)](#testing-the-per-server-shutdown-timeout-srcmcp__tests__shutdowntestts-issue-2160)
 
 - [Testing subagent edit-tool configuration inheritance (`tests/agent/subagent-tool-inheritance.test.ts`, issue #2123)](#testing-subagent-edit-tool-configuration-inheritance-testsagentsubagent-tool-inheritancetestts-issue-2123)
 
@@ -7389,6 +7390,65 @@ Key patterns to reuse when extending the suite:
 6. **Keep the mock independent from `@modelcontextprotocol/client`.** The whole value of `SlowMcpServer` is that it is a 45-line standalone file with zero SDK coupling. A reviewer who tries to extend it to implement `tools/list` or `callTool` is building the wrong thing — those code paths are covered by `client.test.ts` with the full SDK mock. The slow-server mock exists solely for shutdown-orchestration tests.
 
 The matching port-maintenance invariants for `disconnectAll` (why the up-front name snapshot and `Promise.allSettled` are both load-bearing, and what a reviewer should block) live in [CONTRIBUTING.md — Best-effort parallel shutdown (`McpClientManager.disconnectAll`)](CONTRIBUTING.md#best-effort-parallel-shutdown-mcpclientmanagerdisconnectall).
+
+### Testing the per-server shutdown timeout (`src/mcp/__tests__/shutdown.test.ts`, issue #2160)
+
+Introduced by commit `d9d7142e` (`feat(core): per-server shutdown timeout for MCP disconnect`). Companion to `tests/mcp/parallel-shutdown.test.ts`: where the parallel suite pins the ACROSS-SERVERS fault-tolerance contract (`Promise.allSettled` + up-front name snapshot), this suite pins the WITHIN-SERVER bound added by racing `connection.client.close()` against the `DISCONNECT_TIMEOUT_MS = 5000` deadline in `src/mcp/client.ts:1794-1830`. The regression it exists to prevent is a stdio child that never acknowledges `SIGTERM` (or a hung HTTP keep-alive) stalling the entire `disconnectAll` for the lifetime of the process — a scenario the parallel-shutdown suite CANNOT catch because `Promise.allSettled` happily waits forever on a never-resolving `close()`.
+
+The suite deliberately mirrors the mock pattern established in `tests/mcp/parallel-shutdown.test.ts` so a reviewer can read both files back-to-back. A minimal `FakeClient` carries a configurable delay (`Infinity` means "never resolves"):
+
+```typescript
+// src/mcp/__tests__/shutdown.test.ts
+class FakeClient {
+  closeCalls = 0;
+  closed = false;
+  constructor(private readonly delayMs: number) {}
+  async close(): Promise<void> {
+    this.closeCalls += 1;
+    if (this.delayMs === Infinity) {
+      // Resolve-never promise. The surrounding race's timeout wins.
+      await new Promise<void>(() => undefined);
+      return;
+    }
+    if (this.delayMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, this.delayMs));
+    }
+    this.closed = true;
+  }
+}
+```
+
+Connections are injected through a single-location cast on the private `connections` map, bypassing the real SDK handshake — the manager's `disconnect` only ever calls `.close()` on the stored client, which is all the test needs:
+
+```typescript
+function registerFakeConnection(manager: McpClientManager, connection: McpConnection): void {
+  const connections = (manager as unknown as { connections: Map<string, McpConnection> })
+    .connections;
+  connections.set(connection.config.name, connection);
+}
+```
+
+Six cases pin the contract:
+
+| Case                                                               | What it pins                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `exposes a 5 second default disconnect timeout`                    | `DISCONNECT_TIMEOUT_MS === 5000`. A refactor that changes the deadline without updating docs trips here. The constant is exported for exactly this reason.                                                                                                                                        |
+| `returns promptly when client.close() exceeds the timeout`         | A `FakeClient(Infinity)` must resolve the surrounding `disconnect('hung')` within `DISCONNECT_TIMEOUT_MS + 1000` ms. `closeCalls === 1`, `closed === false`, `kill` called once, and `connections.has('hung') === false` — the forced-cleanup path still runs even though the SDK never acknowledged. |
+| `does not block the parallel teardown when one server hangs`       | One `FakeClient(Infinity)` plus one `FakeClient(10)` registered side by side; `disconnectAll()` must resolve within `DISCONNECT_TIMEOUT_MS + 1000` ms. The fast peer completes (`closed === true`), the hung peer does NOT (`closed === false`), and the connection map ends empty.                 |
+| `still kills the spawned child process on timeout`                 | `kill` is invoked exactly once on the timeout branch. This is the "hard-kill after timeout" guarantee the issue #2160 report asked for — the manager must not forget to kill the child just because the SDK never acknowledged `close()`.                                                           |
+| `leaves fast closes untouched (no spurious timeout)`               | A `FakeClient(5)` completes cleanly, `closed === true`, no stale map entry. Guards against a refactor that always goes down the timeout branch even for happy-path closes.                                                                                                                           |
+| `logs a warning when the close() races the timeout`                | The mocked `logger.warn` receives a message matching `/exceeded .*ms, forcing cleanup/`. Log scrapers grep for exactly this substring; a cosmetic rewording that drops `forcing cleanup` is a regression.                                                                                            |
+
+Key patterns to reuse when extending the suite:
+
+1. **Mock `../../utils/logger.js` with `importActual` as the base and spy on `info` / `warn` / `error` / `debug`.** The manager's shutdown path logs on every successful disconnect AND on every timeout — without the mock the suite output is unreadable. Importing the actual module as a base keeps non-logger exports (e.g. `formatError`) real so the manager code under test does not throw on missing helpers.
+2. **Use `delayMs: Infinity` to exercise the timeout, not a large finite delay.** A `setTimeout(resolve, 10_000)` would make the test take real wall time; `new Promise(() => undefined)` is instant to construct and the race's deadline fires regardless. The suite's wall-time assertions (`expect(elapsed).toBeLessThan(DISCONNECT_TIMEOUT_MS + 1000)`) also become meaningful rather than tautological.
+3. **Assert elapsed time with a 1 s slack buffer, not a tighter cap.** CI schedulers occasionally add 100-500 ms of overhead on cold workers; a tight cap turns the suite into a flake generator. The 1 s buffer still catches a regression that removed the timeout entirely (which would wait forever).
+4. **Set a per-test timeout of 10 s on cases that exercise the deadline.** `it(..., 10_000)` is deliberate — a regression that removed the deadline would otherwise hit Vitest's default 5 s timeout and surface as a test runner error instead of a clean assertion failure. Explicit per-test timeouts give the real assertion a chance to run.
+5. **Assert observable state (connection map emptiness, `kill` calls, `closeCalls`), not the manager's internal plumbing.** The point of exposing `shutdownCalls` / `isShutdown` / `closeCalls` on the fake is that both the parallel suite and this suite can share a vocabulary. A reviewer who adds an assertion on `manager['someInternalField']` is drifting the scope — the public contract is what belongs here.
+6. **Keep the suite focused on the timeout + forced-cleanup path.** Parallel-shutdown orchestration lives in `tests/mcp/parallel-shutdown.test.ts`; happy-path reconnects live in `tests/mcp/client.test.ts`; capability discovery lives in `tests/mcp/client-integration.test.ts`. Each MCP shutdown-adjacent suite owns one axis of the contract — resist the temptation to pile orthogonal cases here.
+
+The matching port-maintenance invariants (why `raceWithTimeout` lives in `disconnect` and not in `disconnectAll`, why the two warn-message branches exist, and what a reviewer should block) live in [CONTRIBUTING.md — Per-server shutdown timeout (`McpClientManager.disconnect`)](CONTRIBUTING.md#per-server-shutdown-timeout-mcpclientmanagerdisconnect).
 
 ### Testing the `mcp-servers.example.json` schema guard (commit `ae461291`)
 
