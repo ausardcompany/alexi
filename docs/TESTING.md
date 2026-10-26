@@ -8880,6 +8880,123 @@ Invariants the suite pins:
 
 When adding a new transient classifier to `isRetryableError`, extend this block with one positive case (budget exhaustion flips the new shape) and one negative case (budget still available keeps it transient). The retry-budget exhaustion path shares its classifier with every other transient driver — a false positive here flows into `NetworkManager`, `retryProviderCall`, and the agent-workflow `KILO_RETRIES` loop.
 
+### Testing the known-throttle guard (`src/core/__tests__/error-backoff.test.ts`)
+
+`src/core/__tests__/error-backoff.test.ts` grew by 181 lines (five
+`describe` blocks) when the known-throttle guard landed. The suite
+pins the parse / detect / integrate contract so a future regression
+that reintroduces the compaction false-positive — or that mis-parses
+an `HTTP-date` `Retry-After` header — trips immediately.
+
+```typescript
+import { describe, it, expect } from 'vitest';
+import {
+  ErrorBackoff,
+  getRetryAfterMs,
+  isKnownThrottle,
+  parseRetryAfterHeader,
+} from '../error-backoff.js';
+import {
+  isContextOverflowError,
+  detectContextOverflow,
+} from '../contextOverflow.js';
+```
+
+**Block 1 — `parseRetryAfterHeader`.** Integer / decimal / bare-number
+inputs (`'10'` → `10_000`, `'1.5'` → `1500`, `2` → `2000`), HTTP-date
+in the future (positive delta against the `now` argument), HTTP-date
+in the past (collapses to `0`), garbage (`''`, `'nonsense'`, `null`,
+`undefined`, `{}` → `undefined`), negative numeric input
+(`-1` → `undefined`). The `now` argument is injected so the HTTP-date
+assertions are deterministic without fake timers.
+
+**Block 2 — `getRetryAfterMs` with raw headers.** Lower-case
+(`'retry-after'`) and canonical (`'Retry-After'`) header entries both
+produce the expected ms value; `retryAfterSeconds` wins over a stale
+raw header dictionary (`retryAfterSeconds: 3` + `headers: { 'retry-after': '999' }` → `3000`); `retryAfterMs` is honoured when
+`retryAfterSeconds` is absent; an unparseable header returns
+`undefined`.
+
+**Block 3 — `isKnownThrottle`.** Positive cases cover every signal
+shape: `headers['retry-after']`, `retryAfterSeconds`, `retryAfterMs`,
+and `resetAt` (`Date` in the future). Negative cases cover a generic
+429 with no signal, a `{ code: 'provider_rate_limit' }` with no
+signal, a `500` with a `Retry-After` header (not a rate-limit error),
+`null` / `undefined` / primitives, and an empty header value
+(`'retry-after': ''`).
+
+**Block 4 — Known-throttle guard on context-overflow detection.** The
+load-bearing invariant: a 429 that carries `Retry-After` AND happens
+to mention `"token limit"` in its message MUST NOT be classified as
+context overflow:
+
+```typescript
+it('does NOT classify a known throttle as context overflow', () => {
+  const err = {
+    statusCode: 429,
+    message: 'token limit exceeded, please slow down',
+    headers: { 'retry-after': '30' },
+  };
+  expect(isContextOverflowError(err)).toBe(false);
+  expect(detectContextOverflow(err, 100_000, 50_000)).toBeUndefined();
+});
+
+it('still classifies a real context-overflow error (no Retry-After)', () => {
+  const err = new Error('context_length_exceeded: 150000 tokens requested');
+  expect(isContextOverflowError(err)).toBe(true);
+  const overflow = detectContextOverflow(err, 150_000, 100_000);
+  expect(overflow).toBeDefined();
+  expect(overflow ?? 0).toBeGreaterThan(0);
+});
+```
+
+A pathological 429 whose message mentions `"context window"` but
+carries NO `Retry-After` header is still classified as overflow via
+the message-pattern fallback — the guard only short-circuits when the
+error is a *known* throttle. A plain object literal cannot be used
+here because `getErrorMessage` reads `error.message` only when the
+value is an `Error` instance (plain-object literals stringify as
+`[object Object]`); the test uses
+`Object.assign(new Error('context window exceeded'), { statusCode: 429 })`.
+
+**Block 5 — `ErrorBackoff` with known-throttle headers.** End-to-end
+wait schedule: `recordError(429, { statusCode: 429, headers: { 'retry-after': '8' } })` arms `getRemainingBackoffMs()` to a
+value in `(7000, 8000]` instead of the default `500 ms`
+`initialDelayMs`. A known throttle stays non-fatal regardless of
+consecutive-error count — the retry-budget exhaustion path only fires
+for retryable errors that are NOT known throttles.
+
+```typescript
+it('honours a raw Retry-After header on the error', () => {
+  const b = new ErrorBackoff({ initialDelayMs: 500, maxDelayMs: 60_000 });
+  const err = { statusCode: 429, headers: { 'retry-after': '8' } };
+  b.recordError(429, err);
+  const remaining = b.getRemainingBackoffMs();
+  expect(remaining).toBeGreaterThan(7000);
+  expect(remaining).toBeLessThanOrEqual(8000);
+});
+```
+
+Invariants worth repeating when adding a new throttle shape:
+
+- **Positive case + negative case + end-to-end case.** Any new signal
+  source (e.g. a provider that forwards `X-RateLimit-Remaining` as a
+  distinct field) MUST be covered by (a) a `parseRetryAfterHeader` or
+  `isKnownThrottle` detection case, (b) a negative case proving a
+  non-rate-limit error with the same signal is rejected, and (c) an
+  `ErrorBackoff.recordError` case that pins the resulting wait
+  schedule.
+- **No fake timers.** The suite is pure state-assertion. `now` is
+  injected into `parseRetryAfterHeader`, the `ErrorBackoff` wait is
+  read through `getRemainingBackoffMs()` not awaited, and the HTTP-
+  date collapse uses `Date.now()` arithmetic rather than
+  `vi.useFakeTimers()`. Keeps the suite composable with every other
+  test file in the directory.
+- **Error shape literals, not provider SDK stubs.** Every test case
+  constructs the error inline (plain object literal, `new Error(...)`,
+  or `Object.assign(new Error(...), {...})`) so a future refactor of
+  the provider adapters does not force a mass update of this file.
+
 ### Testing content-policy classification (issue #2134)
 
 `tests/core/error-classification.test.ts` (294 lines, 32 cases across four describe blocks) pins the non-retry contract for the broader `isContentPolicyError` detector, the stateless `classifyError` taxonomy, the three provider-attribution helpers, and the `ErrorBackoff` integration. The suite is pure state-assertion — no fake timers, no mocked network, no provider-SDK stubs — so it composes with any future upstream shape added to the detector.

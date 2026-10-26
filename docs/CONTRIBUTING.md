@@ -900,6 +900,83 @@ consume retry budget. Surface them on the first attempt. The AGENTS.md
 "Permanent (NOT retried)" bucket lists the full taxonomy; new retry
 helpers extend that bucket, never shrink it.
 
+### Known-throttle guard contract (`isKnownThrottle`)
+
+When adding a new error-signal source to the rate-limit layer or a
+new content-pattern to `src/core/contextOverflow.ts`, respect the
+load-bearing invariant pinned by `isKnownThrottle`: a rate-limit
+error that carries an explicit `Retry-After` signal MUST NOT trigger
+context-overflow compaction, even when its message happens to mention
+`"token limit"` or `"reduce the length"`. The provider is throttling
+the account, not rejecting the payload; a summary pass on the
+throttled request wastes tokens on a request that just needs to wait
+for the quota window to reopen.
+
+**Four rules for a new signal source.**
+
+1. **Signal detection goes through `isKnownThrottle`, not the pattern
+   list.** New Retry-After-equivalent fields (e.g. a provider that
+   forwards `X-RateLimit-Reset-At` as a bespoke JSON field) must be
+   added to the `isKnownThrottle` signal lookup inside
+   `src/core/error-backoff.ts`, NOT to the message-pattern list in
+   `src/core/contextOverflow.ts`. Mixing the two layers is how the
+   original false-positive sneaked in — the compaction detector saw
+   a message that mentioned "token limit" and the retry layer saw a
+   rate-limit code, and neither cross-checked.
+2. **Header parsing goes through `parseRetryAfterHeader`.** Raw
+   `Retry-After` strings (integer seconds, decimal seconds, HTTP-date,
+   bare `number`) are parsed by one function so RFC 9110 §10.2.3 edge
+   cases — fractional delta-seconds, past HTTP-date, garbage input,
+   negative values — behave consistently across the codebase. New
+   provider adapters MUST reuse the exported helper rather than
+   writing a bespoke parser.
+3. **A known throttle is non-fatal regardless of retry count.** The
+   retry-budget exhaustion path in `ErrorBackoff.isFatal` (issue
+   #1994) deliberately does NOT flip to fatal when the error is a
+   known throttle — the server is cooperating by telling us when to
+   retry, so the exponential retry-budget concept does not apply. If
+   you add a new field to `ErrorBackoff` that counts "known throttle
+   seen N times", pin the invariant in `src/core/__tests__/error-backoff.test.ts`
+   with both a positive case (budget exhausted on a NON-throttle) and
+   a negative case (budget untouched on a throttle).
+4. **Pin the guard with three test cases.** Any new signal source
+   requires (a) a `parseRetryAfterHeader` or `isKnownThrottle`
+   detection case, (b) a `isContextOverflowError` false-positive
+   guard case proving the overflow detector rejects the new throttle
+   shape even when the message would otherwise match, and (c) an
+   `ErrorBackoff.recordError` case that pins the resulting wait
+   schedule. See [`docs/TESTING.md#testing-the-known-throttle-guard`](TESTING.md#testing-the-known-throttle-guard-srccoreerror-backofftestts).
+
+**Example — adding a new signal source.**
+
+```typescript
+// src/core/error-backoff.ts (sketch)
+export function isKnownThrottle(err: unknown): boolean {
+  if (!isRateLimitError(err)) return false;
+  const candidate = err as {
+    retryAfterSeconds?: unknown;
+    retryAfterMs?: unknown;
+    resetAt?: unknown;
+    headers?: unknown;
+    // NEW: hypothetical provider-specific field
+    resetAtEpochMs?: unknown;
+  };
+  // ... existing checks ...
+  if (
+    typeof candidate.resetAtEpochMs === 'number' &&
+    Number.isFinite(candidate.resetAtEpochMs) &&
+    candidate.resetAtEpochMs > 0
+  ) {
+    return true;
+  }
+  // ... fall-through ...
+}
+```
+
+The same field MUST also be added to `getRetryAfterMs` so the retry
+wait honours the server-supplied window. Reference: SST OpenCode
+"known throttle overflow" fix (2026-10-25).
+
 ### One-way config key migration with a one-shot deprecation warning
 
 When a persisted-config key moves to a new canonical location (e.g. `context.compactionModel` → `models.compaction` in `1.22.18`, ports kilocode `f64c6646d`), the read/write helpers on `src/config/userConfig.ts` follow a fixed contract so the migration is safe against partial rollouts and stale operator configs.

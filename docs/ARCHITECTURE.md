@@ -3559,6 +3559,147 @@ Cross-references:
 - Transient-vs-permanent contract that `isRetryableError` encodes:
   [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix).
 
+### Known-throttle guard on context-overflow detection
+
+Rate-limit errors that carry an explicit `Retry-After` signal are
+classified as *known throttles* and MUST NOT trigger context-overflow
+compaction, even when the raw provider message happens to include
+tokens-related substrings (`"token limit exceeded, please slow down"`,
+`"please reduce the length of the messages"`). Compacting the context
+does nothing to resolve a throttle — the provider is throttling the
+account, not rejecting the payload — and routing the error through the
+summary pass wastes tokens on a request that just needs to wait for the
+quota window to reset.
+
+The guard is implemented in `src/core/error-backoff.ts` and consumed in
+`src/core/contextOverflow.ts`. Reference: SST OpenCode "known throttle
+overflow" fix (2026-10-25).
+
+#### Classifier (`isKnownThrottle`)
+
+```typescript
+// src/core/error-backoff.ts:398
+export function isKnownThrottle(err: unknown): boolean {
+  if (!isRateLimitError(err)) {
+    return false;
+  }
+  // Rate-limit error + at least one Retry-After signal.
+  //   retryAfterSeconds | retryAfterMs | resetAt | headers['retry-after']
+  // ...
+}
+```
+
+The function is pure, stateless, and non-throwing. The signal sources
+are checked in priority order and short-circuit on the first hit:
+
+| Source                       | Produced by                                                              |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `retryAfterSeconds` (number) | `FreeTierRateLimitError` / `ProviderRateLimitError` constructors         |
+| `retryAfterMs` (number)      | Provider adapters that already parsed the header into milliseconds       |
+| `resetAt` (`Date`)           | Free-tier reset window derived from `X-RateLimit-Reset`                  |
+| `headers['retry-after']`     | Raw header dictionary leaking through from the fetch layer (case-insensitive) |
+
+An error that carries a `Retry-After` signal but is NOT a rate-limit
+error is deliberately rejected — a random `500` with a header is not a
+throttle. An empty header value is also rejected so a provider that
+emits a blank `Retry-After:` is treated as "no signal".
+
+#### Context-overflow short-circuit
+
+`isContextOverflowError` consults `isKnownThrottle` first and returns
+`false` immediately when the error is a known throttle, regardless of
+message content:
+
+```typescript
+// src/core/contextOverflow.ts:96
+export function isContextOverflowError(error: unknown): boolean {
+  if (isKnownThrottle(error)) {
+    return false;
+  }
+  const message = getErrorMessage(error);
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
+```
+
+```mermaid
+flowchart TB
+    Err([Provider error]) --> Throttle{isKnownThrottle?}
+    Throttle -->|yes| Backoff[Honour Retry-After via ErrorBackoff<br/>wait for quota window<br/>NO compaction]
+    Throttle -->|no| Patterns{CONTEXT_OVERFLOW_PATTERNS<br/>message match?}
+    Patterns -->|yes| Compact[isContextOverflowError = true<br/>trigger reactive compaction]
+    Patterns -->|no| Transparent[isContextOverflowError = false<br/>surface to caller unchanged]
+    Backoff --> Caller([Caller])
+    Compact --> Caller
+    Transparent --> Caller
+```
+
+Decision matrix for the four relevant input shapes:
+
+| Error shape                                                            | `isKnownThrottle` | `isContextOverflowError` | Outcome                            |
+| ---------------------------------------------------------------------- | ----------------- | ------------------------ | ---------------------------------- |
+| `{ statusCode: 429, message: 'token limit exceeded', retry-after: 30 }` | `true`            | `false`                  | `ErrorBackoff` waits 30 s          |
+| `new Error('context_length_exceeded: 150000 tokens')`                   | `false`           | `true`                   | Reactive compaction                |
+| `{ statusCode: 429, message: 'context window exceeded' }` (no header)   | `false`           | `true`                   | Reactive compaction (fallback)     |
+| `{ statusCode: 429, retryAfterSeconds: 7, message: 'please reduce...' }` | `true`            | `false`                  | `ErrorBackoff` waits 7 s           |
+
+#### `Retry-After` parsing (`parseRetryAfterHeader`)
+
+Raw header values are run through `parseRetryAfterHeader(value, now?)`,
+the single parse point for the two RFC 9110 §10.2.3 shapes:
+
+- **Integer or decimal seconds** (`"120"`, `"1.5"`) — multiplied by
+  `1000` and floored.
+- **HTTP-date** (`"Fri, 31 Dec 1999 23:59:59 GMT"`) — parsed with
+  `Date.parse` and converted to a positive delta from the current wall
+  clock. A past timestamp collapses to `0` ("retry immediately")
+  mirroring the `getRetryAfterMs` semantics for `resetAt`.
+- **Bare `number` input** — treated as seconds for parity with provider
+  adapters that pre-parse the header.
+
+Garbage input (empty strings, `null`, `undefined`, `"nonsense"`,
+negative numbers) returns `undefined` so callers safely fall back to
+the default exponential schedule. Exported so provider adapters and
+tests share one parser instead of drifting across sites.
+
+#### `getRetryAfterMs` priority order
+
+`getRetryAfterMs(err)` is now the authoritative source for "how long
+should the retry wait?" and consults four sources in priority order:
+
+1. `retryAfterSeconds` (parsed by `RateLimitError` constructors).
+2. `retryAfterMs` (adapter shape ported from upstream commit `80b8762`).
+3. `resetAt` (`Date` from `X-RateLimit-Reset`); past timestamps collapse
+   to `0`.
+4. Raw `headers['retry-after']` entry (case-insensitive lookup, parsed
+   through `parseRetryAfterHeader`).
+
+The parsed `retryAfterSeconds` field wins over any raw header — a
+provider adapter that already normalised the header does not get
+overridden by a stale raw dictionary. A zero value is preserved so
+callers honour an "immediate retry allowed" hint rather than defaulting
+to exponential delay.
+
+#### `ErrorBackoff` integration
+
+`ErrorBackoff.recordError(statusCode, err)` honours `Retry-After` over
+the default exponential schedule when `getRetryAfterMs(err)` returns a
+value. The delay is capped at `maxDelayMs` so a malicious or
+misconfigured server cannot pin the client into an unbounded wait. A
+known throttle stays non-fatal regardless of consecutive-error count:
+the retry-budget exhaustion path (issue #1994) only fires for
+retryable errors that are NOT known throttles, so a server that keeps
+emitting `Retry-After` is treated as cooperative rather than
+exhausted.
+
+Cross-references:
+
+- Public surface and example composition:
+  [docs/API.md — Known-throttle API (`parseRetryAfterHeader`, `isKnownThrottle`)](./API.md#known-throttle-api-parseretryafterheader-isknownthrottle).
+- Regression test patterns:
+  [docs/TESTING.md — Testing the known-throttle guard](./TESTING.md#testing-the-known-throttle-guard-srccoreerror-backofftestts).
+- Port-maintenance contract for future throttle shapes:
+  [docs/CONTRIBUTING.md — Known-throttle guard contract (`isKnownThrottle`)](./CONTRIBUTING.md#known-throttle-guard-contract-isknownthrottle).
+
 ### Turn-level retry wrapper (`retryProviderCall`, issue #1737)
 
 Between the caller (`agenticChat`) and the provider-layer `ErrorBackoff`
