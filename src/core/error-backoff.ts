@@ -245,22 +245,93 @@ export function isRetryableError(err: unknown): boolean {
 }
 
 /**
+ * Parse a raw `Retry-After` header value into a delay in milliseconds.
+ *
+ * RFC 9110 §10.2.3 allows two formats:
+ *   - A non-negative integer number of seconds (e.g. `"120"`).
+ *   - An HTTP-date (e.g. `"Fri, 31 Dec 1999 23:59:59 GMT"`).
+ *
+ * Returns `undefined` for anything that cannot be interpreted so the
+ * caller can safely fall back to the default exponential schedule. A
+ * past HTTP-date collapses to `0` ("retry immediately"), mirroring the
+ * {@link getRetryAfterMs} semantics for `resetAt`.
+ *
+ * Exported so provider adapters (and tests) can share the single
+ * parsing path and avoid drift between header interpretation sites.
+ */
+export function parseRetryAfterHeader(
+  value: unknown,
+  now: number = Date.now()
+): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value * 1000);
+  }
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  // Integer or decimal seconds — the common SAP AI Core / OpenAI shape.
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+    const seconds = Number.parseFloat(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.floor(seconds * 1000);
+    }
+    return undefined;
+  }
+  // HTTP-date — parsed with `Date.parse` which accepts RFC 1123 and
+  // ISO-8601. A past timestamp collapses to 0 so the caller retries
+  // immediately rather than waiting for a negative delay.
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) {
+    const delta = parsed - now;
+    return delta > 0 ? delta : 0;
+  }
+  return undefined;
+}
+
+/**
+ * Case-insensitive lookup for the `Retry-After` entry inside a raw
+ * headers map. Provider adapters sometimes forward the unparsed header
+ * dictionary on the error (e.g. `{ headers: { 'retry-after': '10' } }`)
+ * instead of (or alongside) a parsed `retryAfterSeconds` field. Both
+ * casings are checked because servers vary (`Retry-After` vs
+ * `retry-after`) and `Headers`-like plain objects do NOT normalise.
+ */
+function readRetryAfterHeader(headers: unknown): unknown {
+  if (headers === null || headers === undefined || typeof headers !== 'object') {
+    return undefined;
+  }
+  // Prefer the explicit shape most providers emit first (lower-case).
+  const map = headers as Record<string, unknown>;
+  for (const key of Object.keys(map)) {
+    if (key.toLowerCase() === 'retry-after') {
+      return map[key];
+    }
+  }
+  return undefined;
+}
+
+/**
  * Extract a `Retry-After` window from a rate-limit error and convert it to
  * milliseconds. Returns `undefined` when no header was captured — the
  * caller then falls back to the default exponential-backoff schedule.
  *
- * Two sources are consulted, in order:
+ * Sources are consulted in priority order:
  *   1. `retryAfterSeconds` (set by the constructors of
  *      `FreeTierRateLimitError` / `ProviderRateLimitError` from the
  *      `Retry-After` response header).
- *   2. `resetAt` (set from `X-RateLimit-Reset`). Only used when
- *      `retryAfterSeconds` is absent; converted to a positive delta from
- *      the current wall-clock. A past reset time collapses to 0
- *      (retry-immediately).
- *
- * We intentionally do NOT re-parse raw headers here — that parsing
- * belongs to the providers layer where the raw response is still
- * available.
+ *   2. `retryAfterMs` (set by provider adapters that already parsed the
+ *      header into milliseconds, e.g. upstream commit `80b8762`).
+ *   3. `resetAt` (set from `X-RateLimit-Reset`); converted to a positive
+ *      delta from the current wall-clock. A past reset time collapses to
+ *      0 (retry-immediately).
+ *   4. A raw `headers['retry-after']` entry — last resort for payloads
+ *      that leak through before orchestrator-level mapping has normalised
+ *      the shape. Both integer seconds and HTTP-date formats are parsed
+ *      via {@link parseRetryAfterHeader}.
  *
  * A zero value is preserved (returns 0) so callers can honour an
  * "immediate retry allowed" hint from the server rather than defaulting
@@ -270,17 +341,95 @@ export function getRetryAfterMs(err: unknown): number | undefined {
   if (err === null || err === undefined || typeof err !== 'object') {
     return undefined;
   }
-  const candidate = err as { retryAfterSeconds?: unknown; resetAt?: unknown };
+  const candidate = err as {
+    retryAfterSeconds?: unknown;
+    retryAfterMs?: unknown;
+    resetAt?: unknown;
+    headers?: unknown;
+  };
   const seconds = candidate.retryAfterSeconds;
   if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0) {
     return Math.floor(seconds * 1000);
+  }
+  const ms = candidate.retryAfterMs;
+  if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) {
+    return Math.floor(ms);
   }
   const resetAt = candidate.resetAt;
   if (resetAt instanceof Date && !Number.isNaN(resetAt.getTime())) {
     const delta = resetAt.getTime() - Date.now();
     return delta > 0 ? delta : 0;
   }
+  const headerValue = readRetryAfterHeader(candidate.headers);
+  if (headerValue !== undefined) {
+    const parsed = parseRetryAfterHeader(headerValue);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
   return undefined;
+}
+
+/**
+ * Return true when `err` is a *known throttle*: a rate-limit error that
+ * carries an explicit `Retry-After` signal (either the raw header or an
+ * already-parsed `retryAfterSeconds` / `retryAfterMs` / `resetAt` field
+ * populated by `RateLimitError` / provider adapters).
+ *
+ * A known throttle is distinct from a generic 429 in two important
+ * ways:
+ *   1. The provider has explicitly told us *when* the quota window
+ *      reopens, so {@link ErrorBackoff.recordError} should honour that
+ *      wait instead of falling back to exponential backoff (this part
+ *      already works via {@link getRetryAfterMs}).
+ *   2. It is NOT a signal that the request context was too large. A
+ *      known throttle must therefore NOT trigger context-overflow
+ *      compaction in `src/core/agenticChat.ts` /
+ *      `src/core/streamingOrchestrator.ts` — compaction is for "too
+ *      much context" errors, not transient rate-limit delays. Routing
+ *      known throttles through compaction would waste tokens on a
+ *      summary step that does nothing to resolve the actual problem
+ *      (just wait for the window to reset).
+ *
+ * See `src/core/contextOverflow.ts` where this helper is consulted to
+ * short-circuit false-positive compaction. Reference: SST OpenCode
+ * "known throttle overflow" fix (2026-10-25 research).
+ */
+export function isKnownThrottle(err: unknown): boolean {
+  if (!isRateLimitError(err)) {
+    return false;
+  }
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as {
+    retryAfterSeconds?: unknown;
+    retryAfterMs?: unknown;
+    resetAt?: unknown;
+    headers?: unknown;
+  };
+  if (
+    typeof candidate.retryAfterSeconds === 'number' &&
+    Number.isFinite(candidate.retryAfterSeconds) &&
+    candidate.retryAfterSeconds >= 0
+  ) {
+    return true;
+  }
+  if (
+    typeof candidate.retryAfterMs === 'number' &&
+    Number.isFinite(candidate.retryAfterMs) &&
+    candidate.retryAfterMs >= 0
+  ) {
+    return true;
+  }
+  if (candidate.resetAt instanceof Date && !Number.isNaN(candidate.resetAt.getTime())) {
+    return true;
+  }
+  const headerValue = readRetryAfterHeader(candidate.headers);
+  if (headerValue !== undefined && headerValue !== null && headerValue !== '') {
+    return true;
+  }
+  return false;
 }
 
 export class ErrorBackoff {

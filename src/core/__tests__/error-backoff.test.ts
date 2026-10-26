@@ -19,7 +19,10 @@ import {
   isPermanentAuthFailure,
   isXAICapacityError,
   isRetryableError,
+  isKnownThrottle,
+  parseRetryAfterHeader,
 } from '../error-backoff.js';
+import { isContextOverflowError, detectContextOverflow } from '../contextOverflow.js';
 
 describe('isRateLimitError', () => {
   it('detects the free-tier code marker', () => {
@@ -293,5 +296,183 @@ describe('isPermanentAuthFailure', () => {
     expect(isPermanentAuthFailure(new Error('boom'))).toBe(false);
     expect(isPermanentAuthFailure(null)).toBe(false);
     expect(isPermanentAuthFailure(undefined)).toBe(false);
+  });
+});
+
+describe('parseRetryAfterHeader', () => {
+  it('parses integer seconds', () => {
+    expect(parseRetryAfterHeader('10')).toBe(10_000);
+    expect(parseRetryAfterHeader('0')).toBe(0);
+  });
+
+  it('parses decimal seconds', () => {
+    expect(parseRetryAfterHeader('1.5')).toBe(1500);
+  });
+
+  it('parses numeric input directly', () => {
+    expect(parseRetryAfterHeader(2)).toBe(2000);
+  });
+
+  it('parses an HTTP-date in the future as a positive delta', () => {
+    const now = Date.now();
+    const future = new Date(now + 30_000).toUTCString();
+    const parsed = parseRetryAfterHeader(future, now);
+    expect(parsed).toBeDefined();
+    expect(parsed).toBeGreaterThan(29_000);
+    expect(parsed).toBeLessThanOrEqual(30_000);
+  });
+
+  it('collapses a past HTTP-date to zero (retry immediately)', () => {
+    const now = Date.now();
+    const past = new Date(now - 60_000).toUTCString();
+    expect(parseRetryAfterHeader(past, now)).toBe(0);
+  });
+
+  it('returns undefined for garbage values', () => {
+    expect(parseRetryAfterHeader('')).toBeUndefined();
+    expect(parseRetryAfterHeader('nonsense')).toBeUndefined();
+    expect(parseRetryAfterHeader(null)).toBeUndefined();
+    expect(parseRetryAfterHeader(undefined)).toBeUndefined();
+    expect(parseRetryAfterHeader({})).toBeUndefined();
+  });
+
+  it('rejects negative numeric input', () => {
+    expect(parseRetryAfterHeader(-1)).toBeUndefined();
+  });
+});
+
+describe('getRetryAfterMs with raw headers', () => {
+  it('reads a lower-case retry-after header entry', () => {
+    expect(getRetryAfterMs({ statusCode: 429, headers: { 'retry-after': '15' } })).toBe(15_000);
+  });
+
+  it('reads a canonical "Retry-After" header entry (case-insensitive)', () => {
+    expect(getRetryAfterMs({ statusCode: 429, headers: { 'Retry-After': '7' } })).toBe(7000);
+  });
+
+  it('prefers the parsed retryAfterSeconds field over the raw header', () => {
+    // Parsed field wins so provider adapters that already normalised
+    // the header do not get overridden by a stale raw dictionary.
+    const err = {
+      statusCode: 429,
+      retryAfterSeconds: 3,
+      headers: { 'retry-after': '999' },
+    };
+    expect(getRetryAfterMs(err)).toBe(3000);
+  });
+
+  it('falls back to retryAfterMs when seconds is absent', () => {
+    expect(getRetryAfterMs({ statusCode: 429, retryAfterMs: 2500 })).toBe(2500);
+  });
+
+  it('returns undefined for an unparseable retry-after header', () => {
+    expect(
+      getRetryAfterMs({ statusCode: 429, headers: { 'retry-after': 'nonsense' } })
+    ).toBeUndefined();
+  });
+});
+
+describe('isKnownThrottle', () => {
+  it('is true for a 429 with Retry-After header', () => {
+    expect(isKnownThrottle({ statusCode: 429, headers: { 'retry-after': '10' } })).toBe(true);
+  });
+
+  it('is true for a 429 with parsed retryAfterSeconds', () => {
+    expect(isKnownThrottle({ statusCode: 429, retryAfterSeconds: 5 })).toBe(true);
+  });
+
+  it('is true for a 429 with retryAfterMs', () => {
+    expect(isKnownThrottle({ statusCode: 429, retryAfterMs: 1500 })).toBe(true);
+  });
+
+  it('is true for a 429 with a resetAt Date', () => {
+    expect(isKnownThrottle({ statusCode: 429, resetAt: new Date(Date.now() + 30_000) })).toBe(true);
+  });
+
+  it('is false for a generic 429 without any Retry-After signal', () => {
+    expect(isKnownThrottle({ statusCode: 429 })).toBe(false);
+    expect(isKnownThrottle({ code: 'provider_rate_limit' })).toBe(false);
+  });
+
+  it('is false for non-rate-limit errors even with a retry-after header', () => {
+    // The helper only promotes RATE-LIMIT errors to "known throttle".
+    // Random 500s that happen to carry Retry-After are not throttles.
+    expect(isKnownThrottle({ statusCode: 500, headers: { 'retry-after': '10' } })).toBe(false);
+  });
+
+  it('is false for null / undefined / primitives', () => {
+    expect(isKnownThrottle(null)).toBe(false);
+    expect(isKnownThrottle(undefined)).toBe(false);
+    expect(isKnownThrottle('rate limit')).toBe(false);
+    expect(isKnownThrottle(429)).toBe(false);
+  });
+
+  it('ignores an empty header value', () => {
+    expect(isKnownThrottle({ statusCode: 429, headers: { 'retry-after': '' } })).toBe(false);
+  });
+});
+
+describe('known-throttle guard on context-overflow detection', () => {
+  it('does NOT classify a known throttle as context overflow', () => {
+    // A rate-limit error that carries Retry-After AND happens to mention
+    // "token limit" in its message must not trigger overflow compaction:
+    // the provider is throttling the account, not rejecting the payload.
+    const err = {
+      statusCode: 429,
+      message: 'token limit exceeded, please slow down',
+      headers: { 'retry-after': '30' },
+    };
+    expect(isContextOverflowError(err)).toBe(false);
+    expect(detectContextOverflow(err, 100_000, 50_000)).toBeUndefined();
+  });
+
+  it('still classifies a real context-overflow error (no Retry-After) as overflow', () => {
+    const err = new Error('context_length_exceeded: 150000 tokens requested');
+    expect(isContextOverflowError(err)).toBe(true);
+    const overflow = detectContextOverflow(err, 150_000, 100_000);
+    expect(overflow).toBeDefined();
+    expect(overflow ?? 0).toBeGreaterThan(0);
+  });
+
+  it('still classifies a generic 429 (no Retry-After) via its message if it matches', () => {
+    // Pathological but theoretical: a 429 whose message happens to say
+    // "context window". No Retry-After header, so it is NOT a known
+    // throttle, and the message pattern decides the classification.
+    // Must be a real Error instance for `getErrorMessage` to read the
+    // `message` field (plain object literals stringify as `[object Object]`).
+    const err: Error & { statusCode?: number } = Object.assign(
+      new Error('context window exceeded'),
+      { statusCode: 429 }
+    );
+    expect(isKnownThrottle(err)).toBe(false);
+    expect(isContextOverflowError(err)).toBe(true);
+  });
+
+  it('respects a parsed retryAfterSeconds field (no raw header)', () => {
+    const err = {
+      statusCode: 429,
+      retryAfterSeconds: 7,
+      message: 'please reduce the length of the messages',
+    };
+    expect(isKnownThrottle(err)).toBe(true);
+    expect(isContextOverflowError(err)).toBe(false);
+  });
+});
+
+describe('ErrorBackoff with known throttle headers', () => {
+  it('honours a raw Retry-After header on the error', () => {
+    const b = new ErrorBackoff({ initialDelayMs: 500, maxDelayMs: 60_000 });
+    const err = { statusCode: 429, headers: { 'retry-after': '8' } };
+    b.recordError(429, err);
+    const remaining = b.getRemainingBackoffMs();
+    expect(remaining).toBeGreaterThan(7000);
+    expect(remaining).toBeLessThanOrEqual(8000);
+  });
+
+  it('treats a known throttle as transient (not fatal) regardless of exhaustion attempts', () => {
+    const b = new ErrorBackoff({ maxRetries: 5, initialDelayMs: 10 });
+    const err = { statusCode: 429, headers: { 'retry-after': '1' } };
+    b.recordError(429, err);
+    expect(b.isFatal(err)).toBe(false);
   });
 });
