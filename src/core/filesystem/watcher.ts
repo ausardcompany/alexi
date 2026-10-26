@@ -149,6 +149,14 @@ export class InstanceWatcher {
    * timer for the same directory is cleared. Exposed so watcher
    * backends can share the instance's timer table without holding a
    * private `Map` of their own.
+   *
+   * Bounded-work note (ported from kilocode `2c8317d9a` `@ff-labs/fff-bun`
+   * 0.9.4 → 0.10.5): the backend MUST drop stale events arriving before
+   * the previous debounce fires. The timer-replace pattern above (clear
+   * previous, store new) implements the "drop stale" guard without
+   * depending on `@ff-labs/fff-bun` — on bursts of thousands of events
+   * for the same directory, only the latest timer survives, so CPU work
+   * stays bounded regardless of burst size.
    */
   setDebounceTimer(directory: string, timer: ReturnType<typeof setTimeout>): void {
     const previous = this.debouncers.get(directory);

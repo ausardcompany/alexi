@@ -68,6 +68,33 @@ export function validateCompactionConfig(raw: unknown): CompactionConfig {
     config.preserveRecent = Math.floor(obj.preserveRecent);
   }
 
+  if (obj.buffer !== undefined) {
+    if (typeof obj.buffer !== 'number' || obj.buffer < 0 || !Number.isFinite(obj.buffer)) {
+      throw new Error('compaction.buffer must be a non-negative number');
+    }
+    config.buffer = Math.floor(obj.buffer);
+  }
+
+  // Canonical field (opencode f523f77).
+  if (obj.background_compaction !== undefined) {
+    if (typeof obj.background_compaction !== 'boolean') {
+      throw new Error('compaction.background_compaction must be a boolean');
+    }
+    config.background_compaction = obj.background_compaction;
+  }
+
+  // Deprecated alias — kept for config compatibility. If both are present,
+  // `background_compaction` wins (set above); otherwise, forward the alias.
+  if (obj.precompute_compaction !== undefined) {
+    if (typeof obj.precompute_compaction !== 'boolean') {
+      throw new Error('compaction.precompute_compaction must be a boolean');
+    }
+    config.precompute_compaction = obj.precompute_compaction;
+    if (config.background_compaction === undefined) {
+      config.background_compaction = obj.precompute_compaction;
+    }
+  }
+
   return config;
 }
 
