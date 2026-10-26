@@ -55,6 +55,18 @@ export async function sendChat(
      * live in this file.
      */
     reasoning?: ReasoningConfig;
+    /**
+     * Optional provider-specific sampling parameters (SST OpenCode PRs
+     * #58868, #58870, #58872). Each field is forwarded to the provider
+     * layer, where it is guarded by model-family detection so unknown
+     * params are never sent to providers that would reject them. See
+     * `src/providers/sapOrchestration.ts#buildModuleConfig` for the
+     * family-to-field dispatch.
+     */
+    topK?: number;
+    minP?: number;
+    speed?: 'normal' | 'fast';
+    reasoningMode?: 'default' | 'extended';
   }
 ) {
   let modelId: string;
@@ -230,6 +242,10 @@ export async function sendChat(
         maxTokens: activeMaxTokens,
         signal: options?.signal,
         reasoning: reasoningParams,
+        topK: options?.topK,
+        minP: options?.minP,
+        speed: options?.speed,
+        reasoningMode: options?.reasoningMode,
       });
       break;
     } catch (err) {

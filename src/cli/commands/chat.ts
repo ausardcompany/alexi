@@ -96,6 +96,67 @@ interface ChatOptions {
    * omitted the tool writes into `$TMPDIR/alexi-images`.
    */
   imageOutputPath?: string;
+  /**
+   * Provider-specific sampling params. Each is guarded by model-family
+   * detection in the provider layer so unknown params are not forwarded.
+   *
+   *  - `--top-k`     : nucleus-sampling constraint (Anthropic + xAI).
+   *  - `--min-p`     : nucleus-sampling floor (xAI only; see
+   *                    SST OpenCode PR #58870).
+   *  - `--speed`     : Anthropic response speed tier (`normal` | `fast`;
+   *                    see SST OpenCode PR #58868).
+   *  - `--reasoning` : OpenAI Responses extended-thinking mode
+   *                    (`default` | `extended`; see SST OpenCode PR #58872).
+   */
+  topK?: string;
+  minP?: string;
+  speed?: string;
+  reasoning?: string;
+}
+
+/**
+ * Parse an optional numeric CLI flag value. Returns `undefined` when the
+ * flag was not supplied; throws when the supplied value is not a finite
+ * number so Commander surfaces a clear error instead of silently
+ * forwarding `NaN` to the provider.
+ */
+export function parseOptionalNumberFlag(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${name} value: ${raw} (expected a number)`);
+  }
+  return parsed;
+}
+
+/**
+ * Parse `--speed <normal|fast>`. Returns `undefined` when the flag was
+ * not supplied; throws on an unknown value.
+ */
+export function parseSpeedFlag(raw: string | undefined): 'normal' | 'fast' | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === 'normal' || raw === 'fast') {
+    return raw;
+  }
+  throw new Error(`Invalid --speed value: ${raw} (expected 'normal' or 'fast')`);
+}
+
+/**
+ * Parse `--reasoning <default|extended>`. Returns `undefined` when the
+ * flag was not supplied; throws on an unknown value.
+ */
+export function parseReasoningFlag(raw: string | undefined): 'default' | 'extended' | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === 'default' || raw === 'extended') {
+    return raw;
+  }
+  throw new Error(`Invalid --reasoning value: ${raw} (expected 'default' or 'extended')`);
 }
 
 /**
@@ -236,6 +297,22 @@ export function registerChatCommand(program: Command): void {
     )
     .option('--image-size <spec>', 'Optional size hint for --image, e.g. "1024x1024"')
     .option('--image-output-path <dir>', 'Directory to save decoded base64 images from --image')
+    .option(
+      '--top-k <n>',
+      'Top-k sampling constraint (honored by Anthropic Claude and xAI; silently dropped by other providers)'
+    )
+    .option(
+      '--min-p <n>',
+      'Nucleus-sampling floor (xAI/Grok only; silently dropped by other providers)'
+    )
+    .option(
+      '--speed <mode>',
+      "Anthropic response speed tier: 'normal' or 'fast' (Anthropic only; silently dropped by other providers)"
+    )
+    .option(
+      '--reasoning <mode>',
+      "OpenAI Responses extended-thinking mode: 'default' or 'extended' (OpenAI only; silently dropped by other providers)"
+    )
     .action(async (opts: ChatOptions) => {
       // Lazy imports (issue #1769): loaded only when the chat command
       // actually runs. Everything below the try/catch that operates on
@@ -383,6 +460,16 @@ export function registerChatCommand(program: Command): void {
           }
         }
 
+        // Provider-specific sampling flags. Each is parsed into a typed
+        // value here so a bad input (e.g. `--top-k=abc`) surfaces as a
+        // clear CLI error BEFORE any provider call is attempted. The
+        // provider layer guards per-family (xAI, Anthropic, OpenAI) so
+        // unknown params are never forwarded to the wrong backend.
+        const topK = parseOptionalNumberFlag('--top-k', opts.topK);
+        const minP = parseOptionalNumberFlag('--min-p', opts.minP);
+        const speed = parseSpeedFlag(opts.speed);
+        const reasoningMode = parseReasoningFlag(opts.reasoning);
+
         const res = await sendChat(message, {
           modelOverride: effectiveModel,
           autoRoute: opts.autoRoute,
@@ -390,6 +477,10 @@ export function registerChatCommand(program: Command): void {
           sessionManager,
           systemPrompt: effectiveSystemPrompt,
           signal: abortController.signal,
+          topK,
+          minP,
+          speed,
+          reasoningMode,
         });
 
         // When the orchestrator dispatched to an image-generation model

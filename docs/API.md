@@ -34,6 +34,10 @@ alexi chat -m <message> [options]
 | `--prefer-cheap` | boolean | Prefer cheaper models when auto-routing |
 | `--session <id>` | string | Continue existing session |
 | `--system <prompt>` | string | System prompt for conversation |
+| `--top-k <n>` | number | Top-k sampling constraint. Honored by Anthropic Claude and xAI; silently dropped by OpenAI-family models. See `chat`: provider-specific sampling flags below. |
+| `--min-p <n>` | number | Nucleus-sampling floor (xAI / Grok only). Silently dropped by other providers. |
+| `--speed <mode>` | `'normal'` \| `'fast'` | Anthropic response-speed tier (Claude 4.7+). Silently dropped by other providers. |
+| `--reasoning <mode>` | `'default'` \| `'extended'` | OpenAI Responses extended-thinking mode. Silently dropped by other providers. Independent of `--reasoning-effort`. |
 
 #### Examples
 
@@ -81,6 +85,85 @@ INLINE_MODEL_PATTERN.test('@anthropic/claude-opus-4'); // true
 ```
 
 When an inline reference is applied, `sendChat` / `streamChat` set `routingReason` on the result to `Inline override: @<model>` so telemetry, TUI status displays, and `session-export` can distinguish inline overrides from auto-router decisions and explicit `--model` flags. See [ARCHITECTURE.md — Inline Model Override](ARCHITECTURE.md#inline-model-override-providermodel) for the full precedence contract.
+
+#### `chat`: provider-specific sampling flags (`--top-k`, `--min-p`, `--speed`, `--reasoning`) — issue #2150
+
+Introduced in commit `1a0b8a60` (resolves issue #2150; ports SST OpenCode PRs #58868, #58870, #58872). Four CLI flags map to the per-family sampling knobs forwarded by `SapOrchestrationProvider#buildModuleConfig`. Each flag is parsed into a typed value in `src/cli/commands/chat.ts:463-471` BEFORE any provider call so a bad input surfaces as a Commander error, not an opaque upstream `400`. The flags are family-guarded at the provider layer, so an operator who sets `--min-p 0.05` with a Claude model does not get a silent drop *and* a confusing routing side-effect — the param simply never leaves Alexi.
+
+| Flag | Argument | Honored on | Dropped on | Parser |
+| --- | --- | --- | --- | --- |
+| `--top-k <n>` | finite number | Anthropic Claude, xAI (Grok) | OpenAI-family | `parseOptionalNumberFlag` |
+| `--min-p <n>` | finite number | xAI (Grok) only | Anthropic, OpenAI, Gemini | `parseOptionalNumberFlag` |
+| `--speed <normal\|fast>` | string literal | Anthropic Claude (4.7+) | all other families | `parseSpeedFlag` |
+| `--reasoning <default\|extended>` | string literal | OpenAI (`extended` only) | all other families, also silently a no-op on `default` | `parseReasoningFlag` |
+
+Examples:
+
+```bash
+# xAI (Grok) with nucleus sampling floor and top-k
+alexi chat --model xai--grok-2 -m "Draft a release note" --min-p 0.05 --top-k 40
+
+# Anthropic Claude 4.7 Opus on the fast speed tier
+alexi chat --model anthropic--claude-4.7-opus -m "Summarize this transcript" --speed fast
+
+# OpenAI GPT-5 with Responses extended-thinking enabled
+alexi chat --model gpt-5 -m "Prove the Pythagorean theorem" --reasoning extended
+
+# Mismatched family: --min-p is silently dropped at the provider boundary,
+# the chat still succeeds with the Claude defaults.
+alexi chat --model anthropic--claude-4.5-sonnet -m "..." --min-p 0.1
+```
+
+Bad input is rejected with a clear error up front:
+
+```bash
+$ alexi chat --model xai--grok-2 -m "..." --top-k abc
+Error: Invalid --top-k value: abc (expected a number)
+
+$ alexi chat --model anthropic--claude-4.7-opus -m "..." --speed turbo
+Error: Invalid --speed value: turbo (expected 'normal' or 'fast')
+
+$ alexi chat --model gpt-5 -m "..." --reasoning full
+Error: Invalid --reasoning value: full (expected 'default' or 'extended')
+```
+
+The three dedicated parsers are exported so tests exercise them without a full `program.parse(...)` round-trip:
+
+```typescript
+import {
+  parseOptionalNumberFlag,
+  parseSpeedFlag,
+  parseReasoningFlag,
+} from './cli/commands/chat.js';
+
+parseOptionalNumberFlag('--top-k', '40');          // 40
+parseOptionalNumberFlag('--top-k', undefined);     // undefined
+parseOptionalNumberFlag('--top-k', 'abc');         // throws: Invalid --top-k value: abc...
+parseSpeedFlag('fast');                            // 'fast'
+parseSpeedFlag('turbo');                           // throws: Invalid --speed value: turbo...
+parseReasoningFlag(undefined);                     // undefined
+parseReasoningFlag('extended');                    // 'extended'
+```
+
+The flags flow through `sendChat`:
+
+```typescript
+// src/core/orchestrator.ts:55-67
+export async function sendChat(
+  message: string,
+  options?: {
+    // ... other fields ...
+    topK?: number;
+    minP?: number;
+    speed?: 'normal' | 'fast';
+    reasoningMode?: 'default' | 'extended';
+  }
+) {
+  // Forwarded unchanged into provider.complete({ ..., topK, minP, speed, reasoningMode })
+}
+```
+
+See [PROVIDERS.md — Provider-specific sampling parameters](PROVIDERS.md#provider-specific-sampling-parameters-xai-min_p-anthropic-speed-openai-reasoning-issue-2150) for the family-guard contract and `modelParams` dispatch, and [CONFIGURATION.md — xAI (Grok) catalog entry in `routing-config.json`](CONFIGURATION.md#xai-grok-catalog-entry-in-routing-configjson-issue-2150) for the matching `routing-config.example.json` entry.
 
 ### agent
 

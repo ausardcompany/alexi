@@ -1123,6 +1123,63 @@ To force an environment to use `gpt-5.5` for all `coding`-tagged prompts without
 
 The rule will be evaluated before the `force-claude-for-long-context` rule at `priority: 100`, so a long coding prompt that also exceeds 10,000 characters would still route to `gpt-5.5`. Reorder the two rules (swap the priorities, or drop the new rule to `priority: 90`) if the long-context Claude preference should win.
 
+### xAI (Grok) catalog entry in `routing-config.json` (issue #2150)
+
+Introduced in commit `1a0b8a60` (2026-10-25, ports SST OpenCode PRs #58868, #58870, #58872). `routing-config.example.json` ships an `xai--grok-2` capability record so operators who have a Grok deployment on their SAP AI Core subaccount can enable it with the same shape as the OpenAI / Anthropic entries. The entry is paired with a dedicated `_providerParamsHelp` block that documents the family-guarded CLI flags so a reader does not have to open the provider source to figure out which flag maps to which model family.
+
+```json
+{
+  "id": "xai--grok-2",
+  "type": "xai",
+  "costTier": "medium",
+  "strengths": ["coding", "analysis"],
+  "maxTokens": 128000,
+  "reasoning": false,
+  "enabled": true,
+  "_providerParamsHelp": [
+    "Provider-specific sampling params are forwarded via CLI flags",
+    "(`alexi chat --min-p 0.05 --top-k 40 ...`) and guarded per family",
+    "in src/providers/sapOrchestration.ts#buildModuleConfig:",
+    "  xAI (grok/xai ids)    : min_p, top_k",
+    "  Anthropic (claude ids): speed (normal | fast)",
+    "  OpenAI (gpt/o1/...)   : reasoning (default | extended)",
+    "Unknown params are silently dropped so an xAI config never leaks",
+    "to an Anthropic/OpenAI deployment."
+  ]
+}
+```
+
+Field-by-field notes:
+
+| Field          | Value             | Why                                                                                                                                                                                                           |
+| -------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`           | `"xai--grok-2"`   | Matches the SAP AI Core double-dash form. `isXaiModel(id)` in `src/providers/model-match.ts:300` returns `true` for either the `grok` or the `xai` substring, so the capability guard forwards `min_p` / `top_k` for this id. |
+| `type`         | `"xai"`           | Routes capability queries through the xAI family dispatch. Separate from `"openai"` so the `--reasoning` and `frequency_penalty` / `presence_penalty` branches do NOT forward.                                 |
+| `costTier`     | `"medium"`        | Treat Grok as a general-purpose mid-tier model. Pair with the `preferCheap` toggle to route to Grok only when a cheaper option (e.g. `gpt-4o-mini`) is unavailable.                                            |
+| `strengths`    | `["coding", "analysis"]` | Baseline capabilities. Add `"long-context"` only when a specific deployment surfaces a long-context Grok variant — the default `grok-2` is 128K.                                                        |
+| `maxTokens`    | `128000`          | Matches the family context window.                                                                                                                                                                            |
+| `reasoning`    | `false`           | Excludes the id from the `requiresReasoning: true` rule gate. Grok reasoning variants (if surfaced on a given subaccount) ship as separate catalog entries.                                                   |
+| `enabled`      | `true`            | Set to `false` to disable without deleting the record.                                                                                                                                                        |
+
+The `_providerParamsHelp` field is intentionally underscore-prefixed so JSON-schema-strict loaders (if a project migrates to a schema with `additionalProperties: false`) can ignore it; Alexi's router treats unknown fields as inert. Keep it as a copy-paste-friendly reminder of the CLI flag → family mapping — the authoritative source of the guard is still `src/providers/sapOrchestration.ts#buildModuleConfig` (see [PROVIDERS.md — Provider-specific sampling parameters](./PROVIDERS.md#provider-specific-sampling-parameters-xai-min_p-anthropic-speed-openai-reasoning-issue-2150)).
+
+To scope a Grok route to a specific task bucket, add a rule above the general routing priority (as in the `gpt-5.5` example above):
+
+```json
+{
+  "name": "prefer-grok-for-code-review",
+  "description": "Route code-review prompts to grok-2 while it is on trial",
+  "condition": {
+    "taskTypes": ["coding"],
+    "keywords": ["review", "audit"]
+  },
+  "modelId": "xai--grok-2",
+  "priority": 115
+}
+```
+
+With that rule in place, `alexi chat -m "review this diff" --auto-route --min-p 0.05 --top-k 40` picks `xai--grok-2` and forwards both `min_p` and `top_k` into the SAP AI Core request. The same command against a Claude-targeted route silently drops `--min-p` and keeps `--top-k` (Claude honours `top_k`), so the operator does not need to remember which flag is safe for which family — the provider boundary enforces it.
+
 ## Compaction Configuration
 
 Context compaction manages conversation length when approaching token limits.
