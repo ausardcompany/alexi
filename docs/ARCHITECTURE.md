@@ -4770,12 +4770,16 @@ alexi/
 └── tsconfig.json
 ```
 
-The current top-level layout has grown to 35 modules (up from the
+The current top-level layout has grown to 36 modules (up from the
 original ~10). ADR 001 (`docs/adr/001-establish-adr-process.md`) records
 the layering rules these directories must respect; planned follow-up
-ADRs will backfill rationale for each newer top-level module. See
-`docs/adr/REVIEW-2026-09-14.md` for the current baseline snapshot and
-`docs/adr/REVIEW-*.md` more generally for the running architecture log.
+ADRs will backfill rationale for each newer top-level module. The
+latest top-level entry is `src/session-ui/` (added 2026-10-11, port of
+upstream opencode `f43903d8`); it currently contains only
+`timeline-links.ts` and is pending disposition under the
+`REVIEW-2026-10-26` review. See `docs/adr/REVIEW-2026-10-26.md` for
+the current baseline snapshot and `docs/adr/REVIEW-*.md` more generally
+for the running architecture log.
 
 ## Minify-Safe Patterns
 
