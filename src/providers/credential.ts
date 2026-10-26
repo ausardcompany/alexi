@@ -126,9 +126,7 @@ async function tryAcquireLock(lockPath: string, staleMs: number): Promise<boolea
  * The helper does NOT itself retry a transient OAuth error from
  * `refresh`; that is the caller's concern (`ErrorBackoff`).
  */
-export async function refreshCredentialWithLock<T>(
-  options: RefreshWithLockOptions<T>
-): Promise<T> {
+export async function refreshCredentialWithLock<T>(options: RefreshWithLockOptions<T>): Promise<T> {
   const {
     credentialPath,
     refresh,

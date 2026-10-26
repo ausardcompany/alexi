@@ -31,14 +31,20 @@ import { z } from 'zod';
  * the valid option names for that provider.
  */
 export type ProviderSettingsSchema = z.ZodObject<
-  Record<string, z.ZodObject<Record<string, z.ZodTypeAny>> | z.ZodOptional<z.ZodObject<Record<string, z.ZodTypeAny>>>>
+  Record<
+    string,
+    | z.ZodObject<Record<string, z.ZodTypeAny>>
+    | z.ZodOptional<z.ZodObject<Record<string, z.ZodTypeAny>>>
+  >
 >;
 
 /**
  * Extract the Zod object schema from a (possibly optional) wrapper so
  * the shape is reachable regardless of how the caller declared it.
  */
-function unwrapObjectSchema(schema: z.ZodTypeAny): z.ZodObject<Record<string, z.ZodTypeAny>> | undefined {
+function unwrapObjectSchema(
+  schema: z.ZodTypeAny
+): z.ZodObject<Record<string, z.ZodTypeAny>> | undefined {
   // Peel optional / nullable / default wrappers that would hide the inner object.
   let cursor: z.ZodTypeAny = schema;
   while (
