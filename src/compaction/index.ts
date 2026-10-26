@@ -55,6 +55,21 @@ export interface CompactionConfig {
   warningThreshold?: number; // Default: 0.8 (trigger at 80%)
   strategy?: CompactionStrategy; // Default: 'sliding'
   preserveRecent?: number; // Default: 4
+  /**
+   * Reserve this many tokens for the next model reply before triggering
+   * compaction. When the configured value would starve the model
+   * (buffer >= remaining context), it is silently ignored — see
+   * `effectiveCompactionBudget` in `src/core/session/compaction.ts`
+   * (opencode `33726e8`).
+   */
+  buffer?: number;
+  /**
+   * Run compaction eagerly in the background. Canonical name introduced
+   * by opencode `f523f77`.
+   */
+  background_compaction?: boolean;
+  /** @deprecated use background_compaction */
+  precompute_compaction?: boolean;
 }
 
 let globalCompactionConfig: CompactionConfig = {};
@@ -231,9 +246,18 @@ export class CompactionManager {
   }
 
   /**
-   * Check if compaction is needed based on current token count
+   * Check if compaction is needed based on current token count.
+   *
+   * Loop-guard parameter (`lastCompactionAtTokens`) ports kilocode
+   * `ccf958a1d`: if we already compacted and the token count has NOT
+   * meaningfully decreased, do not try again — the summariser is spinning
+   * in place and would otherwise burn budget.
    */
-  needsCompaction(messages: Message[], options?: CompactionCheckOptions): boolean {
+  needsCompaction(
+    messages: Message[],
+    options?: CompactionCheckOptions,
+    lastCompactionAtTokens?: number
+  ): boolean {
     if (!messages || messages.length === 0) {
       return false;
     }
@@ -247,6 +271,12 @@ export class CompactionManager {
     const thresholdTokens = maxTokens * threshold;
 
     if (currentTokens >= thresholdTokens) {
+      // Loop guard: if we already compacted and the token count hasn't
+      // meaningfully decreased, refuse to compact again this turn.
+      if (lastCompactionAtTokens !== undefined && currentTokens >= lastCompactionAtTokens) {
+        return false;
+      }
+
       // Publish event when compaction is needed
       CompactionNeeded.publish({
         currentTokens,
@@ -733,10 +763,19 @@ export function setCompactionManager(manager: CompactionManager): void {
 }
 
 /**
- * Check if compaction is needed for a conversation
+ * Check if compaction is needed for a conversation.
+ *
+ * `lastCompactionAtTokens` is the loop-guard parameter from kilocode
+ * `ccf958a1d`: callers that already compacted this session should pass
+ * the token count at that compaction so a stuck summariser cannot be
+ * invoked again on the same input.
  */
-export function shouldCompact(messages: Message[], maxTokens?: number): boolean {
-  return getCompactionManager().needsCompaction(messages, { maxTokens });
+export function shouldCompact(
+  messages: Message[],
+  maxTokens?: number,
+  lastCompactionAtTokens?: number
+): boolean {
+  return getCompactionManager().needsCompaction(messages, { maxTokens }, lastCompactionAtTokens);
 }
 
 /**

@@ -16,7 +16,16 @@
  *   "context window", "maximum context", "too_many_tokens",
  *   "context limit", "exceeds the context", "context_length_exceeded",
  *   "maximum context length".
+ *
+ * Known-throttle guard: rate-limit errors that carry an explicit
+ * `Retry-After` signal (handled by {@link isKnownThrottle}) are
+ * excluded from overflow classification even when their message
+ * happens to mention "token limit". A known throttle is a transient
+ * delay — compacting the context does nothing to resolve it (the
+ * provider is throttling the account, not rejecting the payload).
+ * See SST OpenCode "known throttle overflow" fix (2026-10-25).
  */
+import { isKnownThrottle } from './error-backoff.js';
 
 /**
  * Common patterns in context overflow error messages from LLM providers.
@@ -42,6 +51,11 @@ export const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /input.*too.long/i,
   /request.*too.*large/i,
   /prompt.*too.*long/i,
+  // Added from upstream opencode `09a1db3`: some providers return
+  // "please reduce the length of ..." in the error message when the
+  // input exceeds the context window. The literal string is distinctive
+  // enough that the false-positive risk is negligible.
+  /reduce the length/i,
 ];
 
 /**
@@ -69,8 +83,20 @@ function getErrorMessage(error: unknown): string {
  * Matches against a curated list of case-insensitive regexes covering
  * OpenAI, Anthropic, and SAP AI Core surface strings. Non-Error values
  * are stringified via `String(err)` before matching.
+ *
+ * **Known-throttle guard**: errors that carry an explicit `Retry-After`
+ * signal (parsed by `getRetryAfterMs` / detected by `isKnownThrottle`)
+ * are *never* classified as context overflow, even when the raw
+ * message happens to include tokens-related substrings. A known
+ * throttle is a transient rate-limit delay; routing it through the
+ * compaction path would waste a summary pass on a request that just
+ * needs to wait for the quota window to reset. See the module-level
+ * comment and SST OpenCode "known throttle overflow" fix.
  */
 export function isContextOverflowError(error: unknown): boolean {
+  if (isKnownThrottle(error)) {
+    return false;
+  }
   const message = getErrorMessage(error);
   return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
 }

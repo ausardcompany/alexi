@@ -60,6 +60,112 @@ export function isContentFilterError(err: unknown): boolean {
 }
 
 /**
+ * Message substrings that unambiguously name a content policy / safety
+ * filter rejection in provider error payloads. Case-insensitive match.
+ *
+ * The list intentionally mirrors upstream opencode PR #58544 (OpenAI
+ * image moderation classified as `content_policy` instead of a generic
+ * error) and the AGENTS.md error-classification taxonomy: these
+ * rejections are PERMANENT and must not be retried.
+ *
+ * We bracket `moderation` and `safety` with word boundaries to reduce
+ * false positives (e.g. unrelated 5xx messages that happen to contain
+ * the substrings `safety-related` or `moderation-note` in telemetry).
+ */
+const CONTENT_POLICY_MESSAGE_RE =
+  /\bmoderation\b|content[_\s-]filter|content[_\s-]policy|\bsafety filter\b|\bsafety setting|safety_rating|\bsafety\b/i;
+
+/**
+ * Broader structural check for a provider content-policy violation.
+ *
+ * Supersedes {@link isContentFilterError} by also catching shapes the
+ * `ContentFilterError` class does not wrap: raw provider error payloads
+ * that leak through before orchestrator-level mapping, string-only
+ * errors from the raw `fetch` layer, and the standardised HTTP 451
+ * ("Unavailable For Legal Reasons" — reused by OpenAI for moderation
+ * blocks). All three provider families covered:
+ *
+ *   - OpenAI: `error.type === 'moderation'`, `error.code ===
+ *     'content_policy_violation'`, HTTP 451.
+ *   - Google: `finishReason === 'SAFETY'`, `promptFeedback.blockReason`.
+ *   - Anthropic: `error_type === 'content_policy'`, `type ===
+ *     'invalid_request_error'` with a content_policy message.
+ *
+ * A content-policy rejection is PERMANENT per the AGENTS.md error
+ * contract (same bucket as content-filter): retrying the same prompt
+ * will hit the same block. `ErrorBackoff.recordError` and
+ * `ErrorBackoff.isFatal` consume this helper to short-circuit the
+ * retry loop.
+ */
+export function isContentPolicyError(err: unknown): boolean {
+  if (isContentFilterError(err)) {
+    return true;
+  }
+  if (err === null || err === undefined) {
+    return false;
+  }
+  if (typeof err === 'string') {
+    return CONTENT_POLICY_MESSAGE_RE.test(err);
+  }
+  if (typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as {
+    message?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    type?: unknown;
+    error_type?: unknown;
+    finishReason?: unknown;
+    error?: unknown;
+    promptFeedback?: unknown;
+  };
+  // HTTP 451 — Unavailable For Legal Reasons; reused by OpenAI for
+  // content moderation blocks.
+  const status =
+    typeof candidate.status === 'number'
+      ? candidate.status
+      : typeof candidate.statusCode === 'number'
+        ? candidate.statusCode
+        : undefined;
+  if (status === 451) {
+    return true;
+  }
+  // Direct provider markers.
+  if (candidate.type === 'moderation' || candidate.type === 'content_policy_violation') {
+    return true;
+  }
+  if (candidate.error_type === 'content_policy') {
+    return true;
+  }
+  // Google: finishReason === 'SAFETY'.
+  if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'content-filter') {
+    return true;
+  }
+  // Nested OpenAI error envelope: { error: { type: 'moderation', ... } }.
+  if (candidate.error && typeof candidate.error === 'object') {
+    const nested = candidate.error as { type?: unknown; code?: unknown };
+    if (nested.type === 'moderation' || nested.code === 'content_policy_violation') {
+      return true;
+    }
+  }
+  // Google promptFeedback.blockReason === 'SAFETY'.
+  if (candidate.promptFeedback && typeof candidate.promptFeedback === 'object') {
+    const blockReason = (candidate.promptFeedback as { blockReason?: unknown }).blockReason;
+    if (blockReason === 'SAFETY' || blockReason === 'OTHER') {
+      return true;
+    }
+  }
+  // Message-based fallback — the last line of defence for raw string
+  // errors wrapped in Error objects without structured fields.
+  const message = typeof candidate.message === 'string' ? candidate.message : '';
+  if (message.length > 0 && CONTENT_POLICY_MESSAGE_RE.test(message)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Return true when `err` carries the free-tier rate-limit marker. Matches
  * either the `code` property (set by `FreeTierRateLimitError`) or the
  * class `name` — the latter keeps the check working across module-boundary
@@ -139,22 +245,93 @@ export function isRetryableError(err: unknown): boolean {
 }
 
 /**
+ * Parse a raw `Retry-After` header value into a delay in milliseconds.
+ *
+ * RFC 9110 §10.2.3 allows two formats:
+ *   - A non-negative integer number of seconds (e.g. `"120"`).
+ *   - An HTTP-date (e.g. `"Fri, 31 Dec 1999 23:59:59 GMT"`).
+ *
+ * Returns `undefined` for anything that cannot be interpreted so the
+ * caller can safely fall back to the default exponential schedule. A
+ * past HTTP-date collapses to `0` ("retry immediately"), mirroring the
+ * {@link getRetryAfterMs} semantics for `resetAt`.
+ *
+ * Exported so provider adapters (and tests) can share the single
+ * parsing path and avoid drift between header interpretation sites.
+ */
+export function parseRetryAfterHeader(
+  value: unknown,
+  now: number = Date.now()
+): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value * 1000);
+  }
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  // Integer or decimal seconds — the common SAP AI Core / OpenAI shape.
+  if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+    const seconds = Number.parseFloat(trimmed);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.floor(seconds * 1000);
+    }
+    return undefined;
+  }
+  // HTTP-date — parsed with `Date.parse` which accepts RFC 1123 and
+  // ISO-8601. A past timestamp collapses to 0 so the caller retries
+  // immediately rather than waiting for a negative delay.
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) {
+    const delta = parsed - now;
+    return delta > 0 ? delta : 0;
+  }
+  return undefined;
+}
+
+/**
+ * Case-insensitive lookup for the `Retry-After` entry inside a raw
+ * headers map. Provider adapters sometimes forward the unparsed header
+ * dictionary on the error (e.g. `{ headers: { 'retry-after': '10' } }`)
+ * instead of (or alongside) a parsed `retryAfterSeconds` field. Both
+ * casings are checked because servers vary (`Retry-After` vs
+ * `retry-after`) and `Headers`-like plain objects do NOT normalise.
+ */
+function readRetryAfterHeader(headers: unknown): unknown {
+  if (headers === null || headers === undefined || typeof headers !== 'object') {
+    return undefined;
+  }
+  // Prefer the explicit shape most providers emit first (lower-case).
+  const map = headers as Record<string, unknown>;
+  for (const key of Object.keys(map)) {
+    if (key.toLowerCase() === 'retry-after') {
+      return map[key];
+    }
+  }
+  return undefined;
+}
+
+/**
  * Extract a `Retry-After` window from a rate-limit error and convert it to
  * milliseconds. Returns `undefined` when no header was captured — the
  * caller then falls back to the default exponential-backoff schedule.
  *
- * Two sources are consulted, in order:
+ * Sources are consulted in priority order:
  *   1. `retryAfterSeconds` (set by the constructors of
  *      `FreeTierRateLimitError` / `ProviderRateLimitError` from the
  *      `Retry-After` response header).
- *   2. `resetAt` (set from `X-RateLimit-Reset`). Only used when
- *      `retryAfterSeconds` is absent; converted to a positive delta from
- *      the current wall-clock. A past reset time collapses to 0
- *      (retry-immediately).
- *
- * We intentionally do NOT re-parse raw headers here — that parsing
- * belongs to the providers layer where the raw response is still
- * available.
+ *   2. `retryAfterMs` (set by provider adapters that already parsed the
+ *      header into milliseconds, e.g. upstream commit `80b8762`).
+ *   3. `resetAt` (set from `X-RateLimit-Reset`); converted to a positive
+ *      delta from the current wall-clock. A past reset time collapses to
+ *      0 (retry-immediately).
+ *   4. A raw `headers['retry-after']` entry — last resort for payloads
+ *      that leak through before orchestrator-level mapping has normalised
+ *      the shape. Both integer seconds and HTTP-date formats are parsed
+ *      via {@link parseRetryAfterHeader}.
  *
  * A zero value is preserved (returns 0) so callers can honour an
  * "immediate retry allowed" hint from the server rather than defaulting
@@ -164,17 +341,95 @@ export function getRetryAfterMs(err: unknown): number | undefined {
   if (err === null || err === undefined || typeof err !== 'object') {
     return undefined;
   }
-  const candidate = err as { retryAfterSeconds?: unknown; resetAt?: unknown };
+  const candidate = err as {
+    retryAfterSeconds?: unknown;
+    retryAfterMs?: unknown;
+    resetAt?: unknown;
+    headers?: unknown;
+  };
   const seconds = candidate.retryAfterSeconds;
   if (typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0) {
     return Math.floor(seconds * 1000);
+  }
+  const ms = candidate.retryAfterMs;
+  if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) {
+    return Math.floor(ms);
   }
   const resetAt = candidate.resetAt;
   if (resetAt instanceof Date && !Number.isNaN(resetAt.getTime())) {
     const delta = resetAt.getTime() - Date.now();
     return delta > 0 ? delta : 0;
   }
+  const headerValue = readRetryAfterHeader(candidate.headers);
+  if (headerValue !== undefined) {
+    const parsed = parseRetryAfterHeader(headerValue);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
   return undefined;
+}
+
+/**
+ * Return true when `err` is a *known throttle*: a rate-limit error that
+ * carries an explicit `Retry-After` signal (either the raw header or an
+ * already-parsed `retryAfterSeconds` / `retryAfterMs` / `resetAt` field
+ * populated by `RateLimitError` / provider adapters).
+ *
+ * A known throttle is distinct from a generic 429 in two important
+ * ways:
+ *   1. The provider has explicitly told us *when* the quota window
+ *      reopens, so {@link ErrorBackoff.recordError} should honour that
+ *      wait instead of falling back to exponential backoff (this part
+ *      already works via {@link getRetryAfterMs}).
+ *   2. It is NOT a signal that the request context was too large. A
+ *      known throttle must therefore NOT trigger context-overflow
+ *      compaction in `src/core/agenticChat.ts` /
+ *      `src/core/streamingOrchestrator.ts` — compaction is for "too
+ *      much context" errors, not transient rate-limit delays. Routing
+ *      known throttles through compaction would waste tokens on a
+ *      summary step that does nothing to resolve the actual problem
+ *      (just wait for the window to reset).
+ *
+ * See `src/core/contextOverflow.ts` where this helper is consulted to
+ * short-circuit false-positive compaction. Reference: SST OpenCode
+ * "known throttle overflow" fix (2026-10-25 research).
+ */
+export function isKnownThrottle(err: unknown): boolean {
+  if (!isRateLimitError(err)) {
+    return false;
+  }
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return false;
+  }
+  const candidate = err as {
+    retryAfterSeconds?: unknown;
+    retryAfterMs?: unknown;
+    resetAt?: unknown;
+    headers?: unknown;
+  };
+  if (
+    typeof candidate.retryAfterSeconds === 'number' &&
+    Number.isFinite(candidate.retryAfterSeconds) &&
+    candidate.retryAfterSeconds >= 0
+  ) {
+    return true;
+  }
+  if (
+    typeof candidate.retryAfterMs === 'number' &&
+    Number.isFinite(candidate.retryAfterMs) &&
+    candidate.retryAfterMs >= 0
+  ) {
+    return true;
+  }
+  if (candidate.resetAt instanceof Date && !Number.isNaN(candidate.resetAt.getTime())) {
+    return true;
+  }
+  const headerValue = readRetryAfterHeader(candidate.headers);
+  if (headerValue !== undefined && headerValue !== null && headerValue !== '') {
+    return true;
+  }
+  return false;
 }
 
 export class ErrorBackoff {
@@ -214,8 +469,10 @@ export class ErrorBackoff {
     // Content-filter rejections (issue #1903) are the second permanent
     // non-4xx shape: the provider's content policy blocked the request
     // and no amount of retrying will unblock it. Same fatal flag so the
-    // outer retry loop stops immediately.
-    if (isFreeTierRateLimitError(err) || isContentFilterError(err)) {
+    // outer retry loop stops immediately. Issue #2134 broadens the check
+    // to cover provider-specific content-policy shapes (OpenAI
+    // moderation, Google SAFETY, Anthropic content_policy, HTTP 451).
+    if (isFreeTierRateLimitError(err) || isContentPolicyError(err)) {
       this.fatalNotified = true;
     } else if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) {
       // Generic 429 is transient per the AGENTS.md error contract: the
@@ -294,7 +551,7 @@ export class ErrorBackoff {
    *      `fatalNotified` flag set by prior `recordError` calls.
    */
   isFatal(err?: unknown): boolean {
-    if (err !== undefined && (isFreeTierRateLimitError(err) || isContentFilterError(err))) {
+    if (err !== undefined && (isFreeTierRateLimitError(err) || isContentPolicyError(err))) {
       return true;
     }
     if (
@@ -338,4 +595,172 @@ export function isPermanentAuthFailure(err: unknown): boolean {
   }
   const name = (err as { name?: unknown }).name;
   return name === 'NoRefreshTokenError' || name === 'ReauthenticationRequiredError';
+}
+
+/**
+ * Coarse-grained taxonomy of provider failures used by callers that need
+ * a single-field decision (telemetry, user-facing error rendering, outer
+ * retry loops). Values match the "Error classification taxonomy" table
+ * in issue #2134 / AGENTS.md → error-handling.
+ *
+ * `content_policy`, `auth`, and `validation` are PERMANENT — the caller
+ * must not retry. `network` and `rate_limit` are TRANSIENT (though the
+ * caller still gets to decide whether its retry budget allows another
+ * attempt). `unknown` is treated cautiously as transient-with-small-budget
+ * by {@link ErrorBackoff.isFatal} fallback paths.
+ */
+export type ErrorType =
+  'network' | 'content_policy' | 'auth' | 'validation' | 'rate_limit' | 'unknown';
+
+/**
+ * Result of {@link classifyError}. `type` is the taxonomy bucket;
+ * `fatal` marks errors that must not be retried; `retryable` is the
+ * inverse convenience for conditional retry loops. `statusCode` is the
+ * HTTP status when the underlying error carried one.
+ */
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+/**
+ * Internal: pull an HTTP status out of the many shapes upstream libraries
+ * use. Mirrors `extractStatus` in `src/providers/modelFetchErrors.ts` but
+ * kept local to preserve `src/core/` → providers independence (providers
+ * are upstream in the dependency graph, not the other way around).
+ */
+function readStatus(err: unknown): number | undefined {
+  if (err === null || err === undefined || typeof err !== 'object') {
+    return undefined;
+  }
+  const candidate = err as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+  };
+  if (typeof candidate.status === 'number') {
+    return candidate.status;
+  }
+  if (typeof candidate.statusCode === 'number') {
+    return candidate.statusCode;
+  }
+  const responseStatus = candidate.response?.status;
+  if (typeof responseStatus === 'number') {
+    return responseStatus;
+  }
+  return undefined;
+}
+
+/**
+ * Internal: best-effort message extraction (never throws, never returns
+ * `[object Object]`).
+ */
+function readMessage(err: unknown): string {
+  if (err instanceof Error && err.message) {
+    return err.message;
+  }
+  if (typeof err === 'string') {
+    return err;
+  }
+  if (err && typeof err === 'object') {
+    const candidate = err as { message?: unknown };
+    if (typeof candidate.message === 'string') {
+      return candidate.message;
+    }
+  }
+  return '';
+}
+
+const NETWORK_MESSAGE_RE =
+  /socket hang up|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EPIPE|EAGAIN|EBUSY|fetch failed/i;
+
+/**
+ * Fold an upstream error into a single {type, fatal, retryable,
+ * statusCode} record. Precedence (most-specific first):
+ *
+ *   1. Content-policy signals (dedicated detector covers OpenAI
+ *      moderation, Google SAFETY, Anthropic content_policy, HTTP 451,
+ *      message substrings). PERMANENT.
+ *   2. Permanent auth failures from the OAuth flow
+ *      (`NoRefreshTokenError`, `ReauthenticationRequiredError`).
+ *      PERMANENT.
+ *   3. Free-tier rate limits (permanent per the AGENTS.md contract).
+ *      PERMANENT, type `rate_limit`.
+ *   4. HTTP status mapping:
+ *      - `401`, `403` -> `auth` (fatal).
+ *      - `400`, `422` -> `validation` (fatal).
+ *      - `429` -> `rate_limit` (transient).
+ *      - `451` -> `content_policy` (fatal; also matched by step 1).
+ *      - `5xx` -> `network` (transient).
+ *   5. Transient network message regex -> `network` (transient).
+ *   6. Rate-limit markers / `isRetryableError` -> `rate_limit`
+ *      (transient).
+ *   7. Fall-through -> `unknown` (treated cautiously; `fatal: false`,
+ *      `retryable: true`).
+ *
+ * This is the "single source of truth" callers should use when they
+ * only need a one-line decision. For retry-budget bookkeeping over
+ * multiple attempts, keep using the stateful {@link ErrorBackoff}
+ * instance — this function is stateless.
+ */
+export function classifyError(err: unknown): ErrorClassification {
+  const statusCode = readStatus(err);
+
+  // 1. Content policy — permanent regardless of status code.
+  if (isContentPolicyError(err)) {
+    return { type: 'content_policy', fatal: true, retryable: false, statusCode };
+  }
+
+  // 2. Permanent auth failures from the OAuth refresh flow.
+  if (isPermanentAuthFailure(err)) {
+    return { type: 'auth', fatal: true, retryable: false, statusCode };
+  }
+
+  // 3. Free-tier rate limit — same bucket as the paid tier for
+  //    classification purposes, but permanent (not retryable).
+  if (isFreeTierRateLimitError(err)) {
+    return { type: 'rate_limit', fatal: true, retryable: false, statusCode };
+  }
+
+  // 4. HTTP status mapping.
+  if (statusCode !== undefined) {
+    if (statusCode === 451) {
+      return { type: 'content_policy', fatal: true, retryable: false, statusCode };
+    }
+    if (statusCode === 401 || statusCode === 403) {
+      return { type: 'auth', fatal: true, retryable: false, statusCode };
+    }
+    if (statusCode === 400 || statusCode === 422) {
+      return { type: 'validation', fatal: true, retryable: false, statusCode };
+    }
+    if (statusCode === 429) {
+      return { type: 'rate_limit', fatal: false, retryable: true, statusCode };
+    }
+    if (statusCode >= 500 && statusCode < 600) {
+      return { type: 'network', fatal: false, retryable: true, statusCode };
+    }
+    if (statusCode >= 400 && statusCode < 500) {
+      // Any other 4xx we did not special-case: permanent per the
+      // AGENTS.md error contract.
+      return { type: 'validation', fatal: true, retryable: false, statusCode };
+    }
+  }
+
+  // 5. Transient network message heuristic.
+  const message = readMessage(err);
+  if (message && NETWORK_MESSAGE_RE.test(message)) {
+    return { type: 'network', fatal: false, retryable: true, statusCode };
+  }
+
+  // 6. Rate-limit markers that did not surface via statusCode (e.g.
+  //    `code: 'provider_rate_limit'`).
+  if (isRateLimitError(err) || isXAICapacityError(err)) {
+    return { type: 'rate_limit', fatal: false, retryable: true, statusCode };
+  }
+
+  // 7. Unknown — cautiously retryable but not fatal, so a caller with
+  //    a small retry budget can give it one more go.
+  return { type: 'unknown', fatal: false, retryable: true, statusCode };
 }

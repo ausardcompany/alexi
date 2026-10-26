@@ -2522,6 +2522,106 @@ The orchestrator's settle behaviour that depends on these rules is in
 `src/core/streamingOrchestrator.ts` (around the for-await loop), with
 the equivalent non-stream path in `src/core/agenticChat.ts`.
 
+## Streaming Chunk Forward-Compatibility (`src/providers/protocols/stream-events.ts`)
+
+Introduced in commit `a482d950 feat(core): handle unknown streaming events gracefully` (ports the discipline from SST OpenCode PRs #58596 image events, #58609 speech events, #58608 custom finish reasons). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock). Each one occasionally surfaces a new SDK event kind that reaches the normalised `StreamChunk` shape before Alexi's renderer learns about it. The provider and the streaming orchestrator cooperate so a forward-rolled upstream never crashes an in-flight turn.
+
+### Two guard layers
+
+1. **Provider getter dispatch (`src/providers/sapOrchestration.ts:1997-2019`).** `chunk.getDeltaContent()` and `chunk.getDeltaToolCalls()` are SDK methods that dispatch internally on `event.type`. When the SDK version does not recognise the event, those getters throw. The provider wraps both calls in a per-chunk `try/catch`:
+
+    ```typescript
+    let deltaContent: unknown;
+    let deltaToolCalls: SdkToolCallChunk[] | undefined;
+    try {
+      deltaContent = chunk.getDeltaContent();
+      deltaToolCalls = chunk.getDeltaToolCalls();
+    } catch (decodeErr) {
+      logger.warn(
+        `Unknown streaming event, skipping chunk (${this.config.modelName}): ` +
+          `${formatError(decodeErr)}`
+      );
+      continue;
+    }
+    ```
+
+    One new event kind cannot abort the whole turn. Caller-visible errors (rate limit, auth, network) still escape via the outer `try/catch` because they surface on the iterator pull itself, not on getter dispatch. The subsequent tool-call branch additionally guards `if (hasToolCalls && deltaToolCalls)` so a successful `getDeltaContent` paired with a thrown-and-recovered `getDeltaToolCalls` cannot leak an `undefined` into `deltaToolCalls.map(...)`.
+
+2. **Consumer-level recognised-chunk guard (`src/core/streamingOrchestrator.ts:546-561`).** When the SDK succeeds at normalising a chunk but the normalised shape carries only fields the orchestrator does not yet understand (e.g. a future `audio` channel widening of `StreamChunk`), the orchestrator falls back:
+
+    ```typescript
+    if (!isRecognizedStreamChunk(chunk)) {
+      logger.warn(`Unknown streaming chunk shape, skipping: ${JSON.stringify(chunk)}`, {
+        modelUsed: modelId,
+      });
+      return { value: { text: '' }, done: false };
+    }
+    ```
+
+### Known chunk fields
+
+The authoritative snapshot of fields the orchestrator can act on lives at `src/providers/protocols/stream-events.ts`:
+
+```typescript
+export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string> = new Set([
+  'text',
+  'toolCalls',
+  'finishReason',
+  'usage',
+  'images',
+]);
+
+export function isRecognizedStreamChunk(chunk: unknown): boolean;
+```
+
+Must be kept in sync with the `StreamChunk` interface:
+
+```typescript
+// src/providers/sapOrchestration.ts
+export interface StreamChunk {
+  text: string;
+  toolCalls?: ToolCallChunk[];
+  finishReason?: string;
+  usage?: TokenUsage;
+  images?: NormalizedImageChunk[];
+}
+```
+
+Adding a new normalised channel (e.g. `audio`, `reasoning`) requires updating BOTH the interface AND `KNOWN_STREAM_CHUNK_FIELDS`. The regression suite at `tests/core/streaming-events.test.ts` snapshots the set so forgetting one half of the update surfaces as a test failure, not a silent miss.
+
+### Sequence
+
+```mermaid
+sequenceDiagram
+    participant SDK as SAP AI SDK stream
+    participant Provider as SapOrchestrationProvider.streamComplete
+    participant Orch as streamChat
+    participant Caller as useStreamChat / interactive.ts
+
+    SDK->>Provider: yield SdkChunk
+    Provider->>Provider: try getDeltaContent / getDeltaToolCalls
+    alt getters throw (unknown event kind)
+        Provider->>Provider: logger.warn('Unknown streaming event...')
+        Provider->>SDK: continue
+    else getters return
+        Provider->>Orch: yield StreamChunk
+        Orch->>Orch: isRecognizedStreamChunk(chunk)
+        alt no known field (forward-rolled shape)
+            Orch->>Orch: logger.warn('Unknown streaming chunk shape...')
+            Orch->>Caller: yield { text: '' }
+        else at least one known field
+            Orch->>Orch: fullText += chunk.text; finalUsage ||= chunk.usage
+            Orch->>Caller: yield chunk
+        end
+    end
+```
+
+### Design notes
+
+- Both guards are deliberately `warn` (not `error`): a forward-rolled server is a soft failure that only matters until the renderer learns the new channel. Operators who need to triage can grep `Unknown streaming event, skipping chunk` or `Unknown streaming chunk shape, skipping` in the agent log.
+- The `return { value: { text: '' }, done: false }` branch in `streamChat` is intentional. Returning an empty-text yield lets any `for await` consumer advance to the next pull without special-casing a null yield; appending `''` to `fullText` is a no-op; cost telemetry sees no synthetic usage because the orchestrator reads `chunk.usage` only on known chunks.
+- Pin the regression suite before extending `StreamChunk`: `tests/core/streaming-events.test.ts` asserts `[...KNOWN_STREAM_CHUNK_FIELDS].sort() === ['finishReason', 'images', 'text', 'toolCalls', 'usage'].sort()`, so widening the interface without updating the snapshot fails CI immediately.
+
 ## Streaming Abort Semantics
 
 User-initiated cancellation of an in-flight streaming turn (Ctrl+C in the
@@ -2610,6 +2710,62 @@ import {
 ```
 
 The error carries the `content_filter` machine code recognised by `ErrorBackoff.isFatal()` (`src/core/error-backoff.ts`), so any outer retry budget (CLI `KILO_RETRIES`, provider-layer `ErrorBackoff`) stops on first inspection — a content-filter block is a permanent policy decision and retrying the same prompt will hit the same block. Partial text produced before the block is preserved on `(err as ContentFilterError & { partialText?: string }).partialText`.
+
+### Content-policy detection helpers (issue #2134)
+
+Alexi routes exclusively through SAP AI Core, which already normalises every content-policy rejection into a `ContentFilterError` with the `content_filter` machine code. The 2026-10 refresh of the error-backoff surface extends non-retry coverage to the raw upstream shapes that leak through test fixtures, telemetry probes, and future proxy providers that forward unmapped payloads. Three provider-attribution helpers are exported from `src/providers/index.ts` alongside a re-export of the generic `isContentPolicyError` detector and the stateless `classifyError` taxonomy from `src/core/error-backoff.ts`.
+
+```typescript
+import {
+  isOpenAIContentPolicyError,
+  isGoogleSafetyError,
+  isAnthropicContentPolicyError,
+  isContentPolicyError,
+  classifyError,
+  type ErrorClassification,
+  type ErrorType,
+} from './providers/index.js';
+```
+
+**Per-provider helpers.** Each helper matches ONLY the structural shapes a specific upstream family emits. They exist for telemetry attribution — not for retry decisions, which must go through the generic detector.
+
+| Helper                              | Shapes covered                                                                                             |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `isOpenAIContentPolicyError(err)`   | HTTP `451`; `{ error: { type: 'moderation' } }`; `{ error: { code: 'content_policy_violation' } }`         |
+| `isGoogleSafetyError(err)`          | `{ finishReason: 'SAFETY' }`; `{ promptFeedback: { blockReason: 'SAFETY' } }`                              |
+| `isAnthropicContentPolicyError(err)`| `{ error_type: 'content_policy' }`; `{ type: 'invalid_request_error', message: '... content_policy ...' }` |
+
+**Generic cross-provider detector.** `isContentPolicyError(err)` in `src/core/error-backoff.ts` is the single source of truth for retry decisions. It subsumes `isContentFilterError`, every per-provider helper above, and a message-regex fallback for raw string errors wrapped in bare `Error` objects:
+
+```typescript
+const CONTENT_POLICY_MESSAGE_RE =
+  /\bmoderation\b|content[_\s-]filter|content[_\s-]policy|\bsafety filter\b|\bsafety setting|safety_rating|\bsafety\b/i;
+```
+
+`ErrorBackoff.recordError(statusCode?, err?)` and `ErrorBackoff.isFatal(err?)` consume `isContentPolicyError` so a content-policy error from any provider family flips `fatalNotified` identically — the outer retry loop (`KILO_RETRIES`, `retryProviderCall`, `NetworkManager`) short-circuits without burning provider budget.
+
+**Stateless `classifyError` taxonomy.** When a caller only needs a one-line decision (telemetry, user-facing error rendering, outer retry loops without session-level bookkeeping), `classifyError(err)` returns a single record:
+
+```typescript
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+```
+
+Precedence is content-policy → permanent auth failures → free-tier rate limits → HTTP status mapping (`401`/`403` → `auth` fatal, `400`/`422`/other `4xx` → `validation` fatal, `429` → `rate_limit` transient, `451` → `content_policy` fatal, `5xx` → `network` transient) → transient-network message regex → generic rate-limit markers → `unknown` (cautiously `retryable: true, fatal: false`). The function is deliberately stateless; retry-budget bookkeeping across multiple attempts stays with the `ErrorBackoff` instance.
+
+See [docs/ARCHITECTURE.md — Content-policy classification across provider families](ARCHITECTURE.md#content-policy-classification-across-provider-families-issue-2134) for the full precedence flowchart and [docs/TESTING.md — Testing content-policy classification](TESTING.md#testing-content-policy-classification-issue-2134) for the 32-case regression suite.
 
 ## Performance Considerations
 
@@ -4778,6 +4934,160 @@ export interface OrchestrationModelMetadata {
 ```
 
 Missing / `false` is "licensed" (default); `true` marks the entry as subject to the filter. No existing SAP metadata entry sets `free: true`, so the live catalog is byte-identical with the filter off.
+
+## Cross-Process Credential-Refresh Coordination (`src/providers/credential.ts`)
+
+SAP AI Core XSUAA client-credentials tokens expire frequently, and concurrent Alexi processes (interactive TUI, background `agent` run, CI invocation) refreshing the same credential at the same time cause OAuth token thrashing: whichever refresh lands last invalidates the tokens held by the other callers, and both have to retry. For SAP AI Core XSUAA this is a frequent source of 401s in parallel pipelines.
+
+`refreshCredentialWithLock<T>(options)` (`src/providers/credential.ts:129-186`) serialises refreshes across processes behind a filesystem lock keyed on the credential path, with a double-check on the cached credential after acquiring the lock.
+
+```typescript
+// src/providers/credential.ts
+export interface RefreshWithLockOptions<T> {
+  credentialPath: string;
+  refresh: () => Promise<T>;
+  readCached?: () => Promise<T | undefined>;
+  staleMs?: number;       // Default: 10_000
+  maxAttempts?: number;   // Default: 50
+  minDelayMs?: number;    // Default: 50
+  maxDelayMs?: number;    // Default: 500
+}
+
+export async function refreshCredentialWithLock<T>(
+  options: RefreshWithLockOptions<T>
+): Promise<T>;
+```
+
+Guarantees:
+
+1. At most one process executes `refresh` at a time per `credentialPath`.
+2. Peers waiting on the lock re-read the cached credential after acquiring the lock and skip calling `refresh` if a prior holder already produced a fresh one.
+3. The lock is always released — including on `refresh` throw.
+
+Implementation notes:
+
+- **Lock file.** `<credentialPath>.lock` created with the `wx` (exclusive) flag at `src/providers/credential.ts:81-111`. Contending callers see `EEXIST`.
+- **Stale-lock reclaim.** A stored timestamp inside the lock file lets later arrivals reclaim a lock whose owner crashed; `staleMs` defaults to 10 s — longer than any realistic token-endpoint RTT.
+- **Backoff.** Capped exponential with ±25% jitter: `base = min(minDelayMs * 2^min(attempt,10), maxDelayMs)`. Default range 50 ms – 500 ms.
+- **Fast path.** When `readCached` returns a valid credential BEFORE taking the lock, the function returns immediately without creating the lock file.
+- **Double-check.** After acquiring the lock, `readCached` is called again — a peer may have refreshed while the current process was waiting; in that case `refresh` is skipped.
+- **No OAuth retry inside.** A transient OAuth error from `refresh` is thrown through unchanged; `ErrorBackoff` owns the retry budget.
+- **No dependencies.** Deliberately avoids `proper-lockfile` so the helper stays usable in the zero-dependency bootstrap path.
+
+```mermaid
+sequenceDiagram
+    participant P1 as Process 1
+    participant P2 as Process 2
+    participant FS as Filesystem (lock file)
+    participant Token as Token endpoint
+
+    P1->>FS: readCached() — stale
+    P2->>FS: readCached() — stale
+    P1->>FS: open(wx) — success
+    P2->>FS: open(wx) — EEXIST
+    P1->>Token: refresh()
+    P2->>P2: backoff
+    Token-->>P1: new token
+    P1->>FS: write cache; rm lock
+    P2->>FS: open(wx) — success
+    P2->>FS: readCached() — hit (double-check)
+    P2->>FS: rm lock
+    P2-->>P2: return cached (no refresh call)
+```
+
+Call-site integration: both the SAP XSUAA client-credentials path (`sapOrchestration.ts`) and the OAuth2 authorization-code refresh path (`auth.ts`) plug in via the `refresh` + `readCached` callbacks without the lock module knowing about either grant type.
+
+## Anthropic Prompt-Cache TTL (`src/providers/anthropic.ts`)
+
+Anthropic's prompt caching accepts a `cache_control` block on each cached content item that carries an optional `ttl` field. Opencode `9007700` made the TTL user-configurable because long sessions benefit disproportionately from the longer cache window — the fixed 5 m TTL caused a cache miss on every follow-up turn.
+
+```typescript
+// src/providers/anthropic.ts
+export const CachePolicySchema = z
+  .object({
+    ttl: z.enum(['5m', '1h']).default('5m'),
+  })
+  .optional();
+
+export type CachePolicy = z.infer<typeof CachePolicySchema>;
+
+export function anthropicCacheControl(policy?: CachePolicy): {
+  type: 'ephemeral';
+  ttl: '5m' | '1h';
+};
+
+export function anthropicCacheProviderOptions(policy?: CachePolicy): {
+  anthropic: { cacheControl: { type: 'ephemeral'; ttl: '5m' | '1h' } };
+};
+```
+
+The schema's narrow enum (`'5m' | '1h'`) catches misconfigured TTLs at config load time rather than producing silent cache misses at the provider. SAP AI Core forwards `cache_control` verbatim to Anthropic through the orchestration provider, so this helper is wired into the same path used for direct Anthropic calls.
+
+## Typed Bedrock Converse Options (`src/providers/bedrock.ts`)
+
+Opencode `74556a2` ported here replaces a stringly-typed provider-options bag (which silently dropped unknown keys) with a fully typed options surface and a pure request builder. Scope: ONLY the typed options surface and the builder — the actual Bedrock SDK call lives wherever the caller instantiates the client, so the SAP AI Core dependency graph stays clean and users who do not route through Bedrock pay zero runtime cost.
+
+```typescript
+// src/providers/bedrock.ts
+export type BedrockReasoningEffort = 'low' | 'medium' | 'high';
+export type BedrockServiceTier = 'standard' | 'priority';
+
+export interface BedrockConverseOptions {
+  reasoningEffort?: BedrockReasoningEffort;
+  serviceTier?: BedrockServiceTier;
+  adaptiveThinking?: boolean;
+  requestMetadata?: Record<string, string>;
+  responseJsonSchema?: object;
+}
+
+export function buildConverseRequest(
+  model: string,
+  messages: BedrockConverseMessage[],
+  opts?: BedrockConverseOptions
+): BedrockConverseRequest;
+```
+
+Field → Converse request mapping (`src/providers/bedrock.ts:100-128`):
+
+| Option                 | Converse request field                                                 |
+|------------------------|-----------------------------------------------------------------------|
+| `reasoningEffort`      | `additionalModelRequestFields.reasoning_effort`                       |
+| `serviceTier`          | `performanceConfig.latency`                                           |
+| `adaptiveThinking`     | `additionalModelRequestFields.thinking = { type: 'enabled' }` (omitted when disabled) |
+| `requestMetadata`      | top-level `requestMetadata`                                           |
+| `responseJsonSchema`   | `additionalModelRequestFields.response_json_schema`                   |
+
+Fields that the caller did not supply are omitted from the request body entirely so Bedrock's request validator does not reject unknown empty fields.
+
+## Schema-Derived Provider Option Keys (`src/providers/options.ts`)
+
+Opencode `490456d` ported here replaces a hand-rolled list of known provider option keys with a Zod-derived set. Forgetting to update the hand-rolled list used to cause the orchestrator to silently drop a valid option when routing a request; the new mechanism threads new fields through automatically.
+
+```typescript
+// src/providers/options.ts
+export type ProviderSettingsSchema = z.ZodObject<
+  Record<string, z.ZodObject<Record<string, z.ZodTypeAny>>
+    | z.ZodOptional<z.ZodObject<Record<string, z.ZodTypeAny>>>>
+>;
+
+export function deriveProviderOptionKeys(
+  schema: ProviderSettingsSchema
+): ReadonlyMap<string, ReadonlySet<string>>;
+
+export function filterProviderOptions(
+  providerId: string,
+  options: Readonly<Record<string, unknown>>,
+  keyMap: ReadonlyMap<string, ReadonlySet<string>>
+): Record<string, unknown>;
+```
+
+Design contract:
+
+- **Schema-derived.** `deriveProviderOptionKeys` walks the schema shape, unwraps `ZodOptional` / `ZodNullable` / `ZodDefault` wrappers, and returns a `ReadonlyMap` of provider id → `ReadonlySet<string>` of valid option keys. Adding a field to the schema automatically widens the valid set — no second place to update.
+- **Unknown providers pass through.** `filterProviderOptions` returns a fresh copy of the input bag when the provider is not in the derived key map, so a caller using a bespoke extension does not have its options silently stripped.
+- **Fresh object on filter.** The returned filtered bag is a new allocation; the input is never mutated. Unknown keys are dropped silently.
+
+Call-site expectations: the SAP orchestration layer (and any direct Anthropic / OpenAI / Bedrock path) passes in its own Zod settings schema, so no provider-specific type bundle is pulled into `src/providers/options.ts` and the module stays independent of the catalog layout.
 
 ## Related Documentation
 

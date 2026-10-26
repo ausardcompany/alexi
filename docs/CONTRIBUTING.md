@@ -190,6 +190,21 @@ npm run test:coverage  # Run tests with coverage report
 - Trailing commas (ES5 style)
 - LF line endings
 
+Run `npm run format` before pushing. The dedicated `format:check` CI job
+runs independently from `lint` and `typecheck`, and it will fail a PR on
+any formatting drift — including the long-signature line-wrap issues that
+the pre-commit `lint-staged` hook corrects on staged files but which can
+sneak past when a file is modified outside the staged set (e.g. by an
+IDE refactor on an untracked branch). The 2026-10-26 auto-fix on
+`src/providers/credential.ts` and `src/providers/options.ts` (CHANGELOG
+`### Changed`, commit `db071ab9`) is a reference case: a 100-column
+overrun on a single generic argument blocked CI until the formatter
+reflowed the signature. New provider helpers that declare a
+discriminated-union generic argument (`ProviderSettingsSchema` is the
+canonical example) MUST reflow the generic across lines rather than fight
+the ceiling with an inline cast; the reflowed shape is also easier to
+diff on review.
+
 ### Import Conventions
 
 ```typescript
@@ -520,6 +535,10 @@ When testing anything that reads the dynamic model catalog (`src/providers/model
 See [`docs/TESTING.md#testing-mcp-protocol-violation-detection-and-breakage-tracker`](./TESTING.md#testing-mcp-protocol-violation-detection-and-breakage-tracker) for the three-suite regression pattern (pure validator, pure tracker, client-wiring integration) and the mocking shape (`vi.hoisted` for logger capture, `vi.importActual` passthrough for `src/mcp/config.js`, fresh `createMockProcess()` per case).
 
 **Provider-specific sampling params are gated at the provider boundary, not the CLI (issue #2150).** New sampling knobs that only one model family documents (e.g. xAI `min_p`, Anthropic `speed`, OpenAI Responses `reasoning`) MUST follow the three-layer pattern established in commit `1a0b8a60`: (1) a typed CLI parser in `src/cli/commands/chat.ts` (one per flag — `parseOptionalNumberFlag`, `parseSpeedFlag`, `parseReasoningFlag`) that throws on bad input BEFORE any provider call; (2) an optional field on `sendChat`'s options and on `OrchestrationConfig` + `CompletionOptions` in `src/providers/sapOrchestration.ts`, forwarded unchanged through the provider's retry wrapper; (3) a capability-guarded branch in `SapOrchestrationProvider#buildModuleConfig` that emits the field into `modelParams` ONLY when the model family predicate (`isXaiModel`, `isAnthropicModel`, `isOpenAI`, `isGemini`) returns `true`. The CLI MUST NOT gate on family — auto-routing and inline `@provider/model` references can swap the model mid-request, so the provider boundary is the first point where the final `modelName` is known. The regression suite template is `tests/providers/sapOrchestration-samplingParams.test.ts` (308 lines, 4 cases per field: positive, config fallback, per-call override, two capability guards + omit-both). See [`docs/TESTING.md#testing-provider-specific-sampling-param-plumbing-testsproviderssaporchestration-samplingparamstestts-issue-2150`](./TESTING.md#testing-provider-specific-sampling-param-plumbing-testsproviderssaporchestration-samplingparamstestts-issue-2150) and [`docs/PROVIDERS.md#provider-specific-sampling-parameters-xai-min_p-anthropic-speed-openai-reasoning-issue-2150`](./PROVIDERS.md#provider-specific-sampling-parameters-xai-min_p-anthropic-speed-openai-reasoning-issue-2150).
+
+**Edit / write / delete tool suites must bypass the `ask` permission gate.** The default permission rule for the `write` family is `ask`, which in a test run (no interactive listener attached) resolves every call to a synthetic user rejection after a timeout — the tool never touches the filesystem and the assertion then compares the pre-edit contents to the expected post-edit contents and silently fails. Two sanctioned bypasses: (1) `vi.mock('../../../src/tool/index.js', ...)` with a `defineTool` shim that aliases `execute: def.execute, executeUnsafe: def.execute`, as shown in [`docs/TESTING.md#standard-tool-test-pattern`](./TESTING.md#standard-tool-test-pattern); (2) call `(editTool as any).executeUnsafe(params, ctx)` directly as `edit.mixed-eol.test.ts` and `edit.agentsmd.test.ts` do (see [`docs/TESTING.md#alternative-direct-executeunsafe-without-a-module-mock`](./TESTING.md#alternative-direct-executeunsafe-without-a-module-mock)). Never route an edit-family tool test through the raw `.execute(...)` path — commit `94c9f8a4` repaired exactly this regression in `edit.mixed-eol.test.ts`.
+
+**SheetJS epoch fixtures encode durations as 1899-12-30 + N hours.** Any new case in `src/tool/tools/__tests__/read-office.xlsx-cell.test.ts` that exercises an elapsed `[h]:mm` cell MUST construct its `Date` fixture as `1899-12-30T00:00:00Z + N hours`, not as a literal with `h > 23`. Hour 25 is not a legal ISO time-of-day: `new Date('1899-12-30T25:30:00.000Z')` returns `Invalid Date` and the implementation's downstream `.toISOString()` call throws `RangeError: Invalid time value` before the assertion runs. The correct fixture for a 25:30 duration is `new Date('1899-12-31T01:30:00.000Z')`. See [`docs/TESTING.md#testing-xlsx-cell-fidelity`](./TESTING.md#testing-xlsx-cell-fidelity) for the full regression contract and the inline fixture-note the fix added.
 
 **Session headers additive contract.** `buildSessionHeaders` emits both namespaced (`x-alexi-session-id`, `x-alexi-parent-session-id`) and legacy (`x-session-affinity`, `x-parent-session-id`) forms on every request. Any PR that removes the legacy headers breaks downstream observability pipelines that already key on them; any PR that adds a new identity surface MUST emit it alongside the existing pair until a deprecation cycle is explicitly agreed. The regression suite (`src/providers/__tests__/sessionHeaders.test.ts`) asserts BOTH forms on every case. See [`docs/CONFIGURATION.md#session-headers-for-load-balanced-sap-ai-core-deployments`](./CONFIGURATION.md#session-headers-for-load-balanced-sap-ai-core-deployments).
 
@@ -882,6 +901,83 @@ failures, missing env vars — are permanent decisions and MUST NOT
 consume retry budget. Surface them on the first attempt. The AGENTS.md
 "Permanent (NOT retried)" bucket lists the full taxonomy; new retry
 helpers extend that bucket, never shrink it.
+
+### Known-throttle guard contract (`isKnownThrottle`)
+
+When adding a new error-signal source to the rate-limit layer or a
+new content-pattern to `src/core/contextOverflow.ts`, respect the
+load-bearing invariant pinned by `isKnownThrottle`: a rate-limit
+error that carries an explicit `Retry-After` signal MUST NOT trigger
+context-overflow compaction, even when its message happens to mention
+`"token limit"` or `"reduce the length"`. The provider is throttling
+the account, not rejecting the payload; a summary pass on the
+throttled request wastes tokens on a request that just needs to wait
+for the quota window to reopen.
+
+**Four rules for a new signal source.**
+
+1. **Signal detection goes through `isKnownThrottle`, not the pattern
+   list.** New Retry-After-equivalent fields (e.g. a provider that
+   forwards `X-RateLimit-Reset-At` as a bespoke JSON field) must be
+   added to the `isKnownThrottle` signal lookup inside
+   `src/core/error-backoff.ts`, NOT to the message-pattern list in
+   `src/core/contextOverflow.ts`. Mixing the two layers is how the
+   original false-positive sneaked in — the compaction detector saw
+   a message that mentioned "token limit" and the retry layer saw a
+   rate-limit code, and neither cross-checked.
+2. **Header parsing goes through `parseRetryAfterHeader`.** Raw
+   `Retry-After` strings (integer seconds, decimal seconds, HTTP-date,
+   bare `number`) are parsed by one function so RFC 9110 §10.2.3 edge
+   cases — fractional delta-seconds, past HTTP-date, garbage input,
+   negative values — behave consistently across the codebase. New
+   provider adapters MUST reuse the exported helper rather than
+   writing a bespoke parser.
+3. **A known throttle is non-fatal regardless of retry count.** The
+   retry-budget exhaustion path in `ErrorBackoff.isFatal` (issue
+   #1994) deliberately does NOT flip to fatal when the error is a
+   known throttle — the server is cooperating by telling us when to
+   retry, so the exponential retry-budget concept does not apply. If
+   you add a new field to `ErrorBackoff` that counts "known throttle
+   seen N times", pin the invariant in `src/core/__tests__/error-backoff.test.ts`
+   with both a positive case (budget exhausted on a NON-throttle) and
+   a negative case (budget untouched on a throttle).
+4. **Pin the guard with three test cases.** Any new signal source
+   requires (a) a `parseRetryAfterHeader` or `isKnownThrottle`
+   detection case, (b) a `isContextOverflowError` false-positive
+   guard case proving the overflow detector rejects the new throttle
+   shape even when the message would otherwise match, and (c) an
+   `ErrorBackoff.recordError` case that pins the resulting wait
+   schedule. See [`docs/TESTING.md#testing-the-known-throttle-guard`](TESTING.md#testing-the-known-throttle-guard-srccoreerror-backofftestts).
+
+**Example — adding a new signal source.**
+
+```typescript
+// src/core/error-backoff.ts (sketch)
+export function isKnownThrottle(err: unknown): boolean {
+  if (!isRateLimitError(err)) return false;
+  const candidate = err as {
+    retryAfterSeconds?: unknown;
+    retryAfterMs?: unknown;
+    resetAt?: unknown;
+    headers?: unknown;
+    // NEW: hypothetical provider-specific field
+    resetAtEpochMs?: unknown;
+  };
+  // ... existing checks ...
+  if (
+    typeof candidate.resetAtEpochMs === 'number' &&
+    Number.isFinite(candidate.resetAtEpochMs) &&
+    candidate.resetAtEpochMs > 0
+  ) {
+    return true;
+  }
+  // ... fall-through ...
+}
+```
+
+The same field MUST also be added to `getRetryAfterMs` so the retry
+wait honours the server-supplied window. Reference: SST OpenCode
+"known throttle overflow" fix (2026-10-25).
 
 ### One-way config key migration with a one-shot deprecation warning
 
@@ -1832,6 +1928,8 @@ See `docs/TESTING.md#testing-the-kilo_board_write-recipient-state-warning` for t
 
 A second reference example is `tests/agent/inheritance.test.ts` (commit `85ffc171`, issue #2104, 233 lines) which audits `deriveSubagentSessionPermission` + `TaskTool.buildSubagentConfig` against the Kilocode PR #15254 "flattened allowlist baseline" bug class. The suite does not add runtime behaviour — the fix landed in a prior commit via `editAllowlistBaselines` in `src/agent/subagent-permissions.ts:209-222` — but it locks in four regression contracts (allowlist baseline is dropped, true blanket deny still propagates, parent approvals are never forwarded, mixed-shape input still filters correctly) that would otherwise silently rot under a future refactor. The suite parametrises across the full `EDIT_PERMISSION_NAMES` tuple so adding a new edit-family name to the source constant without an accompanying test case leaves a narrower audit than intended — a shape the module docblock explicitly flags. See [docs/TESTING.md — Testing subagent tool allowlist inheritance](TESTING.md#testing-subagent-tool-allowlist-inheritance-testsagentinheritancetestts-issue-2104) for the full walkthrough and the six patterns the suite exemplifies for any future "audit against upstream bug class" test file.
 
+A third reference example is `tests/agent/subagent-tool-inheritance.test.ts` (commit `4bee04a4`, issue #2123, 383 lines) which closes the cross-session isolation gap in the subagent permission derivation. Alexi's `edit` tool is stateless (no mutable per-session edit-tool config), so the audit targets the SESSION PERMISSION RULESET as the actual inheritance surface. The suite is organised into four `describe` blocks that pin ten specific contracts: (1) edit-family ceilings propagate; (2) allowlist baselines unflatten and the custom-vs-native delegator split holds (`parentIsCustom` branch at `src/agent/subagent-permissions.ts:143-194` vs native delegator plan-mode hardening); (3) parent → subagent isolation — post-hoc mutations of `parentSessionPermission` do NOT retroactively tighten the derived ruleset, and the derivation materialises a NEW array (though rule objects are shared by reference and treated as immutable value objects by convention); (4) subagent → parent isolation plus sibling isolation — pushing a rule into one derived array does NOT leak to the parent OR to a sibling subagent derived from the same parent snapshot. The suite's standout pattern worth copying for future audits is the **symmetric isolation axis**: most "no bleed" tests only cover parent → subagent, but a future runtime plugin or test harness that mutates the derived ruleset must not retroactively tighten the parent's session either, so the reverse direction needs an explicit guard too. See [docs/TESTING.md — Testing subagent edit-tool configuration inheritance](TESTING.md#testing-subagent-edit-tool-configuration-inheritance-testsagentsubagent-tool-inheritancetestts-issue-2123) for the full walkthrough and the six patterns the suite exemplifies for any future "audit cross-session isolation" test file.
+
 ### Shape-preservation regression suites (pin the type shape, not just the value)
 
 A specialised flavour of verification-only suite is the **shape-preservation suite**: it exists specifically to pin the TypeScript type shape of a field as it flows through two or more module boundaries, so a future refactor that widens, narrows, or collapses the shape (a cast, a convenience `?? true` default, a serialisation round-trip through a plugin) trips CI immediately. These suites are tiny — they tend to be two `describe` blocks around a shared fixture — but they are the strongest regression guard available for options-bag fields whose downstream interpretation branches on their type.
@@ -1869,6 +1967,45 @@ The reference example is `tests/agent/subagent-permissions.test.ts` (commit `f0d
 6. **Cite the paired upstream bug and the sibling suite from the module docblock.** The suite's file-level docblock names Kilocode PR #15254, the audit date (2026-10-19), the issue id (#2108), and the companion suite `tests/agent/inheritance.test.ts` (which covers the complementary parent-ruleset shape). When a future regression trips either suite, the failing module docblock is enough to locate the originating bug class in minutes.
 
 See [docs/TESTING.md — Testing subagent `allowedTools` array-shape preservation](TESTING.md#testing-subagent-allowedtools-array-shape-preservation-testsagentsubagent-permissionstestts-issue-2108) for the per-case walkthrough. Any future options-bag field whose downstream interpretation branches on its type (e.g. `maxDepth?: number | 'unlimited'`, `recipient?: string | string[]`) should receive a matching shape-preservation suite before the first consumer ships.
+
+### Forward-compatibility shape guards
+
+SAP AI Core proxies five upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock). Each one occasionally surfaces a new SDK event kind — image deltas, speech deltas, custom finish reasons — that reaches the normalised `StreamChunk` shape before Alexi's renderer learns about it. The canonical reference is commit `a482d950 feat(core): handle unknown streaming events gracefully` (ports SST OpenCode PRs #58596 image events, #58609 speech events, #58608 finish reasons). Future contributions that touch a long-lived data boundary (provider → orchestrator → renderer, MCP tool-result → formatter, routing-rule JSON → router) MUST follow the same two-layer discipline:
+
+1. **Warn, do not throw, on unknown shapes.** A benign forward-rolled upstream is a soft failure. Replace any `throw new Error('Unknown ...')` with a `logger.warn('Unknown ..., skipping: <payload>', { context })` plus a continue / pass-through yield. Preserve caller-visible errors (rate limit, auth, network) via the surrounding `try/catch`; only decode-level dispatch errors fall into the warn-and-skip bucket. The provider pattern is at `src/providers/sapOrchestration.ts:1997-2019`; the orchestrator pattern is at `src/core/streamingOrchestrator.ts:546-561`.
+
+2. **Expose a module-local snapshot of the known shape.** The canonical example is `KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>` in `src/providers/protocols/stream-events.ts`:
+
+    ```typescript
+    export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string> = new Set([
+      'text',
+      'toolCalls',
+      'finishReason',
+      'usage',
+      'images',
+    ]);
+
+    export function isRecognizedStreamChunk(chunk: unknown): boolean {
+      if (!chunk || typeof chunk !== 'object') {
+        return false;
+      }
+      const rec = chunk as Record<string, unknown>;
+      for (const field of KNOWN_STREAM_CHUNK_FIELDS) {
+        if (rec[field] !== undefined) {
+          return true;
+        }
+      }
+      return false;
+    }
+    ```
+
+    The snapshot MUST be kept in sync with the interface it mirrors (here, `StreamChunk` at `src/providers/sapOrchestration.ts:238-250`). The paired regression suite — `tests/core/streaming-events.test.ts` — snapshots the set with `expect([...KNOWN_STREAM_CHUNK_FIELDS].sort()).toEqual([...].sort())` so widening the interface without updating the snapshot fails CI immediately. Every forward-compat shape guard SHOULD have a matching snapshot assertion for exactly this reason: a silent "update the interface, forget the guard" refactor becomes impossible.
+
+3. **Return a safe empty value from the consumer-level guard.** `isRecognizedStreamChunk` returning `false` causes `streamChat` to emit `{ value: { text: '' }, done: false }`. The empty-text yield lets `for await` consumers advance to the next pull without special-casing a null yield; `fullText += ''` is a no-op; cost telemetry is unaffected because `chunk.usage` is read only on known chunks. Any new forward-compat guard should produce an analogous "advance without side effect" value for its consumers rather than skipping the yield entirely — a skipped yield may cause a consumer that counts chunks (progress bars, test harnesses) to deadlock.
+
+4. **Document both layers in `docs/ARCHITECTURE.md` and `docs/PROVIDERS.md`.** The provider-level getter guard belongs under PROVIDERS (SDK-interface concern); the consumer-level recognised-shape guard belongs under ARCHITECTURE (orchestrator-pipeline concern). The CHANGELOG entry MUST link both so a reviewer or future bisector can find them from the commit message alone.
+
+Related suites that follow the same pattern are the shape-preservation suites above (pin the TypeScript shape at a module boundary) and the verification-only regression suites (lock a behavioural contract with tests + inline JSDoc). Treat forward-compatibility shape guards as the "incoming data" analogue of shape-preservation suites: shape-preservation pins the field the caller passes IN; forward-compat guards pin the field the provider sends OUT.
 
 ### Abort propagation through delegating tools
 
@@ -2571,7 +2708,9 @@ This ensures consistent code style (trailing whitespace removal, blank line norm
 - `eqeqeq`-driven strict-inequality rewrites of `!= null` / `== null` null-and-undefined checks. `no-throw-literal` and quote-style fixes are cosmetic; `eqeqeq` (configured as `error` in Alexi — see the ESLint configuration section above) is a semantic-preserving rewrite that ESLint's autofixer will NOT apply automatically (the shortest-safe replacement is context-sensitive), so the autohealing bot performs it by hand. The canonical target is `x != null` → `x !== null && x !== undefined` (both operands checked explicitly). Worked example, 2026-08-25, commit `de9d1530` (`fix(ci): apply prettier formatting and use strict inequality [autohealing]`): `src/permission/agent-manager.ts:124` inside `isBlocked(agentId)` previously read `return blocker != null;` — a loose inequality that ESLint flagged and the autohealer rewrote to `return blocker !== null && blocker !== undefined;`. Semantic contract of `isBlocked` is unchanged: `null` and `undefined` still both mean "not blocked" (both return `false`); every other truthy `Blocker` value returns `true`; the `catch (err)` branch still fails closed with `return true` (per upstream port `98559c9d6`) so a store-lookup failure never lets a caller silently bypass a real block. Same commit also touched three sibling files with pure Prettier reflows (no semantic change): `src/core/session/processor.ts:38-39` collapsed the two-arm `CompletenessResult` discriminated union onto a single line (still `{ status: 'complete' } | { status: 'retry'; reason: 'reasoning-only' }`); `src/tool/tools/agent-manager.ts:14` collapsed the `.enum([...]).describe(...)` chain on the `action` field onto a single 92-column line (enum values `'create' | 'list' | 'stop' | 'status' | 'answer'` and describe metadata both unchanged); `src/tool/tools/shell/id.ts:89-91` reflowed the `pwshHits` `.filter((item): item is string => Boolean(item))` type-guard so the arrow follows the type predicate and `Boolean(item)` drops to the next line (same `PowerShell.pwsh() > PowerShell.probe() > cmd.exe` candidate order on Windows). Aggregate diff for the pass: `4 files changed, 5 insertions(+), 8 deletions(-)`. When reviewing similar autohealing commits, verify that (a) the strict-inequality rewrite preserves both branches of the loose check — replacing `!= null` with just `!== null` DROPS the `undefined` branch and is a semantic change, not a lint fix; and (b) the paired Prettier reflows do not silently reorder discriminants of a union, drop enum members, or move a type predicate off its original expression.
 - Missing trailing semicolons on statements (e.g., bare `return` inside an early-exit branch, field declarations in object type literals, `const` statements) per Prettier `semi: true` -- recent examples include the semicolon added after the early `return` in `cancel(sessionID)` inside `src/session/prompt-queue.ts` (commit `8a005f03`), the bulk semicolon/quote-style/trailing-newline fixes applied to the orphan `inherited(input)` helper in `src/tool/task.ts` (commit `fe8b98c5`), the nine-file quote-style and trailing-newline pass on the 2026-06-22 upstream-sync stubs across `src/agent/index.ts`, `src/core/config.ts`, `src/core/index.ts`, `src/event/index.ts`, `src/plugin/provider.ts`, `src/session/index.ts`, `src/tool/parameters.test.ts.snap.ts`, `src/tool/task.ts`, and `src/tool/webfetch.ts` (commit `6dc4b883`), the single-line trailing-newline fix appended to the Express OpenAI-compatible route stub `src/router/openaiRoute.ts` (commit `25b45885`, 2026-07-19) immediately after the 2026-07-19 upstream sync (commit `3cca78f4`) imported it without a final LF, the four-file indent-normalisation pass (4-space → 2-space `tabWidth: 2`) on `src/agent/instance-advertisement.ts`, `src/cli/remote.ts`, `src/context/global-sync/bootstrap.ts`, and `src/context/server-session-reducer.ts` (commit `9a914b57`, 2026-07-26) immediately after the 2026-07-26 upstream sync, the three-file trailing-newline / `yield*` → `yield * ` / terminating-semicolon pass on `src/core/config/plugin/provider.ts`, `src/tool/code-mode.ts`, and `src/tool/code-mode-integration.test.ts` (commit `3a9b850b`, 2026-07-29) immediately after the 2026-07-29 upstream sync (commit `719046d4`), and the three-file quote-style-normalisation / trailing-newline pass on `src/permission/PermissionView.ts` (four double-to-single-quote conversions inside an `updatePermissionView(card, permission)` function referencing an unresolved `'utils'` bare-module import and an undeclared `syncDescription` free identifier), `src/tool/BaseSearchToolView.ts` (a trivially-infinite-recursive `bindHeader(parts)` function with an implicit-`any` parameter), and `src/tool/PatchBody.ts` (a top-level `return` statement — a `SyntaxError` in ES modules — inside an `if (diffLines.length > DIFF_MAX_LINES)` block with three undeclared identifiers and a `./DiffOverflow` import missing the mandatory `.js` extension per `NodeNext`) — commit `36ac95b2`, 2026-08-01, immediately after the 2026-08-01 upstream sync (commit `b8b9f01b`, version bump `1.18.17` → `1.18.18`) — all remain orphan stubs and are recorded in the corresponding `CHANGELOG.md` `### Fixed` entry as autohealing candidates. When writing new code, run `npm run format` locally to avoid these no-op fix-up commits from the autohealer. Note that orphan stubs emitted by the daily upstream sync (single-file scaffolds at non-canonical paths under `src/`, importing missing namespaces or referencing undeclared symbols such as `EventHandler`, `FetchOptions`, or the non-existent `'core'`, `'session'`, `'plugin'` packages, or referencing missing sibling directories such as `../handlers/openai`) routinely receive these formatting fix-ups in the commit immediately following the sync; they do not indicate that the stub is wired into the runtime. Verify the canonical implementation path before treating an auto-fixed file as a live module -- for tools, the canonical location is always `src/tool/tools/<name>.ts` registered via `src/tool/registry.ts`, never directly under `src/tool/`; for the event bus the canonical location is `src/bus/index.ts`, not `src/event/index.ts`; for sessions it is `src/core/sessionManager.ts`, not `src/session/index.ts`; for configuration it is `src/config/` (`routingConfig.ts`, `userConfig.ts`, `projectContext.ts`), not `src/core/config.ts`; and for HTTP surfaces it is `src/server/` (the documented server-mode entry point in `docs/API.md`), not `src/router/` (which currently holds orphan Express router stubs). Recall that Alexi's sole provider surface is SAP AI Core Orchestration (`src/providers/`); files under `src/router/` that appear to expose an OpenAI-compatible ingress route are upstream-sync scaffolds and are not part of Alexi's runtime.
 
-Most recent worked example on the combined ternary-expand / import-list-collapse / withTimeout-call-collapse / function-signature-expand axis, 2026-10-17, commit `ae502dd2` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a four-file, four-hunk Prettier reflow across unrelated files, every hunk cosmetic. Diff statistics: `4 files changed, 7 insertions(+), 12 deletions(-)`. No semantic change, no new tests. The four hunks exercise four independent sub-axes of the standing convention in a single autoheal pass. (1) **Ternary-expand on an in-loop `const` initialiser** — `src/cli/agent-usage.ts:142-143` inside `aggregateByProject(records)` previously had `const duration = record.endedAt !== undefined ? Math.max(0, record.endedAt - record.startedAt) : 0;` on a single 109-column line; Prettier reflowed it onto two lines with the `=` on its own line and the ternary on an indented continuation. Same expand-direction rule as the 2026-09-23 `context_inspect` Zod schema expansion in `src/tool/tools/context.ts:21-25` applied to a `const` ternary rather than a schema builder chain — a source line that overflows the 100-column `printWidth` ceiling once the surrounding `for` block is counted belongs across multiple lines. Semantic contract of `aggregateByProject` is byte-identical: a record with an `undefined` `endedAt` still contributes `0` to `durationMs`, a record with a non-undefined `endedAt` still contributes `Math.max(0, record.endedAt - record.startedAt)` (so a clock-skew negative delta is still floored to zero), and all four aggregation axes (`runs`, `successes`, `failures`, `durationMs`) on the `agent` struct keyed by `agentKey` are unaffected. (2) **Named-import list collapse** — `src/cli/commands/usage.ts:18-22` previously declared the three-way destructured import from `../agent-usage.js` across six lines (one specifier per indented line with the inline `type AgentUsageRecord` qualifier on its own line); the collapsed single-line form at 93 columns fits under the 100-column ceiling, so Prettier flattened it to `import { aggregateByProject, formatUsageTable, type AgentUsageRecord } from '../agent-usage.js';`. Same collapse-direction rule as the 2026-10-07 `detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer` named-import collapse in `src/config/__tests__/overlay.test.ts:1` and the 2026-10-05 `withCatalogRetry, parseRetryAfter, DEFAULT_CATALOG_RETRY` barrel re-export reflow in `src/providers/modelCatalog.ts:561` — a destructured import list whose braced bindings plus the `from '...'` clause fit under 100 columns belongs on one line. The TS 5.0+ inline-type-only `type AgentUsageRecord` qualifier is preserved verbatim; `verbatimModuleSyntax` elision still names it a type-only specifier at emit time (no runtime cost at `dist/cli/commands/usage.js`). (3) **`withTimeout(...)` call-expression collapse inside a single-flight promise** — `src/mcp/refresh.ts:103-105` inside `ensureFreshToken(serverId, refresh, opts)` previously had `const refreshed = await withTimeout(refresh(), opts.connectTimeoutMs, 'mcp.refresh.timeout');` authored across five lines (opening paren on its own line, three arguments one per line, closing paren on its own indented line); Prettier collapsed it onto a single 90-column line because the three-argument form fits under `printWidth: 100`. Same collapse-direction rule as the 2026-10-12 `dominantLineEnding` ternary collapse in `src/tool/tools/edit.ts:88-89` and the 2026-09-17 `isCurrentExplicit` reflow in `src/core/modelPreference.ts:66-70` — a call expression whose argument list plus the enclosing `const <lhs> = await` prefix fits on one line belongs on one line. The surrounding `try` / `finally` is preserved verbatim: the `finally` block still deletes the single-flight entry from `inflight` so a transient refresh failure does not poison every subsequent attempt (mirrors kilocode `9204aac51`), the `'mcp.refresh.timeout'` label is unchanged (operators continue to see the same marker in timeout error messages), and the single-flight contract that two concurrent `ensureFreshToken(serverId, ...)` callers share the SAME in-flight promise is byte-identical. (4) **Exported function-signature expand with named-arrow return type** — `src/providers/gemini-retry.ts:55-57` previously had `export function extractFinishReason(res: GeminiLikeResponse | undefined | null): string | undefined {` on a single 102-column line that overflowed the 100-column ceiling by two columns; Prettier reflowed it onto three lines with the function keyword and name on the first line, the single parameter `res: GeminiLikeResponse | undefined | null` indented onto the second line, and the `): string | undefined {` closing-paren-plus-return-type on the third line. Same expand-direction rule as the 2026-10-15 `getServerCapabilities?` function-type return union expansion in `src/mcp/client.ts:1069-1080` (immediately below), applied to a top-level exported function signature rather than a structural member. Semantic contract of `extractFinishReason` is byte-identical: `extractFinishReason(null)` and `extractFinishReason(undefined)` still return `undefined`, `candidates[0].finishReason` string wins over the top-level `response.finishReason` field (Gemini SDK shape ordering), the `typeof primary === 'string' && primary.length > 0` guard still rejects empty strings so an empty finish reason does not mask a legitimate one, and the orchestration-adapter fallback (`res.finishReason`) still covers SAP AI Core Vertex deployments where the response is flattened without a `candidates[]` wrapper. Convention reminder: when the exported-function prefix (`export function `) pushes an otherwise 90-ish-column signature over the ceiling, Prettier will expand the signature — do NOT hand-author a 101+ column form, because the pre-commit `prettier --write` hook will reflow it on the next commit and generate a spurious follow-up `style(ci)` auto-fix pass.
+Most recent worked example on the synchronous `expect(() => fn()).toThrow(/.../)` chain-collapse axis, 2026-10-25, commit `0e133ffa` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a single-file, one-hunk Prettier reflow on `src/mcp/__tests__/oauth-callback.test.ts` — the Vitest suite that pins `assertHttpUrl` and `startMcpOAuth` in `src/mcp/oauth-callback.ts`, the MCP OAuth authorization-URL scheme allow-list that rejects `file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`, and UNC-style paths before Alexi hands the URL to the OS opener. Inside the `'rejects dangerous schemes with http/https hint'` case at `src/mcp/__tests__/oauth-callback.test.ts:33` the assertion was hand-authored across three lines (`expect(() => assertHttpUrl(bad, 'authorization_endpoint')).toThrow(\n  /must use http or https/\n);` — receiver on its own line, matcher argument on an indented continuation, closing `);` on a third line) and Prettier collapsed it onto a single 99-column line because the collapsed form fits under `printWidth: 100`. Same collapse-direction rule as the 2026-10-05 `expect(...).rejects.toThrow('cancelled')` reflow in `src/providers/__tests__/catalog-retry.test.ts:111-116` (commit `72b81ea6`, documented in the next entry below) applied to a synchronous `expect(() => fn()).toThrow(regex)` chain rather than the `expect(...).rejects.toThrow(...)` async-variant — the receiver call takes a thunk `() => fn()` rather than an awaited promise, but the chain-shape under `printWidth: 100` is identical. Diff statistics: `1 file changed, 1 insertion(+), 3 deletions(-)`. Semantic contract of the suite is byte-identical: the five-element dangerous-scheme fixture loop at `src/mcp/__tests__/oauth-callback.test.ts:26-32` still iterates `['file:///etc/hosts', 'javascript:alert(1)', 'ms-msdt:/id PCWDiagnostic', 'data:text/html,<script>alert(1)</script>', 'vbscript:msgbox(1)']`; each entry still trips `assertHttpUrl(bad, 'authorization_endpoint')` with a thrown message matching `/must use http or https/`; the sibling empty / non-URL cases (lines 20-23) that assert the field label (`'authorization_endpoint'`, `'token_endpoint'`) surfaces in the error message are untouched; the UNC-path cases (lines 37-44) that also pin `/must use http or https/` on `\\\\server\\share\\file.html` and `//server/share/file.html` are untouched; and the `describe('startMcpOAuth', ...)` block (lines 47-58) that pins the pre-spawn scheme rejection on `startMcpOAuth('file:///etc/hosts')` / `startMcpOAuth('javascript:alert(1)')` / `startMcpOAuth('')` and the field-label surfacing via the `{ label: 'authorization_endpoint' }` option is byte-identical. The production code under `src/mcp/oauth-callback.ts` and the module docstring that scopes the suite ("We only exercise the scheme allow-list here — actually spawning `xdg-open` in CI would be flaky and platform-specific.") are unchanged. No new tests. Convention reminder: a synchronous `expect(() => fn(arg1, arg2, ...)).toThrow(/regex/)` or `expect(() => fn(...)).toThrow('literal')` chain that fits on one line under `printWidth: 100` belongs on one line — do NOT hand-author the receiver-on-one-line / argument-on-continuation / closing-`);`-on-third-line form when the whole call fits, because the pre-commit `prettier --write` hook (see `lint-staged` config above) will collapse it on the very next commit and generate a spurious follow-up `style(ci)` auto-fix pass. The same rule applies to the async variants `expect(fn()).rejects.toThrow(...)` and `expect(promise).rejects.toBe(...)` — see [`docs/TESTING.md` under **Test File Formatting** point 2](./TESTING.md#test-file-formatting) for the full worked-example table (including the 2026-09-26 `openUrl('ms-msdt:/id PCWDiagnostic')` reflow in `src/core/open.test.ts:19` and the 2026-10-07 `tests/config/__tests__/overlay.test.ts` three-binding named-import collapse).
+
+Prior worked example on the combined ternary-expand / import-list-collapse / withTimeout-call-collapse / function-signature-expand axis, 2026-10-17, commit `ae502dd2` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a four-file, four-hunk Prettier reflow across unrelated files, every hunk cosmetic. Diff statistics: `4 files changed, 7 insertions(+), 12 deletions(-)`. No semantic change, no new tests. The four hunks exercise four independent sub-axes of the standing convention in a single autoheal pass. (1) **Ternary-expand on an in-loop `const` initialiser** — `src/cli/agent-usage.ts:142-143` inside `aggregateByProject(records)` previously had `const duration = record.endedAt !== undefined ? Math.max(0, record.endedAt - record.startedAt) : 0;` on a single 109-column line; Prettier reflowed it onto two lines with the `=` on its own line and the ternary on an indented continuation. Same expand-direction rule as the 2026-09-23 `context_inspect` Zod schema expansion in `src/tool/tools/context.ts:21-25` applied to a `const` ternary rather than a schema builder chain — a source line that overflows the 100-column `printWidth` ceiling once the surrounding `for` block is counted belongs across multiple lines. Semantic contract of `aggregateByProject` is byte-identical: a record with an `undefined` `endedAt` still contributes `0` to `durationMs`, a record with a non-undefined `endedAt` still contributes `Math.max(0, record.endedAt - record.startedAt)` (so a clock-skew negative delta is still floored to zero), and all four aggregation axes (`runs`, `successes`, `failures`, `durationMs`) on the `agent` struct keyed by `agentKey` are unaffected. (2) **Named-import list collapse** — `src/cli/commands/usage.ts:18-22` previously declared the three-way destructured import from `../agent-usage.js` across six lines (one specifier per indented line with the inline `type AgentUsageRecord` qualifier on its own line); the collapsed single-line form at 93 columns fits under the 100-column ceiling, so Prettier flattened it to `import { aggregateByProject, formatUsageTable, type AgentUsageRecord } from '../agent-usage.js';`. Same collapse-direction rule as the 2026-10-07 `detectShadowedWrite, formatShadowedWriteWarning, type OverlayLayer` named-import collapse in `src/config/__tests__/overlay.test.ts:1` and the 2026-10-05 `withCatalogRetry, parseRetryAfter, DEFAULT_CATALOG_RETRY` barrel re-export reflow in `src/providers/modelCatalog.ts:561` — a destructured import list whose braced bindings plus the `from '...'` clause fit under 100 columns belongs on one line. The TS 5.0+ inline-type-only `type AgentUsageRecord` qualifier is preserved verbatim; `verbatimModuleSyntax` elision still names it a type-only specifier at emit time (no runtime cost at `dist/cli/commands/usage.js`). (3) **`withTimeout(...)` call-expression collapse inside a single-flight promise** — `src/mcp/refresh.ts:103-105` inside `ensureFreshToken(serverId, refresh, opts)` previously had `const refreshed = await withTimeout(refresh(), opts.connectTimeoutMs, 'mcp.refresh.timeout');` authored across five lines (opening paren on its own line, three arguments one per line, closing paren on its own indented line); Prettier collapsed it onto a single 90-column line because the three-argument form fits under `printWidth: 100`. Same collapse-direction rule as the 2026-10-12 `dominantLineEnding` ternary collapse in `src/tool/tools/edit.ts:88-89` and the 2026-09-17 `isCurrentExplicit` reflow in `src/core/modelPreference.ts:66-70` — a call expression whose argument list plus the enclosing `const <lhs> = await` prefix fits on one line belongs on one line. The surrounding `try` / `finally` is preserved verbatim: the `finally` block still deletes the single-flight entry from `inflight` so a transient refresh failure does not poison every subsequent attempt (mirrors kilocode `9204aac51`), the `'mcp.refresh.timeout'` label is unchanged (operators continue to see the same marker in timeout error messages), and the single-flight contract that two concurrent `ensureFreshToken(serverId, ...)` callers share the SAME in-flight promise is byte-identical. (4) **Exported function-signature expand with named-arrow return type** — `src/providers/gemini-retry.ts:55-57` previously had `export function extractFinishReason(res: GeminiLikeResponse | undefined | null): string | undefined {` on a single 102-column line that overflowed the 100-column ceiling by two columns; Prettier reflowed it onto three lines with the function keyword and name on the first line, the single parameter `res: GeminiLikeResponse | undefined | null` indented onto the second line, and the `): string | undefined {` closing-paren-plus-return-type on the third line. Same expand-direction rule as the 2026-10-15 `getServerCapabilities?` function-type return union expansion in `src/mcp/client.ts:1069-1080` (immediately below), applied to a top-level exported function signature rather than a structural member. Semantic contract of `extractFinishReason` is byte-identical: `extractFinishReason(null)` and `extractFinishReason(undefined)` still return `undefined`, `candidates[0].finishReason` string wins over the top-level `response.finishReason` field (Gemini SDK shape ordering), the `typeof primary === 'string' && primary.length > 0` guard still rejects empty strings so an empty finish reason does not mask a legitimate one, and the orchestration-adapter fallback (`res.finishReason`) still covers SAP AI Core Vertex deployments where the response is flattened without a `candidates[]` wrapper. Convention reminder: when the exported-function prefix (`export function `) pushes an otherwise 90-ish-column signature over the ceiling, Prettier will expand the signature — do NOT hand-author a 101+ column form, because the pre-commit `prettier --write` hook will reflow it on the next commit and generate a spurious follow-up `style(ci)` auto-fix pass.
 
 Prior worked example on the combined union-type-expand / ternary-collapse axis, 2026-10-15, commit `f0dd5b42` (`style(ci): auto-fix lint/format issues [alexi-bot]`): a single-file, one-hunk Prettier reflow on `src/mcp/client.ts` — the `McpClientManager.fetchInitialMetadata(serverName, client)` helper that gates the optional `resources/list` and `prompts/list` probes behind the MCP server's advertised capabilities, per `alexi_change` upstream `fbf5f16`. Two independent Prettier sub-axes landed in the same hunk at `src/mcp/client.ts:1069-1080`. (1) **Expand-direction on the structural `getServerCapabilities?` function-type return union** — the optional accessor on the structural `c` cast (`getServerCapabilities?: () => { prompts?: unknown; resources?: unknown; } | undefined;`) was authored as a single line and Prettier reflowed it onto the five-line union-leading form with the `| {` arm, the indented `prompts?: unknown;` / `resources?: unknown;` body, and the trailing `| undefined` arm each on their own line. Same expand-direction rule as the 2026-09-23 `context_inspect` Zod schema expansion in `src/tool/tools/context.ts:21-25` applied to a function-type-return union rather than a schema builder chain — a source line that overflows the 100-column `printWidth` ceiling once the surrounding block is counted belongs across multiple lines in the fluent arm-leading form. (2) **Collapse-direction on the `const caps` ternary** — the paired `const caps = (typeof c.getServerCapabilities === 'function' ? c.getServerCapabilities() : undefined) ?? {};` guard, which calls the SDK-optional accessor through a `typeof`-function pre-check (so a `Client` build that omits the method entirely does not throw) and falls back to an empty object (so the two downstream `caps.resources !== undefined` / `caps.prompts !== undefined` probe gates on `src/mcp/client.ts:1082` and `:1092` are safe to read without a defensive `?.`), was reflowed from a three-line hand-authored form onto a two-line form with the whole parenthesised ternary plus the `?? {}` fallback on the second line. Same collapse-direction rule as the 2026-10-12 `dominantLineEnding` reflow in `src/tool/tools/edit.ts:88-89` applied to a `const` initialiser whose right-hand side is a parenthesised ternary followed by a nullish-coalescing fallback. Diff statistics: `1 file changed, 8 insertions(+), 7 deletions(-)`. Semantic contract is byte-identical: the capability-gated probe behaviour (skip the `resources/list` probe entirely when the server has NOT advertised `resources` in its initialize response; same for `prompts`) still fires exactly as before, the `withRequestTimeout(serverName, 'resources/list', ...)` / `withRequestTimeout(serverName, 'prompts/list', ...)` wrappers at `src/mcp/client.ts:1084-1098` still catch and `logger.debug` every failure so informational probes never block a successful connect, and the terminal `Promise.all([toolsPromise, ...optionalMetadata])` at `src/mcp/client.ts:1105` still awaits the required tool list AND the optional probes so a slow-listing resource endpoint cannot leak timers past the connect call. No new tests were added — the existing `tests/mcp/client.test.ts` cases that pin the capability-gated probe behaviour continue to pass. Convention reminder: when a structural cast's function-type return declares an inline object union (`() => { ... } | undefined`), prefer the Prettier-expanded arm-leading form from the start if the single-line form would overflow `printWidth: 100` once the surrounding block (the `const c = client as unknown as { ... };` cast wrapping it) is indented — hand-authoring the compact form will always produce a follow-up `style(ci)` auto-fix pass.
 
@@ -3323,6 +3462,76 @@ adding a new call site that reads the probe header or extending the classifier:
   before entering the transport handshake, which is where the retry
   budget starts being spent. Pushing the check into the transport layer
   would defeat that separation.
+
+## MCP Error Classification (`src/mcp/error-classifier.ts`)
+
+Added in commit `dd4dd7c9` (`feat(tools): add MCP error classification with
+actionable hints for connection failures`). The classifier replaces the previous
+"stringly-typed" MCP connection failure path: an `McpConnection` now exposes
+`errorCategory: McpErrorCategory` (stable literal union of
+`missing-command | permission-denied | not-a-directory | timeout |
+connection-refused | connection-reset | auth-failed | missing-env-var |
+transient-network | unknown`) and `errorHint: string` (one-line actionable
+hint pointing at the exact `mcp-servers.json` field or operator action to fix
+the cause) alongside the pre-existing free-form `error` string. The classifier
+is pure, lives in `src/mcp/error-classifier.ts`, and is called from both the
+retry loop and the `proc.on('error', ...)` path of `McpClientManager`. When
+extending it or adding a new call site:
+
+- **Keep the classifier a pure function.** `classifyMcpError(error, config)`
+  reads only its two arguments and never performs I/O, SDK calls, or logging.
+  The purity is what lets log formatters, status serializers, and tests call
+  it freely without stubbing. Do NOT add a provider lookup, a file read, or
+  a bus event emission here — the manager's call site owns side effects.
+- **Do NOT import the named error classes from `./client.ts` into the
+  classifier.** `client.ts` imports `error-classifier.ts`, so a reverse import
+  would create a circular dependency. The classifier recognises
+  `McpConnectAuthError` and `McpConnectTimeoutError` by `err.name` /
+  message substring, which is deliberate. If you add a new named error class
+  in `client.ts`, extend the classifier's name/substring switch rather than
+  the import graph.
+- **Check Node syscall `code` first, HTTP status second, name/message
+  third.** The signal order in `classifyMcpError` is load-bearing: `code`
+  is the single most reliable field when present (set by `child_process.spawn`
+  and `net`), HTTP status fields come next (`status` / `statusCode` /
+  `httpStatus` — checked in that order so SDK layers that use different
+  conventions all resolve), and the name / message branches run only when
+  the structured signals are absent. Preserve the ordering when adding
+  categories so a stray message substring never beats a well-formed `code`.
+- **Hints MUST quote the exact config field they point at.** The hint
+  strings are the operator-facing contract — tests use `expect(hint).toContain
+  ("'timeout.startup'")` to pin them. Use single quotes around the field name
+  (`'command'`, `'apiKey'`, `'cwd'`, `'env'`, `'timeout.startup'`,
+  `'connectTimeout'`) so the regex-grep-based assertions keep working.
+  ASCII only; no trailing punctuation beyond a terminating `.`.
+- **Clear `errorCategory` and `errorHint` on a successful connect.** The
+  manager clears all three fields (`error`, `errorCategory`, `errorHint`)
+  together when the connection flips to `connected`. If you add a new
+  error-shaped field to `McpConnection`, follow the same pattern — a
+  reconnect must not leave a stale verdict attached.
+- **Both the `error` string suffix AND the structured fields are surface
+  contracts.** The manager populates `connection.error` as
+  `` `${formatConnectError(name, err)} Hint: ${hint}` `` so existing substring
+  matchers (tests, log scrapers, CLI greps) keep working while gaining the
+  actionable hint as an inline suffix. The structured fields are the
+  forward-compatible surface for the TUI and `alexi mcp status`. Do NOT
+  drop the `Hint:` suffix in a cleanup pass, and do NOT remove the
+  structured fields from `getStatus()` — both are tested, both are read
+  by downstream code.
+- **The classifier is NOT the retry policy.** `classifyMcpError` returns
+  a UX category; `classifyConnectError` in `client.ts` returns
+  `'transient' | 'permanent'` and drives retry budgeting. The two share
+  no code intentionally — the retry policy must stay narrow (network
+  blips, HTTP 5xx, startup timeouts) while the UX classifier can grow
+  freely without changing retry behaviour. Never merge the two.
+- **Tests belong in `tests/mcp/error-classifier.test.ts` (unit) and the
+  `populates classified error category + hint on a startup-timeout
+  failure` case in `tests/mcp/client-integration.test.ts` (integration).**
+  Add a unit case for every new `McpErrorCategory` string literal pinning
+  both the category and at least one substring of the hint; extend the
+  integration case ONLY when the new category requires a new fixture
+  behaviour (e.g. a real `ECONNREFUSED` against a non-listening port).
+  See [TESTING.md — Testing MCP error classification](TESTING.md#testing-mcp-error-classification-testsmcperror-classifiertestts).
 
 ## Session Retention Policy (`getConfigSessionRetention` / `setConfigSessionRetention`)
 
@@ -4354,6 +4563,340 @@ If you extend `parseSchedule` (e.g. add `"weekly on Monday at 9am"`):
 4. If the new form needs a new fallback (e.g. a per-schedule default time), do NOT put it in `resolveWorkspaceId` — that helper is workspace-only. Add a dedicated helper next to `parseSchedule`.
 
 See [docs/TESTING.md — Testing the todowrite scheduled-todo promotion hook](TESTING.md#testing-the-todowrite-scheduled-todo-promotion-hook-srctooltoolstodowritets) for the regression surface.
+
+## Structured MCP startup logging (`src/mcp/startup-logger.ts`)
+
+Introduced by commit `0f3be963 feat(core): structured MCP startup logging with phases and stderr context`. The module gives `McpClientManager.connect` a tiny, stateless logger facade so every stdio and remote connect emits a parseable sequence of phase events, with captured server stderr tails appended to failures. Reference: [docs/TESTING.md — Testing structured MCP startup logging](TESTING.md#testing-structured-mcp-startup-logging-testsmcpstartup-loggertestts-testsmcpclient-integrationtestts).
+
+### Port-maintenance invariants
+
+- **The four-phase vocabulary is the operator contract.** `McpStartupPhaseName = 'spawn' | 'initialize' | 'capabilities' | 'ready'` in `src/mcp/startup-logger.ts:50`. Each phase has a specific meaning: `spawn` = process fork (stdio) OR URL reachability `HEAD` probe (remote); `initialize` = MCP `initialize` handshake over the transport; `capabilities` = `tools/list` plus optional `resources/list` / `prompts/list` probes; `ready` = all phases complete, connection visible via `getConnection()`. Adding a new phase requires updating the enum, every call site in `src/mcp/client.ts`, the integration-suite expected sequence in `tests/mcp/client-integration.test.ts`, AND any downstream grep rules / dashboards. Reviewers who see a PR that introduces a `verify` / `authenticate` / `discover` phase without updating the integration test's seven-element expected array should block it — the test is the contract.
+- **The log line shape is the parseable surface.** Every structured line matches `MCP startup [<server>] phase=<phase> attempt=<n> (started|completed in <ms>ms|failed: ...)`. Operator tooling (grep rules, log dashboards, future `alexi logs mcp` subcommand) parses this shape with a single regex. Cosmetic rewording of helper functions is fine, but changes to the prefix (`MCP startup`), the bracketed server tag, or the `phase=` / `attempt=` key names break every consumer. The unit suite pins the exact strings; do not relax the assertions to `.toContain(...)` just to make a shape change easier to land.
+- **Level selection is intentional.** `logPhaseStart` and `logPhaseEnd` render at `info` for first attempts and `debug` for retries (`attempt > 1`). This keeps the normal connect flow visible without debug logging while preventing a retry storm from flooding operator logs. `logStartupError` is always `error`; `logRetryScheduled` is always `warn`. Reviewers who see a PR that flips a phase-end to `warn` so retries appear by default should push back — the "retries that eventually succeed must not spam logs" contract is what the level downgrade exists to deliver.
+- **Per-connection stderr buffering is scoped and bounded.** `McpClientManager.stderrBuffers: WeakMap<McpConnection, string>` captures stderr chunks during the stdio `spawn` phase. Reset at the start of every attempt (via `this.stderrBuffers.set(connection, '')` at the top of `attemptConnect`), discarded on success (via `this.stderrBuffers.delete(connection)` after the `ready` phase-end), and tail-trimmed to 2000 bytes inside `tailStderr` before appending to a `logStartupError` line. Do NOT widen the cap without a matching change in `tailStderr`'s `maxBytes` default — a `--verbose` MCP server can blow up a single log line into megabytes of install trace. Do NOT keep the buffer alive past `connected`; the `WeakMap` scoping is what guarantees the capture does not leak memory on long-running sessions.
+- **Carry-over between attempts is a correctness bug.** The reset at the top of `attemptConnect` is load-bearing: without it, stderr printed during attempt 1 would misattribute to the attempt-2 failure line. A refactor that moves the reset into `connectStdio` only (and leaves `connectRemote` carrying old state) breaks the remote path when it eventually gets a stderr source. Keep the reset at the single top-of-attempt point.
+- **Phase markers wrap transport-specific helpers, not vice versa.** `connectStdio` emits `spawn:start` / `spawn:end` / `initialize:start` / `initialize:end` locally so the handshake sub-phase is visible even when `connectStdio` has multiple side effects (spawn, listener registration, transport construction, SDK `connect`). `connectRemote` reuses the same vocabulary — the `HEAD` probe is logged under `spawn`, the not-yet-wired transport throws under `initialize`. Do NOT hoist the markers up to a single site in `attemptConnect`: that would collapse the sub-phase visibility that the whole module exists to provide.
+- **The `ready` phase-end is a summary, not a fourth sub-phase.** The outer connect loop emits `logPhaseEnd({ phase: 'ready', startedAt: attemptStartedAt }, Date.now() - attemptStartedAt)` on success. There is no corresponding `ready:started` — `ready` is the "connect fully done" signal with the overall wall-time. A refactor that adds a `ready:started` marker would duplicate the first `spawn:started` and break the integration suite's expected seven-element sequence.
+- **`logStartupError` is called at every throw boundary.** Every path that fails must route through `logStartupError(server, phase, error, stderr?)` BEFORE re-throwing. The current call sites are: the `AbortController` timeout branch in `connectStdio` (phase=initialize, with stderr tail), the SDK error branch in `connectStdio` (phase=initialize, with stderr tail), the `withConnectTimeout` catch in `connectRemote` (phase=spawn), the not-yet-wired transport throw in `connectRemote` (phase=initialize, no stderr), and the capabilities fetch catch in `attemptConnect` (phase=capabilities, with stderr tail). A refactor that drops one of these is an operator-visibility regression — the error would still be re-thrown to the caller, but it would never appear in the structured log stream.
+- **`formatError` indirection matters for non-`Error` throwables.** `logStartupError` routes `error` through `formatError` from `src/utils/logger.ts` so a raw string throw, a Zod issue, or a non-Error payload still renders as a readable `failed: <message>` suffix. Do NOT replace this with a direct `String(error)` call — the `formatError` helper preserves the `err.message` branch for real `Error` instances, which is what operators actually need.
+- **The retry log is paired, not replaced.** `logRetryScheduled(server, nextAttempt, delayMs)` is emitted alongside — not instead of — the pre-existing free-form `logger.warn('MCP server ... retrying in ...')` line. The two surfaces have different consumers: humans read the free-form line, log consumers tracking the `MCP startup [...]` vocabulary parse the structured one. Removing either breaks a consumer.
+
+### Testing invariants
+
+- **Mock `src/utils/logger.js` at the module boundary, including `formatError`.** The logger module exports both `logger` and `formatError`. The `vi.mock` factory must return both — otherwise `logStartupError` imports a real `formatError` that walks the import graph and the test either fails on hoist order or stringifies errors differently from production. See `tests/mcp/startup-logger.test.ts` for the canonical mock setup.
+- **Pin exact strings in the unit suite.** The structured prefix (`MCP startup [<server>] phase=<phase> attempt=<n>`) and suffixes (`started`, `completed in <ms>ms`, `failed: <message>`, `stderr: <tail>`, `retrying in <ms>ms (attempt <n>)`) are the operator contract. Unit assertions must use `.toBe(...)` for the exact-match cases, not `.toContain(...)`. A reviewer who sees unit assertions relaxed to substring matching should push back — the shape IS the contract.
+- **Pin ordered phase sequences with `.toEqual([...])` in integration tests.** `expect(phaseEvents).toHaveLength(7)` would pass under a reorder that moved `capabilities:completed` before `initialize:completed`. The ordered array catches both reordering and missing / duplicated events; a length-only check is a correctness regression.
+- **Integration cases cap at 15s.** The pre-existing MCP integration suite uses `}, 15000)` on every case. Structured-logging cases follow the same cap so a hung spawn fails fast instead of soaking the 60s Vitest default. A reviewer who sees a case bumped to 60s to "handle slow CI" should ask whether the fixture is actually hanging — the fixture is driven by `STARTUP_DELAY_MS` so a slow fixture is intentional and should either stay inside 15s or move to a dedicated slow-suite.
+- **Do NOT assert on numeric durations in integration tests.** The exact `completed in Xms` number is non-deterministic across runners. Extract only the `started` / `completed` discriminator; the exact ms formatting is covered by the unit case that passes a fixed `234` duration.
+- **Extend `tests/fixtures/slow-mcp-server.js` rather than minting new fixtures.** The fixture is driven entirely by `STARTUP_DELAY_MS` (0 for fast, N > 0 for slow, N < 0 for hung). Adding scenario-specific fixtures proliferates process-startup cost and makes the suite flakier under cold CI.
+
+### What a new phase needs
+
+If you extend `McpStartupPhaseName` (e.g. add a `verify` phase between `initialize` and `capabilities` for a future auth-handshake step):
+
+1. Update the enum in `src/mcp/startup-logger.ts` and the JSDoc that describes each phase. The JSDoc is the authoritative reference for the vocabulary — keep it in sync.
+2. Add the matching `logPhaseStart` / `logPhaseEnd` / `logStartupError` calls in `src/mcp/client.ts` at the transport layer closest to the new work. Do NOT hoist them into `attemptConnect` — the per-transport placement is what makes the sub-phase visible.
+3. Update the integration-suite expected sequence in `tests/mcp/client-integration.test.ts` (the seven-element array). The ordered sequence IS the contract, and a reviewer who sees a phase added without a matching test update should block the PR.
+4. Add a unit case in `tests/mcp/startup-logger.test.ts` that pins the exact line shape for the new phase name. The level-selection cases cover `info` / `debug` / `warn` / `error` already, so the new case only needs to exercise the string formatter.
+5. Document the new phase in the "Phase vocabulary" bullet of the CHANGELOG entry so operators tracking the structured stream know a new value may appear.
+
+### Reviewer checklist
+
+- Does the PR touch `src/mcp/client.ts` without also touching `tests/mcp/client-integration.test.ts`? If yes, verify the expected phase sequence still holds — a silent reorder breaks downstream dashboards even if all tests pass.
+- Does the PR widen the `tailStderr` cap? If yes, check that long install traces from `npx -y` fixtures do not blow up log lines in operator-facing environments.
+- Does the PR add a new throw path in `connectStdio` / `connectRemote` / `attemptConnect`? If yes, verify it routes through `logStartupError` with the correct `phase` argument before re-throwing. A missing call is an operator-visibility regression that no unit test will catch.
+
+## Plugin activation gate contract (`PluginManager.ensureActivated` / `checkToolActivation`)
+
+Added by commit `14b15b42 fix(core): add plugin activation gate before tool dispatch` (ports upstream opencode PR #51133). Before this change, a plugin whose async `onLoad` lifecycle hook had not yet settled could have one of its advertised tools dispatched by the agent loop — the registry entry was live-but-unactivated and the dispatcher returned a bare `tool not found`. The model, with no way to tell this apart from a typo, retried or hallucinated a different tool instead of waiting a few milliseconds. The fix is a three-piece gate; a refactor that drops any piece must still preserve the public contract documented below.
+
+### Invariants a reviewer must preserve
+
+1. **`PluginState.activating` tracks the hook, not the registration.** `activating` is `true` iff `plugin.onLoad` is currently being awaited by `load()`. Flipping it earlier (e.g. before context construction) or later (e.g. after `registeredTools` is populated) widens the race window the gate was built to close. The paired `activationPromise` is the actual in-flight promise, shared across concurrent `ensureActivated` callers so one `onLoad` is awaited once.
+2. **The flag MUST be cleared in a `finally` block.** A thrown `onLoad` cannot leave the plugin in a perpetually-activating state. `load()`'s own catch block removes the plugin from `this.plugins`, so no stale `PluginState` entry survives — but the `finally` is the belt-and-braces guarantee that even a mid-cleanup error path cannot deadlock the gate. Any refactor that moves the flag clear OUTSIDE a `finally` is a correctness regression.
+3. **`ensureActivated` uses `Promise.allSettled`, not `Promise.all`.** One failing plugin MUST NOT block the gate for the other plugins — the failing plugin is already removed from the registry by `load()`'s catch, so the gate just needs every in-flight hook to *settle*. Switching to `Promise.all` would make a single thrown `onLoad` propagate out through every `ensurePluginsActivated()` call at the top of every agent turn.
+4. **Disabled plugins are skipped.** `ensureActivated` and `isActivated` MUST both `continue` on `!state.enabled`. Disabled plugins are not advertised to the model, so blocking on their activation would be a dead stall — the operator disabled them specifically to keep them out of the dispatch path.
+5. **`findPluginForTool` considers BOTH `state.registeredTools` AND `state.plugin.tools?.some(...)`.** The second branch is the actual race surface: the model knows the tool name because the plugin advertised it in its manifest, but the registry entry is not yet live. A refactor that drops the manifest-level fallback would make the gate silently open the dispatch window it was supposed to close.
+6. **`checkToolActivation` lazy-imports `getPluginManager`.** The tool registry MUST stay usable in minimal environments (unit tests, one-shot scripts) that never initialise the plugin system. A top-level `import { getPluginManager } from '../plugin/index.js'` would create a hard dependency and break the "fast-path null return" semantics for every call site that runs without plugins loaded.
+7. **The guard's fail-safe is "do not block dispatch".** Any thrown error inside `checkToolActivation` (plugin module unavailable, lazy import failure) must `return null`, not propagate. The gate is a readiness check, not an authorisation check — a bug in the gate itself must not take down the agent loop.
+8. **The error string names the plugin, not just the tool.** `Tool '<name>' is not ready (plugin '<pluginName>' still activating)` is the actionable form. Dropping the plugin name degrades the fix to the pre-change state (model sees a bare "tool not ready" and cannot distinguish it from an actual registry miss).
+
+### What a new call site needs
+
+If you add a new entry point that dispatches tools (a new agent harness, a background job runner, a REPL extension), it MUST honour the gate the same way `agenticChat` does:
+
+1. Call `await ensurePluginsActivated()` from `src/plugin/index.js` AFTER `registerBuiltInTools()` and BEFORE entering the dispatch loop. The call is idempotent and zero-cost after startup, so there is no reason to skip it.
+2. In the dispatch helper, call `await checkToolActivation(toolCall.function.name)` from `src/tool/registry.js` BEFORE JSON-parsing the arguments and BEFORE calling `tool.execute`. On a non-null return, surface the error string straight to the model (same `tool_end` progress event shape `agenticChat` uses) and skip the rest of the dispatch.
+3. Do NOT re-implement the gate inline. The two helpers are the public surface; a hand-rolled scan over `PluginManager.plugins.values()` from a new call site freezes the current internal shape into a second place that must be kept in sync with every refactor.
+4. Do NOT emit a permission prompt from the gate. The gate is a readiness check; `getPermissionManager()` still runs independently afterwards.
+
+See [docs/ARCHITECTURE.md — Plugin Activation Gate (`src/plugin/index.ts`, `src/tool/registry.ts`)](ARCHITECTURE.md#plugin-activation-gate-srcpluginindexts-srctoolregistryts) for the sequence diagram and [docs/TESTING.md — Testing the plugin activation gate (`tests/plugin/activation-race.test.ts`)](TESTING.md#testing-the-plugin-activation-gate-testspluginactivation-racetestts) for the seven invariants pinned by the regression suite.
+
+## Best-effort parallel shutdown (`McpClientManager.disconnectAll`)
+
+Introduced by commit `89e7cb7b test(tests): add integration test for mcp parallel shutdown`. The implementation already lived in `src/mcp/client.ts:1529-1550`; the commit documents the two load-bearing shapes in a 15-line JSDoc and locks them in with a dedicated regression suite at `tests/mcp/parallel-shutdown.test.ts` backed by a configurable mock at `tests/mcp/__mocks__/slow-server.ts`. See [docs/TESTING.md — Testing `McpClientManager.disconnectAll` parallel shutdown](TESTING.md#testing-mcpclientmanagerdisconnectall-parallel-shutdown-testsmcpparallel-shutdowntestts).
+
+### Port-maintenance invariants
+
+- **`Promise.allSettled`, not `Promise.all`, not sequential `for ... await`.** Shutdown is a best-effort cleanup path and must always complete, even if a misbehaving transport throws partway through. `Promise.all` would short-circuit on the first rejection and strand the remaining servers; a sequential loop would serialise shutdown so a single slow peer (SAP corporate network can trivially add 5-10 s per MCP server on tear-down) blocks the rest. The 15-line docblock on `disconnectAll` names both regressions explicitly — a reviewer who sees either shape in a PR should block it. The two sibling best-effort shutdown surfaces in the tree (`src/socket-server/shutdown.ts` and the Doctor sweep) use `Promise.allSettled` and sequential `await`-in-`for` respectively for different, documented reasons; do not cross-wire them.
+- **Snapshot the names up-front via `Array.from(this.connections.keys())`.** `disconnect(name)` mutates `this.connections` via `this.connections.delete(name)` (`src/mcp/client.ts:1522`). Iterating the live `keys()` iterator while removing entries in parallel would skip servers non-deterministically — the regression manifests as "one of five servers never has `close()` called" and is unlikely to surface in unit tests that only register two or three connections. The suite's five-server concurrency case is the dedicated regression guard. A reviewer who sees the snapshot collapsed into a direct `this.connections.keys()` loop should block the PR.
+- **Rejections are logged, never re-thrown.** Each rejected `disconnect(name)` call emits `logger.warn(MCP server <name> disconnect failed: <formatError(reason)>)` and the surrounding `disconnectAll` resolves normally. Re-throwing even "just" the first rejection would abort shutdown and leave remaining servers unclosed; converting to `logger.error` is cosmetic and acceptable. Do NOT swallow the log entirely — the warn line is what tells operators which transport misbehaved on tear-down.
+- **The method MUST stay `async` with no caller-visible return value.** The signature is `async disconnectAll(): Promise<void>`. Callers (`resetMcpClientManager()`, the TUI quit path, the headless `alexi chat` drain) await the promise but do not inspect a result shape. A refactor that returns an aggregate `{ succeeded: string[]; failed: string[] }` is a scope creep — if a caller needs that shape, add a dedicated `shutdownStatus()` accessor that reads from `this.connections` AFTER `disconnectAll()` resolves, rather than widening the main method's contract.
+- **No throttling, no backpressure.** `disconnectAll` fires every `disconnect(name)` call in a single `Promise.allSettled` batch. The connection count on a real deployment is bounded (operator config, typically under ten servers), so there is no need for a `p-limit`-style concurrency cap. A reviewer who sees a PR adding `p-limit(5)` or similar should ask what real-world problem it solves — on a ten-server tear-down the kernel is already the bottleneck for the stdio child kills, not the JavaScript event loop.
+- **Idempotency is a load-bearing property.** `disconnect(name)` early-returns when the name is absent from `this.connections` (`src/mcp/client.ts:1510`). This is what makes a second `disconnectAll()` call safe (every entry is already gone from the map), and what makes a `disconnect('never-existed')` call safe. The regression suite pins both axes. A refactor that drops the early-return guard — for instance, to always emit a `logger.info('Disconnected from MCP server: <name>')` line — would make a second `disconnectAll()` call log fake teardown messages and would break the TUI's shutdown idempotency contract.
+- **Keep `forgetCodemodeSupport(name)` inside `disconnect(name)`, not inside `disconnectAll()`.** `disconnectAll` is a trivial wrapper over `disconnect`; the per-server cleanup (close the client, kill the process, delete the map entry, forget the codemode verdict) belongs in `disconnect`. Pulling it up to `disconnectAll` would double the cleanup responsibility and break the single-server `disconnect` path.
+- **The `tests/mcp/__mocks__/slow-server.ts` mock stays independent of `@modelcontextprotocol/client`.** The mock exposes exactly the slice of the SDK `Client` surface `McpClientManager.disconnect` touches — a single `close(): Promise<void>` method plus two public observable fields (`shutdownCalls`, `isShutdown`). A reviewer who tries to extend it to implement `tools/list` or `callTool` is building the wrong thing: those code paths are covered by `tests/mcp/client.test.ts` with the full SDK mock. The slow-server mock exists solely for shutdown-orchestration tests, and keeping it minimal is what makes the suite independent from SDK upgrades.
+- **Do not reuse the `SlowMcpServer` mock for happy-path connection tests.** The mock does not implement handshake, tool discovery, or request dispatch. Tests that need those surfaces should use the existing `@modelcontextprotocol/client` mock pattern documented in [docs/TESTING.md — Testing MCP Client](TESTING.md#testing-mcp-client). Introducing SDK-shaped methods onto `SlowMcpServer` would drift the mock scope and leak into every parallel-shutdown case.
+
+### Reviewer checklist
+
+- Does the PR preserve `Promise.allSettled` + the up-front `Array.from(this.connections.keys())` snapshot?
+- Does `disconnectAll()` still log on rejection and never re-throw?
+- Does the signature stay `async disconnectAll(): Promise<void>` with no return-shape widening?
+- Are the five regression cases in `tests/mcp/parallel-shutdown.test.ts` still green? (Concurrency, fault tolerance, idempotency, empty-map, repeated-disconnect.)
+- Does the mock in `tests/mcp/__mocks__/slow-server.ts` stay independent of `@modelcontextprotocol/client`?
+
+## Per-server shutdown timeout (`McpClientManager.disconnect`)
+
+Introduced by commit `d9d7142e feat(core): per-server shutdown timeout for MCP disconnect` (resolves issue #2160). Companion to the parallel-teardown contract above: `disconnectAll` makes shutdown best-effort ACROSS SERVERS (`Promise.allSettled` + up-front name snapshot), and the new `DISCONNECT_TIMEOUT_MS = 5000` bound in `src/mcp/client.ts:62` + the race inside `disconnect` at `src/mcp/client.ts:1794-1830` makes shutdown bounded WITHIN each server. Together, the whole tear-down is bounded by the slowest per-server deadline, not by the slowest server's actual `close()`. Regression suite: [`src/mcp/__tests__/shutdown.test.ts`](TESTING.md#testing-the-per-server-shutdown-timeout-srcmcp__tests__shutdowntestts-issue-2160).
+
+### Port-maintenance invariants
+
+- **The timeout lives inside `disconnect`, not inside `disconnectAll`.** A direct `disconnect(name)` call (the TUI "disconnect this server" menu, a Doctor sweep, a one-off test teardown) must get the same bounded cleanup as the bulk `disconnectAll` path — a stuck transport is just as damaging to a single-server unmount as it is to a full tear-down. Moving the race up into `disconnectAll` would also widen the surface area of the parallel-teardown method, which is deliberately kept trivial (`Promise.allSettled` over the name snapshot). The 12-line JSDoc on `disconnect` names the location choice explicitly.
+- **`DISCONNECT_TIMEOUT_MS` is an exported constant, not a magic number.** The constant lives at `src/mcp/client.ts:62` and is re-used verbatim both in the production `raceWithTimeout` call and in the regression suite's `expect(DISCONNECT_TIMEOUT_MS).toBe(5000)` guard. Future callers that need a bounded close (e.g. a hypothetical `restart(name)` method) should import and reuse the same deadline rather than hard-coding a second magic number — a deadline rewrite should land in ONE place.
+- **The timer MUST be cleared in a `finally` block in both race outcomes.** `raceWithTimeout` (`src/mcp/client.ts:81-98`) wraps `Promise.race` in `try { return await ... } finally { clearTimeout(timer) }`. The timer handle leak on the "slow but eventually successful close" branch would otherwise multiply across every parallel per-server disconnect — a ten-server tear-down means ten orphaned timers against an event loop that is already trying to exit. Removing the `finally` is a regression even though the happy path "still works" visually.
+- **The sentinel `DisconnectTimeoutError` is `instanceof`-matched, not string-matched.** The `disconnect` catch block uses `error instanceof DisconnectTimeoutError` to split the warning message into the timeout line (`` `MCP server <name> close() exceeded <ms>ms, forcing cleanup` ``) and the generic SDK-error line (`` `Error closing MCP client <name>: <formatError(error)>` ``). Converting to a `message.includes('timeout')` string match would misclassify a real SDK error whose message happens to contain "timeout" (e.g. a Zod `startup timeout` validation failure). Keep the `instanceof` dispatch.
+- **The two warn messages exist for a reason — do not collapse them.** Log scrapers that already grep for `Error closing MCP client` continue to work verbatim because that line is only emitted on NON-timeout errors; a new grep on `exceeded .*ms, forcing cleanup` catches the stuck-transport case specifically. Collapsing both branches into a single `logger.warn('Failed to close MCP client ...')` line destroys the scraper distinction and would silently hide the "transport hung forever, we forced cleanup" signal operators look for.
+- **Forced cleanup MUST run after the race, regardless of outcome.** The `connection.process?.kill()`, `this.connections.delete(name)`, and `forgetCodemodeSupport(name)` calls sit AFTER the `try`/`catch`, not inside the `try`. The semantic contract is "the manager must forget this server" — a hung child is still killed, the entry is still dropped from the connection map, and any cached codemode-support verdict is still invalidated. Moving the cleanup inside the `try` block would skip it on the timeout branch, which is the exact regression this feature exists to prevent.
+- **Short-circuit on `ms <= 0`.** `raceWithTimeout` returns the input promise unraced when `ms <= 0`. The unit tests do not depend on this today, but keeping the branch means a future caller that explicitly wants to disable the deadline (e.g. a debug-mode toggle) can pass `0` without a dedicated code path. Removing the branch is a cosmetic cleanup that locks out a legitimate escape hatch.
+- **No new dependencies.** `raceWithTimeout` is 18 lines of standard-library code (`Promise.race` + `setTimeout` + `clearTimeout`). Resist the temptation to pull in `p-timeout` or `promise-timeout` for a 20-line helper — the dependency surface of the MCP module is intentionally small and the review burden of a new transitive dependency is not worth the saved lines.
+- **Idempotency contract preserved.** After a timeout-driven cleanup, `this.connections.has(name) === false` and `forgetCodemodeSupport(name)` has run. A subsequent `disconnect(name)` early-returns at the `if (!connection) return` guard (`src/mcp/client.ts:1795-1796`), so a double-disconnect from racing shutdown signals is still a no-op. This is what makes the pairing with `disconnectAll` safe: the parallel suite's "repeated disconnect(name) after cleanup is a no-op" case continues to pass unchanged.
+- **The deadline is a bound, not a strict wall-time guarantee.** `raceWithTimeout` cannot interrupt a synchronous CPU-bound `close()` — if the SDK's close implementation ever goes synchronous for 10 s on the main thread, the race's deadline fires only when the event loop next runs. In practice every SDK `close()` is I/O-bound (socket shutdown, pipe flush, child-process wait), so the event loop will always resume quickly enough to honor the 5 s budget. If a future SDK upgrade introduces a synchronous close path, the fix is at the SDK layer, not here.
+
+### Reviewer checklist
+
+- Does the PR preserve `DISCONNECT_TIMEOUT_MS = 5000` as an exported constant?
+- Does `raceWithTimeout` clear its timer in a `finally` block in both outcomes?
+- Does the `disconnect` catch block still split the warn message into the two branches on `instanceof DisconnectTimeoutError`?
+- Does the forced cleanup (`process.kill`, `connections.delete`, `forgetCodemodeSupport`) still run AFTER the race regardless of outcome?
+- Does the suite in `src/mcp/__tests__/shutdown.test.ts` still cover the six cases (constant guard, timeout + forced cleanup, non-blocking peer, kill-on-timeout, no spurious timeout, warn message)?
+- Does the timeout path still log `exceeded .*ms, forcing cleanup`?
+
+## Step-scoped caches must be cleared from BOTH the top-of-loop AND post-loop paths
+
+Introduced by commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, issue #2143). The prompt-hook model resolution cache in `src/hooks/index.ts` is the first per-step cache wired into the `agenticChat` iteration loop. The pattern it uses is deliberate and should be reused verbatim by any future step-scoped cache.
+
+### Why two clear points
+
+The agent loop in `src/core/agenticChat.ts` can exit a step three ways:
+
+1. **Normal continuation** — control falls off the end of the iteration body and `while` re-evaluates. The cleanest path.
+2. **Early `break`** — triggered by the loop detector, mistake tracker, stop hook, malformed-tool-call guard, token-budget guard, or future early-exit conditions. There are at least five such break paths today.
+3. **Normal termination** — `iterations === maxIterations` and the loop condition goes false after the body completes.
+
+A single clear at the top of the loop body handles (1) and the "continue" family. A single clear after the loop handles (3) and (2). Together, both clears guarantee the cache is drained regardless of exit path, without wrapping the ~600-line iteration body in a `try/finally` (which would reach past locals declared inside the body and be hard to maintain as the body evolves).
+
+```typescript
+// src/core/agenticChat.ts
+let previousStepId: string | undefined;
+
+while (iterations < maxIterations) {
+  iterations++;
+
+  if (previousStepId !== undefined) {
+    clearStepCache(previousStepId); // drains the previous step
+  }
+
+  const sessionIdForStep =
+    options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+  previousStepId = `${sessionIdForStep}:${iterations}`;
+
+  // ... step body: model.complete, tool execution, hooks, break conditions ...
+}
+
+if (previousStepId !== undefined) {
+  clearStepCache(previousStepId); // drains the final step after any break
+}
+```
+
+### Rules for future step-scoped caches
+
+- **Compose the step id from `(sessionId, iterationNumber)`.** Falling back to `'default'` for the session id is OK inside a single `agenticChat` invocation (the iteration number disambiguates), but a cache that must be safe across concurrent agent loops MUST require a real session id — document it in the exported type.
+- **Key entries by `${stepId}:${payloadKey}` and clear by `${stepId}:` prefix.** The trailing colon is load-bearing. The naive `startsWith(stepId)` form will collapse `step-1` into `step-10` and drop both. A regression test similar to `tests/hooks/model-cache.test.ts` — `does NOT confuse a step id that is a prefix of another step id` — is a hard requirement; add it in the same commit as the cache.
+- **Store by reference identity.** Hook authors and other consumers rely on the "same resolver output across hits in the same step" contract. Do NOT structural-clone the cached value on return — the cache is cheap because it is a map lookup, not because it reshapes data.
+- **Export two `@internal` helpers.** `_reset<Name>Cache()` for `beforeEach`, and `_<name>CacheSize()` for growth / eviction assertions. The underscored names mark them as test-only; the actual lifetime hook (`clearStepCache` in this case) is the one production code uses. The current trio — `getModelForHook`, `clearStepCache`, `_resetModelResolutionCache`, `_modelResolutionCacheSize` — is the pattern.
+- **`clearStepCache` must be idempotent on an unknown step id.** The post-loop clear can run after a defensive early-exit path has already cleared the step; dropping an unknown id must be a no-op, not a throw.
+- **Update every hooks-module mock.** `agenticChat.ts` imports `clearStepCache` alongside `executeHooks` / `createHookContext` / `getBlockCap`. Any test that `vi.mock('../../src/hooks/index.js', ...)` MUST re-export `clearStepCache: vi.fn()` or the mock will not shadow the production surface and the loop crashes on the first iteration. Four tests were updated in the original commit — add new mocks to that list, do not fork a new pattern.
+
+See [docs/ARCHITECTURE.md — Prompt Hook Model Resolution Cache](ARCHITECTURE.md#prompt-hook-model-resolution-cache-srchooksindexts) for the cache design and [docs/TESTING.md — Testing the prompt-hook model resolution cache](TESTING.md#testing-the-prompt-hook-model-resolution-cache-testshooksmodel-cachetestts-issue-2143) for the eight-case regression surface this pattern mandates.
+
+## MCP sign-in telemetry pairing (`src/mcp/auth-telemetry.ts`)
+
+Introduced in the 2026-10-25 upstream sync (ports kilocode `7e789bbee` / `df98111b3` / `60f1ad7f1` / `df43b6526`). The `McpAuthTelemetry` state machine pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` so dashboards computing OAuth success rates are not biased by orphaned starts.
+
+### Port-maintenance invariants
+
+- **Pure state machine, no I/O.** The tracker performs zero I/O itself — callers inject an `EmitFn` that forwards events to the metrics sink. Do NOT bake a specific sink (OpenTelemetry, Langfuse, …) into this module. If a future sink needs a different payload shape, extend `SignInEvent` additively or let the caller remap in its `emit` closure.
+- **One in-flight flow per `serverId`.** `start(flowId, serverId)` iterates `inflight` and auto-completes any existing flow for the same `serverId` with `outcome: 'displaced'` BEFORE emitting the new `start` event. If you refactor the dispatch, keep the `start → complete:displaced → start` order; a dashboard that computes success rates from the sequence will double-count if the displacement complete lands after the new start.
+- **`complete` is idempotent.** A second `complete(flowId, …)` call for the same flow is a silent no-op. The current guard is `if (!meta) { return; }` on the Map lookup — do NOT replace this with a throw or a `logger.warn`. Caller cleanup code is intentionally allowed to call `complete` defensively (e.g. in a `finally` after the OAuth promise already rejected).
+- **`shutdown()` snapshots the keys before iterating.** `complete()` mutates `this.inflight`; iterating the Map's live keys would skip entries. The reference implementation uses `Array.from(this.inflight.keys())` — keep this.
+- **Injectable clock.** The constructor's second argument is `now: () => number = Date.now` so tests can advance the clock deterministically. Do NOT hard-code `Date.now()` inside the methods — the one assertion that pins `durationMs` relies on controllable time.
+- **No module-level singleton.** `McpAuthTelemetry` is a class, not a factory. Each caller constructs its own instance scoped to a session / tracker lifetime. Do not introduce a module-local singleton — the "no cross-server displacement" invariant relies on the tracker being process-local.
+- **New terminal outcomes extend the type union, not the `complete` signature.** If a future outcome bucket (e.g. `'expired'`) is needed, add it to the `SignInOutcome` union AND the regression suite's parametrised matrix. Do not add outcome-specific overloads.
+
+### `durationMs` contract
+
+Wall-clock from `start` to `complete`, carried only on the `complete` payload. Negative values are impossible because `now()` is monotonic within a single process run; if a future refactor supports persisting the start timestamp across restarts, add a `>= 0` guard before emitting.
+
+See [docs/TESTING.md — Testing MCP sign-in telemetry pairing](TESTING.md#testing-mcp-sign-in-telemetry-pairing-srcmcp__tests__auth-telemetrytestts) for the seven-case regression surface.
+
+## MCP OAuth URL hardening (`src/mcp/oauth-callback.ts`)
+
+Introduced in the 2026-10-25 upstream sync (ports kilocode `82926fb30`). Two-gate scheme allow-list that rejects attacker-controlled authorization URLs before the launcher spawns.
+
+### Port-maintenance invariants
+
+- **Scheme allow-list is the exported contract.** `assertHttpUrl` rejects every scheme except `http:` and `https:`. Expanding the allow-list requires entries in BOTH `assertHttpUrl` AND `openUrl`'s own allow-list in `src/core/open.ts` — the two gates must agree. Reviewers of any proposed expansion MUST verify the new scheme is not a known OS-level RCE vector (Windows protocol handlers, macOS URL types, Linux `xdg-open` handlers).
+- **UNC-path guard runs BEFORE `URL` parse.** `input.startsWith('\\\\')` and `input.startsWith('//')` are rejected explicitly. Some Node versions on Windows normalise UNC into a valid `file:` URL post-parse, which would bypass a scheme check that only inspected `url.protocol`. Keep the pre-parse guard even if the modern Node version in CI appears to reject UNC on its own — the guard is for environments the project cannot pin.
+- **`URL.canParse` is probed via feature detection.** The check is `if (typeof URL.canParse === 'function' && !URL.canParse(input))` so an older runtime without `canParse` falls through to the `try { new URL(input) }` block. Do NOT drop the feature-detection guard — the minimum supported Node version documented in `package.json` is the floor, but downstream distributors may ship older runtimes.
+- **Error messages carry the `label` argument.** Every throw path includes `${label}` in the message so a nested OAuth-discovery parse localises to the offending field. Do not change the message format without updating the suite's substring regex matchers in sync.
+- **`startMcpOAuth` is the sanctioned entry point.** It validates on receipt AND relies on `openUrl`'s own allow-list as belt-and-braces defense. A future refactor that drops the explicit `assertHttpUrl` call MUST NOT re-open the vulnerability — the `openUrl` scheme check must stay in place as the second gate. Reviewers of a `startMcpOAuth` refactor must verify both gates still fire.
+- **SAP AI Core is not affected.** SAP AI Core authenticates via the `AICORE_SERVICE_KEY` client-credentials flow and never issues an interactive OAuth redirect. This surface is only exercised by third-party OAuth-protected MCP servers. Do NOT reroute SAP AI Core auth through this helper on the assumption that "all auth needs URL validation" — the client-credentials flow has no browser-launch step.
+
+### Testing new rejections
+
+When adding a new rejected scheme (e.g. a newly disclosed CVE in a protocol handler):
+
+1. Add the scheme to the dangerous-scheme loop in `src/mcp/__tests__/oauth-callback.test.ts` (the parametrised `for (const bad of [...])` block).
+2. Update the module docblock in `src/mcp/oauth-callback.ts` to name the CVE / disclosure. The docblock is the historical record of why each scheme is on the list.
+3. If the new scheme would also pass `URL.canParse` and surface a non-`http:` / non-`https:` protocol, the existing `url.protocol !== 'http:' && url.protocol !== 'https:'` check catches it — no code change needed. If the scheme is pre-normalised by Node into a scheme the check already covers (e.g. UNC into `file:`), add a dedicated pre-parse guard like the current `\\` / `//` block.
+4. Do NOT add a per-scheme error message. The `must use http or https` wording is the operator-facing contract and should be shared across every rejected scheme.
+
+See [docs/TESTING.md — Testing MCP OAuth authorization-URL scheme allow-list](TESTING.md#testing-mcp-oauth-authorization-url-scheme-allow-list-srcmcp__tests__oauth-callbacktestts) for the six-case regression surface.
+
+## Scoped probe fetch (`src/mcp/sse-probe.ts` — `ScopedProbeFetch`)
+
+Introduced in the 2026-10-25 upstream sync (ports kilocode `432462088` / `70354f039`). Scopes SSE-probe fetch interception to the probe's own request URL plus any recorded redirect hops, so a probe no longer intercepts unrelated SAP AI Core traffic or other MCP tool calls.
+
+### Port-maintenance invariants
+
+- **Pure in-memory bookkeeping.** The class is a thin wrapper around `Set<string>`. It performs no I/O and does not call `fetch` itself — the actual interception wiring is a separate call site that consults `owns(requestUrl)` from inside a `fetch` wrapper. Do NOT fold the fetch wrapper into this class; keeping the scope-tracking pure means the class can be unit-tested without any network ceremony.
+- **URL normalisation strips fragments and lower-cases the scheme.** The private `normalizeUrl` helper is the single normalisation point. `URL` already lower-cases scheme and host, but the explicit `u.protocol = u.protocol.toLowerCase()` defends against pre-formatted strings from `Location:` headers that bypass the `URL` constructor. Keep both normalisations.
+- **`URL.canParse` fallback preserves the raw string.** When `URL.canParse(input) === false`, `normalizeUrl` returns the raw input so a non-URL string still has a stable key in the owned-URL set. Do NOT throw on unparseable input — the probe may encounter malformed redirect `Location:` headers in the wild and must stay running.
+- **`recordRedirect` is additive.** Callers invoke it once per observed redirect hop. The class does not de-duplicate across probes — each `ScopedProbeFetch` instance owns its own `visited` Set. Do not introduce a cross-probe LRU or shared cache; the per-probe isolation is the regression guard against the "leaked fetch interception" bug the upstream commit names.
+- **`snapshot()` is the test-only inspection surface.** Reach for `snapshot()` in tests to assert the recorded URL set. Do NOT expose the private `visited` field directly or add setter methods beyond `recordRedirect` — the current surface is deliberately minimal.
+- **Case-matching is by normalised string equality.** `owns` compares normalised strings via `Set.has`. Do NOT introduce fuzzy matching (prefix match, path-stripped match) — the whole point of scoping is to reject lookalike URLs that are not actually part of this probe's traffic.
+
+See [docs/TESTING.md — Testing the scoped SSE probe fetch](TESTING.md#testing-the-scoped-sse-probe-fetch-testsmcpsse-probetestts) for the eleven-case regression surface.
+
+## MCP client manager (`src/mcp/client.ts`)
+
+The `McpClientManager` is the only path by which Alexi talks to third-party MCP servers over stdio / HTTP. Three invariants ride on top of the raw SDK; keep them in place.
+
+### Concurrent-connect dedup is a correctness guard, not an optimisation
+
+`McpClientManager.connect(config, options)` keeps an in-flight promise map keyed by `config.name`:
+
+```typescript
+async connect(config: McpServerConfig, options?: McpConnectOptions): Promise<McpConnection> {
+  const inFlight = this.pendingConnects.get(config.name);
+  if (inFlight) {
+    return inFlight;
+  }
+  const task = this.connectImpl(config, options).finally(() => {
+    this.pendingConnects.delete(config.name);
+  });
+  this.pendingConnects.set(config.name, task);
+  return task;
+}
+```
+
+- **Do NOT remove the `pendingConnects` lookup to "simplify" the method.** A config observer that fires concurrently with the startup `connectFromConfig()` will spawn a second stdio child for the same server, resulting in zombie processes and double-register notifications on the server list. The dedup is the only guard against that race.
+- **Keep the handshake in `connectImpl` (private).** The public `connect` owns dedup bookkeeping; moving the handshake back into `connect` turns a one-screen method into a ~400-line method with a nested `if` wrapped around the actual connect logic, and the dedup `.finally()` has to be re-threaded through every early return. Keep the pure split.
+- **The `.finally()` is unconditional.** `pendingConnects.delete(config.name)` must run on resolve, reject, and cancel paths alike. Replacing `.finally()` with `.then().catch()` creates a hole on the cancel path — if the task is garbage-collected or the handshake throws before the first `await`, the entry sticks and every subsequent `connect(sameName)` returns a settled-rejected promise forever.
+- **Do NOT key dedup by anything other than `config.name`.** The connection cache (`this.connections`) is keyed by name, so the dedup map MUST use the same key. Keying by a config-hash would allow two "logically identical" configs to race on the same name entry.
+
+### Parallel teardown in `disconnectAll` is deliberate
+
+```typescript
+async disconnectAll(): Promise<void> {
+  const names = Array.from(this.connections.keys());
+  await Promise.allSettled(names.map((name) => this.disconnect(name)));
+}
+```
+
+- **Keep `Promise.allSettled`, not `Promise.all`.** A per-server teardown error must NOT propagate as a top-level rejection. Shutdown is almost always the caller, and surfacing a stray MCP-server misbehaviour here would mask the process exit code — the caller wants a best-effort teardown, not an atomic one.
+- **Snapshot the keys with `Array.from(...)` before dispatching.** Each `disconnect(name)` removes the entry from `this.connections`, so iterating directly via `this.connections.keys()` after the map starts shrinking would skip entries. The snapshot pins the "disconnect everyone currently connected" semantics.
+- **Do NOT add a per-server timeout here.** `disconnect()` already handles its own slow-child case; adding another timeout layer in `disconnectAll` just lets a slow-but-eventually-successful disconnect race against two cancellation sources.
+
+### Output schema normalisation is not optional
+
+`normalizeOutputSchema` (`src/mcp/client.ts:717-734`) is called by the tool-registration path for every MCP tool. Keep three contracts:
+
+- **`undefined` on non-object input is the API.** Call sites spread the result onto a tool definition: `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }`. Returning `{}` (an empty schema) would misleadingly advertise an empty object schema to the model; returning `null` would break the spread (`...null` is a no-op but linter-flagged). Keep the `undefined` sentinel.
+- **Pass-through on `{ properties }` without `type` is intentional.** Some MCP servers omit `type` when `properties` is present. The guard `s.type === 'object' || s.properties !== undefined` treats that branch as a root object. Collapsing it to `s.type === 'object'` would wrap a perfectly valid root schema under `properties.result` and break downstream tooling that already handles the `properties`-only shape.
+- **The wrap key is `result`, not `value` / `data`.** The literal `result` matches opencode `c41c3a0` so a cross-project operator reading an MCP log sees the same wrapper on both sides. Renaming it would silently break any dashboard / schema consumer that depends on the wrapper name.
+
+See [docs/TESTING.md — Testing the MCP output-schema normaliser](TESTING.md#testing-the-mcp-output-schema-normaliser-srcmcp__tests__normalizeoutputschematestts) for the six-case audit and [docs/ARCHITECTURE.md — MCP Client Connect De-duplication](ARCHITECTURE.md#mcp-client-connect-de-duplication-srcmcpclientts) for the full dispatch sequence.
+
+## Context overflow detection (`src/core/contextOverflow.ts`)
+
+The `CONTEXT_OVERFLOW_PATTERNS` list in `src/core/contextOverflow.ts:27-50` is the single source of truth for "this error means the model's context window was blown". A match triggers reactive compaction in `src/core/agenticChat.ts` AND rewrites the user-facing error to the canonical `CONTEXT_OVERFLOW_USER_MESSAGE` in `src/core/orchestrator.ts`. Keep three invariants:
+
+- **The list is curated, not generated.** Each pattern is a case-insensitive regex that was observed on a real provider surface (OpenAI, Anthropic, SAP AI Core orchestration). Do NOT add a pattern "just in case" — a false positive here converts a transient provider error into reactive compaction, which rewrites the message history. A false negative is strictly safer than a false positive.
+- **Order does not matter, but new entries belong at the bottom with a comment pointing to the upstream commit / provider surface that justified the addition.** Example from the 2026-10-23 sync: `/reduce the length/i` is tagged "Added from upstream opencode `09a1db3`". Reviewers rely on that provenance to decide whether a future removal is safe.
+- **Prefer narrow, distinctive phrases over generic catch-alls.** `/reduce the length/i` is distinctive enough to be low-false-positive; something like `/too long/i` would match thousands of unrelated error messages and start triggering compaction on validation errors. If a candidate phrase feels like it would match generic validation output, do NOT merge it.
+
+Companion contract: `maxTokensRecovery` (`src/core/maxTokensRecovery.ts`) handles the complementary case where the overflow is caused by the response budget, not the prompt. Free-form phrases like `prompt too long` are deliberately routed through `isContextOverflowError` (compaction), NOT through `maxTokensRecovery` (which only handles `413` / `max_tokens_exceeded` / `context_length_exceeded` structural markers). Do not add free-form patterns to the maxTokens classifier.
+
+## Dependency-free pure helper modules
+
+The 2026-10-26 sync added four modules that intentionally stay dependency-free so they can be used from both the compaction manager and the per-session prompt builder without introducing a cycle, or so they stay usable from the zero-dependency bootstrap path. When adding similar helpers, keep three rules:
+
+- **No imports from `src/core/` into the helper itself.** `src/core/session/compaction.ts` and `src/core/mime.ts` are the templates: they import `node:fs` / `node:path` / `zod` at most. If you need a type from `src/core/`, add it to the helper's own public surface (`SessionCompactionConfig`, `Usage`, etc.) and let the caller map between the two shapes.
+- **Pure functions, not classes with mutable state.** The compaction helpers are pure (`shouldCompact`, `effectiveCompactionBudget`, `resolveBackgroundCompaction`), the MIME helpers are pure (`detectMediaType`, `mediaTypeForExtension`), and the credential helper is a one-shot async function that owns no state across calls. State lives on the caller's session record.
+- **Validation on the loader boundary, not inside the helper.** `src/config/compactionConfig.ts:71-96` validates the new `buffer` / `background_compaction` / `precompute_compaction` fields at JSON load time and raises a prefixed `Error('compaction.<field> must be ...')`. The helper then trusts its typed input. A caller that constructs a `SessionCompactionConfig` programmatically must apply the same validation OR document that the construction site is already type-safe.
+
+## Compaction loop-guard contract (`lastCompactionAtTokens`)
+
+Ported from kilocode `ccf958a1d` in the 2026-10-26 sync. When extending the compaction surface, preserve the loop-guard semantics:
+
+- **Persist the token count observed at the LAST successful compaction**, not the token count that triggered compaction and not the current turn's count. The guard compares the current projected cost against the stored value and refuses to fire again when the former has not decreased.
+- **Reset to `undefined` after the summary itself leaves the preserve-last-N window.** A new oversized burst must be able to trigger compaction again. A session that keeps `lastCompactionAtTokens` set forever would never compact again — the opposite of what the guard is for.
+- **The guard is advisory, not a lock.** `shouldCompact` returning `false` is the only observable effect; nothing is scheduled or marked "in progress". Callers that need concurrency control (background compaction, parallel tool calls) must add their own serialisation.
+
+Reference call-site: `src/core/session/prompt.ts:30-48` (`SessionCompactionState`, `recordCompactionRun`). Pure helper: `src/core/session/compaction.ts:40-56` (`shouldCompact(usage, threshold, lastCompactionAtTokens?)`). Manager-side forward: `src/compaction/index.ts:231-283` (`CompactionManager.needsCompaction`, module-level `shouldCompact`).
+
+## Cross-process credential lock contract (`refreshCredentialWithLock`)
+
+Ported from opencode `9435378` in the 2026-10-26 sync. When wiring a new credential path into `refreshCredentialWithLock`, preserve four invariants:
+
+- **The `credentialPath` is the deduplication key.** Two call sites that refresh the same credential MUST pass identical paths. Normalise relative paths and `~` expansions before calling the helper, otherwise two processes end up with sibling locks and race each other.
+- **`readCached` must be fast and side-effect free.** It is called at least twice per refresh (fast path before lock, double-check after lock). A reader that touches the network or triggers a sub-refresh would defeat the point of the lock.
+- **`refresh` must throw on fatal error, not silently return a stale credential.** The helper does not retry; `ErrorBackoff` on the caller side classifies transient vs permanent. A silent-fallback refresh breaks the "at most one process executes refresh at a time" guarantee because peers would never see the real failure.
+- **Stale-lock reclaim is bounded by `staleMs` (default 10 s).** Do not raise this past 30 s without a strong reason — the lock exists to serialise a token endpoint call, which should complete in under a second. A long stale window converts a crashed process into a 30-second stall for every peer.
+
+Reference module: `src/providers/credential.ts`. Lock file layout: `<credentialPath>.lock` with a plain-ASCII integer timestamp body.
+
+## Provider options derivation (`deriveProviderOptionKeys` / `filterProviderOptions`)
+
+Ported from opencode `490456d` in the 2026-10-26 sync. When adding a new provider or a new field to an existing provider's settings schema:
+
+- **Add the field to the Zod settings schema, not to a side list.** `deriveProviderOptionKeys` walks the schema shape at runtime — the new field automatically becomes a valid option key. Do NOT reintroduce a hand-rolled list.
+- **Unknown providers pass through verbatim.** `filterProviderOptions` returns a fresh copy of the input when the provider id is not in the derived key map, so a bespoke extension does not get its options stripped. If you want strict filtering for a specific provider, add it to the schema; do not special-case the filter.
+- **The filter mutates nothing.** It returns a new object. If a reviewer sees `filterProviderOptions(...)` with the result discarded, that is a bug — the point of the filter is to produce the trimmed object that gets passed to the request builder.
+
+Reference module: `src/providers/options.ts`.
+
+## Model-request hook identity short-circuit
+
+Ported from opencode `d1cf7dd` and `91b5a7c` in the 2026-10-26 sync. When wiring a model-request hook, keep the semantics `dispatchRequestHook` enforces:
+
+- **A no-op hook MUST return either `undefined` or `{ request: originalRequest }`.** Returning a fresh object that happens to carry the same payload still works (the `deepEqual` fallback catches it), but costs an extra structural comparison on every call. Prefer the identity short-circuit.
+- **A transforming hook MUST return a different object.** Mutating the input and returning the same reference is treated as a no-op by `dispatchRequestHook` — the request body change would be silently discarded on the identity check.
+- **Attach payloads via `HookPayloadEnvelope`, not by patching the request body.** `runWithRequestHookPayload(envelope, payload, run)` clears the payload reference in `finally` so a long-running tool does not pin the payload. Stashing on the request itself defeats the cleanup.
+
+Reference module: `src/core/session/model-request.ts`.
 
 ## License
 

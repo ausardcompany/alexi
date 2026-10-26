@@ -6,280 +6,287 @@ You are an expert software developer. Your task is to execute the update plan be
 
 # Update Plan for Alexi
 
-Generated: 2026-10-22
+Generated: 2026-10-26
 Based on upstream commits analyzed:
-- **kilocode**: 4481e06d8 (PR link ingest), 2f452d7a5 (session host registry), 2e1793154 (MCP prompt content preservation), f18d9006c (session host contracts)
-- **opencode**: c87f6b7 (compaction keepID validation), 3260ec7 (legacy apply_patch → edit), 0c8e7a9 (preserve Permission.Error), 6a5f15a (ignore unsupported agent colors), 6709f56 (compaction output limit), ab249a9 (cache breakpoints), 870ab9d (baseURL override), 93bf002 (shared isRecord/stringify), 9c8e9e4 (remove NamedError/iife), 248bfbe (codemode fetch display args), e441daf (Windows service port), c93aaae (fs.watch graceful fallback)
+- **kilocode**: `0bc1c373a`, `ccf958a1d`, `2c8317d9a`, `9d28e36c7` (v7.8.18)
+- **opencode**: `ed74ec8`, `9435378` (credential refresh), `33726e8` (compaction buffer), `f523f77` (background_compaction rename), `44fc9d2` (drop session_pending), `d1cf7dd`/`91b5a7c` (hook request fixes), `c54677b`/`421e44e` (media types), `9007700` (prompt cache TTL), `74556a2` (Bedrock Converse), `490456d` (provider options), `350dc1a` (gitlab-ai-provider bump), `f7a9f1b` (branch list fix)
 
 ## Summary
 - Total changes planned: 14
 - Critical: 2 | High: 5 | Medium: 5 | Low: 2
 
+---
+
 ## Changes
 
-### 1. Preserve Permission.Error in FileAccess Interface
-**File**: `src/permission/file-access.ts` (or `src/permission/index.ts`)
-**Priority**: critical
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 0c8e7a9) — the permission error type was being lost at the FileAccess boundary, causing permission errors to surface as generic errors. Critical for correct permission enforcement, especially important in SAP AI Core where permission tracking is auditable.
-
-**Current code** (likely pattern):
-```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Error> =>
-  Permission.check(path).pipe(
-    Effect.mapError((e) => new Error(e.message))
-  )
-```
-
-**New code**:
-```typescript
-export const checkAccess = (path: string): Effect.Effect<void, Permission.Error> =>
-  Permission.check(path) // propagate Permission.Error unchanged
-```
-
-Ensure the `FileAccess.Interface` error channel is typed as `Permission.Error` (or union including it) rather than being flattened.
-
----
-
-### 2. Validate Compaction keepID with SessionMessage.ID schema
+### 1. Fix early auto-compaction loop (kilocode)
 **File**: `src/core/session/compaction.ts`
 **Priority**: critical
 **Type**: bugfix
-**Reason**: Upstream fix (opencode c87f6b7) — `keepID` was not being validated against the message ID schema, which could produce silent corruption during compaction. Important because Alexi's SAP AI Core sessions must preserve message history consistency.
+**Reason**: Upstream kilocode fix (`ccf958a1d`) — compaction currently fires before reaching the configured threshold and can loop. The fix compacts at the configured threshold and halts repeated compaction attempts. This is a user-facing stability bug.
 
-**Current code**:
+**Current code** (approximate):
 ```typescript
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-  // ...
+export function shouldCompact(usage: Usage, threshold: number): boolean {
+  // fires too early; no loop guard
+  return usage.ratio >= threshold * 0.9
 }
 ```
 
 **New code**:
 ```typescript
-import { SessionMessage } from "../session/message.js"
-
-export const compact = (opts: { keepID?: string; ... }) => {
-  const keep = opts.keepID
-    ? SessionMessage.ID.make(opts.keepID) // validate via schema
-    : undefined
-  // ...
+export function shouldCompact(
+  usage: Usage,
+  threshold: number,
+  lastCompactionAtTokens?: number,
+): boolean {
+  // Only compact once the configured threshold is actually reached.
+  if (usage.ratio < threshold) return false
+  // Prevent compaction loops: if we already compacted and the token count
+  // hasn't meaningfully decreased, don't try again.
+  if (lastCompactionAtTokens !== undefined && usage.tokens >= lastCompactionAtTokens) {
+    return false
+  }
+  return true
 }
 ```
 
+Also update `src/core/session/prompt.ts` to pass `lastCompactionAtTokens` from session state and persist it after each compaction run.
+
 ---
 
-### 3. Give compaction summaries the same output limit as normal turns
+### 2. Ignore compaction buffer that leaves no model room
 **File**: `src/core/session/compaction.ts`
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream fix (opencode 6709f56) — compaction was truncating summaries too aggressively, losing context. Especially impactful for long-running SAP AI Core sessions where compaction is more frequent due to token limits.
+**Reason**: opencode commit `33726e8` — if `compaction.buffer` is larger than remaining context, we currently emit a zero/negative budget. Ignore the buffer when it would starve the model.
 
-**New code** (locate the max-output option when building the compaction generation request):
+**New code**:
 ```typescript
-const generation = yield* Generation.create({
-  model,
-  messages: compactionMessages,
-  // BEFORE: maxOutputTokens: COMPACTION_MAX_TOKENS,
-  // AFTER: use the same cap as a normal turn
-  maxOutputTokens: model.limit?.output ?? DEFAULT_MAX_OUTPUT,
-})
+function effectiveCompactionBudget(contextWindow: number, buffer: number, used: number): number {
+  const remaining = contextWindow - used
+  // If the configured buffer would leave the model no room, ignore it.
+  if (buffer >= remaining) return remaining
+  return remaining - buffer
+}
 ```
 
 ---
 
-### 4. Map legacy `apply_patch` permissions to `edit`
-**File**: `src/permission/migrate.ts` (create if missing) or `src/permission/saved.ts`
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode 3260ec7) — legacy saved permissions use the removed `apply_patch` tool name; without migration, saved permissions are orphaned and prompt users repeatedly. Alexi inherits saved-permission storage so needs the same migration.
+### 3. Rename `precompute_compaction` → `background_compaction`
+**File**: `src/core/config/schema.ts` and `src/core/session/compaction.ts`
+**Priority**: medium
+**Type**: refactor
+**Reason**: opencode commit `f523f77` renames the config field for clarity. Keep the old name as a deprecated alias to preserve config compatibility.
 
 **New code**:
 ```typescript
-// src/permission/saved.ts (loader)
-const LEGACY_TOOL_MAP: Record<string, string> = {
-  apply_patch: "edit",
-}
-
-function migrateToolName(name: string): string {
-  return LEGACY_TOOL_MAP[name] ?? name
-}
-
-// in load():
-const saved = rows.map((row) => ({
-  ...row,
-  tool: migrateToolName(row.tool),
+export const CompactionConfig = z.object({
+  threshold: z.number().min(0).max(1).default(0.85),
+  buffer: z.number().int().nonnegative().default(0),
+  background_compaction: z.boolean().optional(),
+  /** @deprecated use background_compaction */
+  precompute_compaction: z.boolean().optional(),
+}).transform((cfg) => ({
+  ...cfg,
+  background_compaction: cfg.background_compaction ?? cfg.precompute_compaction ?? false,
 }))
 ```
 
-Add a unit test asserting legacy `apply_patch` rows load as `edit`.
-
 ---
 
-### 5. Let configured provider baseURL override catalog model endpoints
-**File**: `src/providers/sap-ai-core.ts` / `src/providers/index.ts`
+### 4. Coordinate credential refreshes across processes
+**File**: `src/providers/credential.ts` (or `src/core/credential.ts`)
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream fix (opencode 870ab9d) — when a user configures a `baseURL` override for a provider, the catalog's model-specific endpoint was still winning. Highly relevant for Alexi: SAP AI Core deployments **always** need a custom base URL per tenant, so this prevents the catalog from stomping tenant endpoints.
-
-**Current code**:
-```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  return model.endpoint ?? provider.baseURL ?? DEFAULT
-}
-```
+**Reason**: opencode commit `9435378` — concurrent processes refreshing the same credential cause thrashing and token invalidation. Add a file-based lock around credential refresh. Important for SAP AI Core OAuth token refresh flows.
 
 **New code**:
 ```typescript
-function resolveEndpoint(model: Model, provider: Provider) {
-  // Explicit provider baseURL (user config) overrides catalog model endpoint
-  return provider.baseURL ?? model.endpoint ?? DEFAULT
-}
-```
+import { lock } from "proper-lockfile"
+import path from "node:path"
 
-Add a test ensuring an SAP AI Core base URL overrides any catalog `endpoint` on the model definition.
-
----
-
-### 6. Skip non-cacheable content parts when placing cache breakpoints
-**File**: `src/providers/cache-policy.ts` (or wherever cache breakpoint logic lives)
-**Priority**: high
-**Type**: bugfix
-**Reason**: Upstream fix (opencode ab249a9) — cache breakpoints were being placed on non-cacheable content parts (e.g., images, ephemeral tool results), invalidating the cache. Affects token economy on all providers; important for SAP AI Core cost tracking.
-
-**New code**:
-```typescript
-function placeBreakpoint(parts: ContentPart[]) {
-  // Only place on cacheable parts (text, tool-result with text payload)
-  for (let i = parts.length - 1; i >= 0; i--) {
-    const p = parts[i]
-    if (p.type === "text" || (p.type === "tool-result" && hasTextOutput(p))) {
-      p.providerOptions = { ...p.providerOptions, cacheControl: { type: "ephemeral" } }
-      return
-    }
+export async function refreshCredentialWithLock<T>(
+  credentialPath: string,
+  refresh: () => Promise<T>,
+): Promise<T> {
+  const lockPath = `${credentialPath}.lock`
+  // Ensure lock directory exists
+  await fs.mkdir(path.dirname(lockPath), { recursive: true })
+  const release = await lock(credentialPath, {
+    retries: { retries: 10, minTimeout: 50, maxTimeout: 500 },
+    stale: 10_000,
+    lockfilePath: lockPath,
+  })
+  try {
+    // Re-read after acquiring lock in case another process just refreshed.
+    const cached = await readCachedCredential(credentialPath)
+    if (cached && !isExpired(cached)) return cached as T
+    return await refresh()
+  } finally {
+    await release()
   }
 }
 ```
 
+> **SAP note**: wrap SAP AI Core XSUAA token acquisition with this helper so parallel CLI invocations share one token.
+
 ---
 
-### 7. Ignore unsupported agent colors (don't throw on config decode)
-**File**: `src/agent/config.ts` or `src/agent/schema.ts`
+### 5. Bound fff watcher work on file bursts
+**File**: `src/core/filesystem/watcher.ts` (or wherever file watching is implemented)
 **Priority**: high
 **Type**: bugfix
-**Reason**: Upstream fix (opencode 6a5f15a) — invalid color values in agent frontmatter crashed agent loading entirely. Agents should load with `color: undefined` instead.
+**Reason**: kilocode `2c8317d9a` bumps `@ff-labs/fff-bun` from 0.9.4 → 0.10.5 to bound CPU during file bursts. If Alexi uses fff or an equivalent watcher, update dependency and the drop-stale patch.
 
-**Current code**:
-```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(ColorSchema),
-  // ...
-})
-```
-
-**New code**:
-```typescript
-export const AgentConfig = Schema.Struct({
-  color: Schema.optional(
-    Schema.transform(
-      Schema.Unknown,
-      Schema.UndefinedOr(ColorSchema),
-      {
-        decode: (v) => (isValidColor(v) ? v : undefined),
-        encode: (v) => v,
-      }
-    )
-  ),
-  // ...
-})
-```
-
----
-
-### 8. Add session host registry + Kilo Cloud adapter (session hosting abstraction)
-**Files**:
-- `src/session-hosting/types.ts` (new)
-- `src/session-hosting/registry.ts` (new)
-- `src/session-hosting/index.ts` (new)
-
-**Priority**: medium
-**Type**: feature
-**Reason**: Upstream feature (kilocode 2f452d7a5, f18d9006c) — introduces a pluggable session host registry. For Alexi, this creates a clean seam to register SAP AI Core as a session host alongside any local/cloud hosts. Enables future SAP-hosted session restore/sync.
-
-**New code** (`src/session-hosting/types.ts`):
-```typescript
-export interface SessionHost {
-  readonly id: string
-  readonly displayName: string
-  readonly supports: (sessionID: string) => boolean
-  readonly restore: (sessionID: string) => Promise<SessionSnapshot | undefined>
-  readonly list?: () => Promise<SessionSummary[]>
+**package.json change**:
+```json
+{
+  "dependencies": {
+    "@ff-labs/fff-bun": "0.10.5"
+  }
 }
-
-export interface SessionSnapshot { /* ... */ }
-export interface SessionSummary { id: string; title: string; updatedAt: number }
 ```
 
-**New code** (`src/session-hosting/registry.ts`):
-```typescript
-const hosts = new Map<string, SessionHost>()
-
-export const register = (host: SessionHost) => {
-  hosts.set(host.id, host)
-}
-export const get = (id: string) => hosts.get(id)
-export const list = () => Array.from(hosts.values())
-export const resolveForSession = (sessionID: string): SessionHost | undefined =>
-  list().find((h) => h.supports(sessionID))
-```
-
-Register an SAP AI Core host adapter in `src/providers/sap-ai-core.ts` on module init.
+Also drop the now-obsolete patch file if present: `patches/@ff-labs%2Ffff-bun@0.9.4.patch`.
 
 ---
 
-### 9. Preserve MCP prompt content (no shell expansion on prompt strings)
-**File**: `src/core/session/prompt.ts` or `src/tool/mcp.ts`
-**Priority**: medium
-**Type**: bugfix
-**Reason**: Upstream fix (kilocode 2e1793154) — MCP prompt content was being passed through shell expansion, mangling `$VAR` and backticks. Fix preserves the raw content.
-
-**Current code**:
-```typescript
-const expanded = shellExpand(mcpPrompt.content)
-```
-
-**New code**:
-```typescript
-// MCP prompts are user content, not shell commands; do not expand.
-const content = mcpPrompt.content
-```
-
-Add a regression test: an MCP prompt containing `$HOME` must remain literal `$HOME`.
-
----
-
-### 10. Introduce shared `isRecord` and `stringify` helpers; drop redundant decoding
-**File**: `src/util/record.ts` (new), apply across callsites
+### 6. Drop unused `session_pending` table & pin history compaction bound
+**File**: `src/core/database/schema.ts` + new migration
 **Priority**: medium
 **Type**: refactor
-**Reason**: Upstream refactor (opencode 93bf002, 7012c9d, 6dfc681) — consolidates `isRecord` type guard + `stringify` helper and removes redundant re-decoding of already-branded data. Reduces duplicated runtime validation in hot paths (session inbox, projector, prompt).
+**Reason**: opencode `44fc9d2` — dead table removed; keeps DB clean. Only apply if Alexi mirrors upstream schema.
 
-**New code** (`src/util/record.ts`):
+**New migration** `src/core/database/migration/YYYYMMDD_drop_session_pending.ts`:
 ```typescript
-export const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === "object" && v !== null && !Array.isArray(v)
-
-export const stringify = (v: unknown): string => {
-  if (typeof v === "string") return v
-  try { return JSON.stringify(v) } catch { return String(v) }
+import { sql } from "drizzle-orm"
+export async function up(db: Database) {
+  await db.run(sql`DROP TABLE IF EXISTS session_pending`)
 }
 ```
 
-Then audit `src/core/session/{inbox,projector,prompt}.ts` and `src/providers/*.ts` for inline `typeof x === "object" && x !== null` checks and replace with `isRecord`. Rem
-{"prompt_tokens":15088,"completion_tokens":4096,"total_tokens":19184,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+---
 
-[Session: 3034f6b1-0c6a-4d59-a5e8-d52c6cd91c27]
-[Messages: 2, Tokens: 19184]
+### 7. Send unchanged hooked requests without copying the body
+**File**: `src/core/session/model-request.ts` (or request hook plumbing)
+**Priority**: high
+**Type**: bugfix
+**Reason**: opencode `d1cf7dd` — hook-event copies large request bodies even when the hook doesn't modify them. Causes memory pressure and keeps the hook event alive. Also related: `91b5a7c` — running tools keep the hook event alive.
+
+**New code**:
+```typescript
+async function dispatchHook(request: ModelRequest, hook: RequestHook) {
+  const result = await hook({ request })
+  // Only replace body if the hook returned a modified request.
+  if (result?.request && result.request !== request && !deepEqual(result.request, request)) {
+    return result.request
+  }
+  // Release reference so tool executions don't pin the original request.
+  return request
+}
+```
+
+Add explicit cleanup in request lifecycle:
+```typescript
+try {
+  await runRequest(req)
+} finally {
+  // Avoid holding references in event listeners after the request completes.
+  req.hookPayload = undefined
+}
+```
+
+---
+
+### 8. Map avif/heic/heif/mov extensions and distinguish HEIC/QuickTime/M4A from MP4
+**File**: `src/core/mime.ts` (or equivalent)
+**Priority**: medium
+**Type**: bugfix
+**Reason**: opencode `421e44e` and `c54677b` — misidentified media types cause attachment upload failures.
+
+**New code**:
+```typescript
+const EXTENSION_MEDIA_TYPES: Record<string, string> = {
+  ".avif": "image/avif",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".mov": "video/quicktime",
+  ".m4a": "audio/mp4",
+  // ... existing entries
+}
+
+function detectMediaFromMagic(bytes: Uint8Array): string | undefined {
+  // ftyp box inspection
+  if (bytes.length >= 12 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    const brand = new TextDecoder().decode(bytes.slice(8, 12))
+    if (brand.startsWith("heic") || brand.startsWith("heix") || brand === "mif1") return "image/heic"
+    if (brand.startsWith("qt  ")) return "video/quicktime"
+    if (brand.startsWith("M4A ")) return "audio/mp4"
+    if (brand.startsWith("mp4") || brand.startsWith("isom") || brand.startsWith("iso2")) return "video/mp4"
+  }
+  return undefined
+}
+```
+
+---
+
+### 9. Configurable prompt cache TTL
+**File**: `src/providers/anthropic.ts` and `src/core/config/schema.ts`
+**Priority**: medium
+**Type**: feature
+**Reason**: opencode `9007700` — allow users to configure prompt cache TTL (5m vs 1h for Anthropic). Benefits long-running Alexi sessions.
+
+**Config schema**:
+```typescript
+export const CachePolicy = z.object({
+  ttl: z.enum(["5m", "1h"]).default("5m"),
+}).optional()
+```
+
+**Provider wiring (Anthropic cache_control)**:
+```typescript
+function cacheControl(policy?: CachePolicy) {
+  return { type: "ephemeral" as const, ttl: policy?.ttl ?? "5m" }
+}
+```
+
+---
+
+### 10. Typed Bedrock Converse options
+**File**: `src/providers/bedrock.ts`
+**Priority**: medium
+**Type**: feature
+**Reason**: opencode `74556a2` — typed options for reasoning effort, service tier, adaptive thinking, request metadata. Relevant if Alexi uses Bedrock alongside SAP AI Core.
+
+**New code**:
+```typescript
+export interface BedrockConverseOptions {
+  reasoningEffort?: "low" | "medium" | "high"
+  serviceTier?: "standard" | "priority"
+  adaptiveThinking?: boolean
+  requestMetadata?: Record<string, string>
+  responseJsonSchema?: object
+}
+
+function buildConverseRequest(model: string, messages: Message[], opts: BedrockConverseOptions = {}) {
+  const additionalModelRequestFields: Record<string, unknown> = {}
+  if (opts.reasoningEffort) additionalModelRequestFields.reasoning_effort = opts.reasoningEffort
+  if (opts.adaptiveThinking) additionalModelRequestFields.thinking = { type: "enabled" }
+  // ...
+  return { modelId: model, messages, additionalModelRequestFields, ...(opts.requestMetadata ? { requestMetadata: opts.requestMetadata } : {}) }
+}
+```
+
+---
+
+### 11. Derive provider option keys from settings schema
+**File**: `src/providers/options.ts`
+**Priority**: low
+{"prompt_tokens":63746,"completion_tokens":4096,"total_tokens":67842,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}
+
+[Session: 6d2409a0-d387-47f7-acc8-b0d11c09bf4c]
+[Messages: 2, Tokens: 67842]
 
 ## Execution Instructions
 

@@ -17,6 +17,7 @@ import {
   planMaxTokensRecovery,
 } from './maxTokensRecovery.js';
 import { logger } from '../utils/logger.js';
+import { isRecognizedStreamChunk } from '../providers/protocols/stream-events.js';
 import { routePrompt, recordRouteOutcome, classifyRouteError } from './router.js';
 import { SessionManager } from './sessionManager.js';
 import { getCostTracker } from './costTracker.js';
@@ -543,6 +544,21 @@ export function streamChat(
           return { value: persistAndRecord(), done: true };
         }
         const chunk = step.value;
+        // Forward-compat guard (SST OpenCode PRs #58596 / #58608 / #58609):
+        // provider SDKs occasionally start surfacing new normalised chunk
+        // fields (image deltas, speech deltas, custom finish reasons)
+        // before Alexi's renderer catches up. A chunk that carries no
+        // recognised field is logged at `warn` level and skipped — we
+        // return an empty text chunk so `for await` consumers naturally
+        // advance to the next pull without seeing a crash. Known fields
+        // live in `KNOWN_STREAM_CHUNK_FIELDS` in
+        // `src/providers/protocols/stream-events.ts`.
+        if (!isRecognizedStreamChunk(chunk)) {
+          logger.warn(`Unknown streaming chunk shape, skipping: ${JSON.stringify(chunk)}`, {
+            modelUsed: modelId,
+          });
+          return { value: { text: '' }, done: false };
+        }
         fullText += chunk.text;
         if (chunk.usage) {
           finalUsage = chunk.usage;

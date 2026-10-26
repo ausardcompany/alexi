@@ -901,6 +901,128 @@ export class HookManagerImpl implements HookManager {
   }
 }
 
+// ============ Prompt Hook Model Resolution Cache ============
+
+/**
+ * Resolved model configuration surfaced to prompt hooks.
+ *
+ * Kept as an unknown-shaped record so hook authors can carry whatever
+ * fields the caller resolved (provider id, deployment id, capabilities,
+ * ...) without coupling the cache to a single provider shape. The cache
+ * stores values by reference identity — callers are expected to produce
+ * the resolved object once and reuse it.
+ */
+export type ModelConfig = Record<string, unknown>;
+
+/**
+ * Step-level cache of resolved prompt-hook model configs.
+ *
+ * Keyed by `${stepId}:${modelName}` so two different steps that happen
+ * to use the same model name do not share state, and so a given step
+ * can resolve multiple models (routing, fallbacks) without evicting
+ * entries from one another.
+ *
+ * Lifetime: the cache is cleared by {@link clearStepCache} after each
+ * agent step completes (see `src/core/agenticChat.ts`). This bounds
+ * memory and prevents cross-step pollution (routing config changes
+ * mid-session would otherwise be masked by a stale entry).
+ *
+ * Ports SST OpenCode PR #58601 (merged 2026-10-24) — avoid repeated
+ * expensive model resolution on every prompt-hook invocation when the
+ * same model is used for many steps / sub-steps.
+ */
+const modelResolutionCache = new Map<string, ModelConfig>();
+
+/**
+ * Build the composite cache key for one `(stepId, modelName)` pair.
+ *
+ * The literal format is `${stepId}:${modelName}`. Exported helpers only
+ * use this through {@link getModelForHook} / {@link clearStepCache} so
+ * callers cannot drift from the canonical shape.
+ */
+function modelCacheKey(stepId: string, modelName: string): string {
+  return `${stepId}:${modelName}`;
+}
+
+/**
+ * Resolve a model config for a prompt hook, caching the result for the
+ * duration of the current agent step.
+ *
+ * On a cache miss, `resolver` is invoked synchronously and its return
+ * value is stored under `${stepId}:${modelName}`. On a cache hit, the
+ * stored value is returned and `resolver` is NOT invoked — this is the
+ * whole point of the cache (avoid repeated expensive model resolution
+ * when the same model is used for many hook calls within one step).
+ *
+ * Keep `resolver` cheap-to-register but potentially expensive-to-run
+ * (e.g. parsing routing config, hitting a deployment registry). The
+ * cache is step-scoped, so `clearStepCache(stepId)` must be called by
+ * the step runner once the step completes; otherwise cached entries
+ * will leak until process exit.
+ *
+ * @param stepId - Unique id of the current agent step (iteration marker)
+ * @param modelName - Model identifier being resolved (e.g. `gpt-4o`)
+ * @param resolver - Called on cache miss to produce the resolved config
+ * @returns The resolved model config (fresh or cached)
+ */
+export function getModelForHook(
+  stepId: string,
+  modelName: string,
+  resolver: () => ModelConfig
+): ModelConfig {
+  const key = modelCacheKey(stepId, modelName);
+  const cached = modelResolutionCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const resolved = resolver();
+  modelResolutionCache.set(key, resolved);
+  return resolved;
+}
+
+/**
+ * Drop every cached entry belonging to the given step.
+ *
+ * Must be called once per step after the step has fully completed (all
+ * prompt hooks for that step have fired). Only entries whose key starts
+ * with `${stepId}:` are removed, so concurrent steps running in the
+ * same process are unaffected.
+ *
+ * Idempotent: calling it with an unknown `stepId` is a no-op.
+ */
+export function clearStepCache(stepId: string): void {
+  const prefix = `${stepId}:`;
+  for (const key of modelResolutionCache.keys()) {
+    if (key.startsWith(prefix)) {
+      modelResolutionCache.delete(key);
+    }
+  }
+}
+
+/**
+ * Clear every entry in the step-level model cache.
+ *
+ * Primarily a test helper so each unit test starts from a clean slate.
+ * Production code should prefer {@link clearStepCache} to drop only
+ * the current step's entries.
+ *
+ * @internal
+ */
+export function _resetModelResolutionCache(): void {
+  modelResolutionCache.clear();
+}
+
+/**
+ * Return the number of entries currently cached. Exposed for tests
+ * that assert cache growth / eviction without having to peek at
+ * module-private state.
+ *
+ * @internal
+ */
+export function _modelResolutionCacheSize(): number {
+  return modelResolutionCache.size;
+}
+
 // ============ Global Hook Manager ============
 
 let globalHookManager: HookManagerImpl | null = null;

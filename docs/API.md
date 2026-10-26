@@ -5355,15 +5355,150 @@ export function isXAICapacityError(err: unknown): boolean;
  */
 export function isRetryableError(err: unknown): boolean;
 
-/** Extract a Retry-After window and convert to milliseconds. */
+/**
+ * Extract a Retry-After window and convert to milliseconds. Sources
+ * consulted in priority order:
+ *   1. `retryAfterSeconds` (parsed by RateLimitError constructors).
+ *   2. `retryAfterMs` (adapter shape ported from upstream commit `80b8762`).
+ *   3. `resetAt` (`Date` from `X-RateLimit-Reset`); past timestamps
+ *      collapse to 0.
+ *   4. Raw `headers['retry-after']` entry (case-insensitive, parsed
+ *      through `parseRetryAfterHeader`).
+ * Zero values are preserved so callers honour an "immediate retry"
+ * hint rather than defaulting to exponential delay.
+ */
 export function getRetryAfterMs(err: unknown): number | undefined;
+
+/**
+ * Parse a raw `Retry-After` header value into a delay in milliseconds.
+ * Accepts the two RFC 9110 §10.2.3 shapes — a non-negative integer or
+ * decimal seconds string (`"120"`, `"1.5"`) and an HTTP-date
+ * (`"Fri, 31 Dec 1999 23:59:59 GMT"`) — plus a bare `number` (seconds).
+ * Returns `undefined` for garbage input; a past HTTP-date collapses to
+ * `0` ("retry immediately"). Exported so provider adapters and tests
+ * share one parser and avoid drift across sites.
+ */
+export function parseRetryAfterHeader(
+  value: unknown,
+  now?: number
+): number | undefined;
+
+/**
+ * True iff `err` is a rate-limit error (`isRateLimitError`) AND carries
+ * at least one explicit `Retry-After` signal (`retryAfterSeconds`,
+ * `retryAfterMs`, `resetAt`, or a non-empty raw `headers['retry-after']`
+ * entry). Consumed by `isContextOverflowError` to short-circuit false-
+ * positive compaction: a known throttle is a transient delay, not a
+ * "too much context" signal, so compacting the context would waste a
+ * summary pass on a request that just needs to wait for the quota
+ * window to reopen. Non-rate-limit errors that happen to carry a
+ * `Retry-After` header are deliberately rejected (a random 500 with a
+ * header is not a throttle). See issue #2026-10-25 (SST OpenCode port).
+ */
+export function isKnownThrottle(err: unknown): boolean;
 
 /** Extract `status: NNN` from a raw error message (4xx / 5xx only). */
 export function extractStatusCode(err: unknown): number | undefined;
 
 /** True for auth failures that will NOT recover on retry. */
 export function isPermanentAuthFailure(err: unknown): boolean;
+
+/**
+ * Broader structural check for a provider content-policy violation
+ * (issue #2134). Supersedes `isContentFilterError` by covering OpenAI
+ * moderation shapes, Google SAFETY, Anthropic content_policy, HTTP 451,
+ * and a message-regex fallback for raw string errors. Consumed by
+ * `ErrorBackoff.recordError` / `ErrorBackoff.isFatal` so a content
+ * policy block from any provider family short-circuits identically.
+ */
+export function isContentPolicyError(err: unknown): boolean;
+
+/** Coarse-grained taxonomy bucket for a provider failure. */
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+/** Result of `classifyError`. */
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+/**
+ * Fold any upstream error into a stateless {type, fatal, retryable,
+ * statusCode} record. Precedence (most-specific first):
+ *   1. isContentPolicyError  -> content_policy, fatal.
+ *   2. isPermanentAuthFailure -> auth, fatal.
+ *   3. isFreeTierRateLimitError -> rate_limit, fatal.
+ *   4. HTTP status mapping (401/403 auth; 400/422/other 4xx
+ *      validation; 429 rate_limit; 451 content_policy; 5xx network).
+ *   5. NETWORK_MESSAGE_RE   -> network, transient.
+ *   6. isRateLimitError / isXAICapacityError -> rate_limit, transient.
+ *   7. Fall-through -> unknown (cautiously retryable).
+ *
+ * Deliberately stateless — retry-budget bookkeeping stays with
+ * `ErrorBackoff`.
+ */
+export function classifyError(err: unknown): ErrorClassification;
 ```
+
+### Content-policy classification taxonomy (issue #2134)
+
+The `classifyError` helper is the "single-field decision" surface for telemetry attribution, user-facing error rendering, and outer retry loops that only need to know "is this transient or permanent?". `src/providers/index.ts` re-exports it (along with `ErrorType` and `ErrorClassification`) so callers importing from the canonical providers surface get a single entry point. Three provider-attribution helpers live on the providers side:
+
+```typescript
+// src/providers/index.ts
+
+/** HTTP 451 OR nested { error: { type: 'moderation' | code: 'content_policy_violation' } }. */
+export function isOpenAIContentPolicyError(err: unknown): boolean;
+
+/** finishReason === 'SAFETY' OR promptFeedback.blockReason === 'SAFETY'. */
+export function isGoogleSafetyError(err: unknown): boolean;
+
+/** error_type === 'content_policy' OR invalid_request_error + content_policy message. */
+export function isAnthropicContentPolicyError(err: unknown): boolean;
+```
+
+All three are subsumed by the generic `isContentPolicyError` for retry decisions; they exist for telemetry/logging paths that want to attribute a block to a specific provider.
+
+Example — classify once at the retry boundary and dispatch on `type`:
+
+```typescript
+import { classifyError } from './providers/index.js';
+
+async function callWithTaxonomy<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    const c = classifyError(err);
+    switch (c.type) {
+      case 'content_policy':
+        // Permanent — surface the policy block to the user, do NOT retry.
+        throw err;
+      case 'auth':
+      case 'validation':
+        // Permanent — operator must fix credentials / request shape.
+        throw err;
+      case 'network':
+      case 'rate_limit':
+      case 'unknown':
+        // Transient — caller's retry budget decides.
+        if (c.retryable) {
+          /* retry with backoff */
+        }
+        throw err;
+    }
+  }
+}
+```
+
+See [docs/ARCHITECTURE.md — Content-policy classification across provider families](ARCHITECTURE.md#content-policy-classification-across-provider-families-issue-2134) for the precedence flowchart and [docs/PROVIDERS.md — Content-policy detection helpers](PROVIDERS.md#content-policy-detection-helpers-issue-2134) for the per-provider helper surface.
 
 ### `ErrorBackoff.isFatal(err?)` — three lookup paths (issue #1994)
 
@@ -5453,6 +5588,66 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxAttempts = 3): Promise<
   throw lastErr;
 }
 ```
+
+### Known-throttle API (`parseRetryAfterHeader`, `isKnownThrottle`)
+
+The known-throttle helpers close a specific false-positive in
+compaction: a rate-limit error whose message happens to include a
+tokens-related substring would otherwise trip
+`isContextOverflowError` even when the error carries an explicit
+`Retry-After` signal. The agent loop would waste a summary pass on a
+request that just needs to wait for the quota window to reopen.
+Reference: SST OpenCode "known throttle overflow" fix (2026-10-25).
+
+```typescript
+import {
+  parseRetryAfterHeader,
+  isKnownThrottle,
+  getRetryAfterMs,
+} from './core/error-backoff.js';
+
+// 1. Parse a raw header value through the single parse point.
+parseRetryAfterHeader('120');                 // 120_000
+parseRetryAfterHeader('1.5');                 // 1_500
+parseRetryAfterHeader(2);                     // 2_000  (bare number — seconds)
+parseRetryAfterHeader('Fri, 31 Dec 1999 23:59:59 GMT'); // 0 (past date collapses)
+parseRetryAfterHeader('nonsense');            // undefined
+
+// 2. Detect a known throttle on an unknown error shape.
+isKnownThrottle({ statusCode: 429, headers: { 'retry-after': '10' } }); // true
+isKnownThrottle({ statusCode: 429, retryAfterSeconds: 5 });             // true
+isKnownThrottle({ statusCode: 429 });                                   // false
+isKnownThrottle({ statusCode: 500, headers: { 'retry-after': '10' } }); // false
+
+// 3. Wait honours server-supplied Retry-After when present.
+const wait = getRetryAfterMs(err) ?? Math.min(1000 * 2 ** (attempt - 1), 30_000);
+```
+
+Decision contract (consumed by `isContextOverflowError`):
+
+| Error shape                                                            | `isKnownThrottle` | `isContextOverflowError` |
+| ---------------------------------------------------------------------- | ----------------- | ------------------------ |
+| `{ statusCode: 429, message: 'token limit', headers: { 'retry-after': '30' } }` | `true`            | `false`                  |
+| `new Error('context_length_exceeded: 150000 tokens')`                   | `false`           | `true`                   |
+| `{ statusCode: 429, message: 'context window exceeded' }` (no header)   | `false`           | `true`                   |
+| `{ statusCode: 429, retryAfterSeconds: 7, message: 'please reduce...' }` | `true`            | `false`                  |
+
+Signal-source precedence for `getRetryAfterMs`:
+
+1. `retryAfterSeconds` (parsed by `RateLimitError` constructors).
+2. `retryAfterMs` (adapter shape ported from upstream `80b8762`).
+3. `resetAt` (`Date` from `X-RateLimit-Reset`); past timestamps
+   collapse to `0`.
+4. Raw `headers['retry-after']` entry (case-insensitive lookup, parsed
+   through `parseRetryAfterHeader`).
+
+The parsed `retryAfterSeconds` field wins over any raw header so a
+provider adapter that already normalised the header is not overridden
+by a stale raw dictionary. A zero return value is preserved so callers
+honour an "immediate retry allowed" hint rather than defaulting to
+exponential delay.
+
+See [docs/ARCHITECTURE.md — Known-throttle guard on context-overflow detection](ARCHITECTURE.md#known-throttle-guard-on-context-overflow-detection) for the full flow diagram and [docs/TESTING.md — Testing the known-throttle guard](TESTING.md#testing-the-known-throttle-guard-srccoreerror-backofftestts) for the regression suite.
 
 ## Config Instance Cache Invalidation API
 
@@ -9253,7 +9448,7 @@ Semantics:
 
 ## Stream Event Guards API
 
-Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). The `src/providers/protocols/stream-events.ts` module exposes forward-compatible SSE-event guards so a benign forward-rolled upstream provider does not turn into a hard failure.
+Introduced in the 2026-10-17 upstream sync (ports opencode PR #56286). Extended in commit `a482d950` (ports the SST OpenCode #58596 / #58608 / #58609 discipline) to cover the normalised-chunk shape consumed by the streaming orchestrator, not only raw SSE event decoders. The `src/providers/protocols/stream-events.ts` module exposes forward-compatible guards so a benign forward-rolled upstream provider never turns into a hard failure.
 
 ```typescript
 export interface TypedStreamEvent {
@@ -9269,12 +9464,32 @@ export function classifyStreamEvent(
   event: unknown,
   knownTypes: ReadonlySet<string>
 ): StreamEventClassification;
+
+/**
+ * The set of fields a normalised StreamChunk may carry. Keep in sync with
+ * the StreamChunk interface at src/providers/sapOrchestration.ts:238-250.
+ * Adding a new normalised channel (e.g. audio, reasoning) MUST update both
+ * halves; forgetting only causes a benign warn log, not a crash.
+ */
+export const KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>;
+
+/**
+ * Returns true when a stream chunk carries at least one field the
+ * orchestrator knows how to handle. Non-throwing by contract.
+ */
+export function isRecognizedStreamChunk(chunk: unknown): boolean;
 ```
 
 Semantics:
 
-- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
-- Structural `{ type: string }` shape — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` / `isRecognizedStreamChunk` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `warn` / `debug` and continue so the stream stays open for the next event.
+- Structural `{ type: string }` shape for events, duck-typed field-presence check for chunks — provider-specific decoders further narrow with a discriminated union; this module stays portable.
+- `KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned by `tests/core/streaming-events.test.ts`. Widening the `StreamChunk` interface without updating the snapshot fails CI.
+
+Consumer wiring:
+
+- `src/providers/sapOrchestration.ts:1997-2019` wraps the SAP AI SDK's `chunk.getDeltaContent()` / `chunk.getDeltaToolCalls()` getters in a per-chunk `try/catch`, logs `logger.warn('Unknown streaming event, skipping chunk (<model>): ...')` on decode failure, and `continue`s to the next SDK chunk.
+- `src/core/streamingOrchestrator.ts:546-561` invokes `isRecognizedStreamChunk` before accumulating into `fullText` / `finalUsage`. On an unrecognised normalised shape it logs `logger.warn('Unknown streaming chunk shape, skipping: <JSON>', { modelUsed })` and returns `{ value: { text: '' }, done: false }` so `for await` consumers advance naturally.
 
 ## Transport Retry Classifier API
 
@@ -9755,3 +9970,290 @@ The allowlist is `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Missing /
 | anything else | `JSON.stringify(part)` |
 
 The embedded `resource` type used by the formatter is widened to `{ uri?: string; mimeType?: string; text?: string }`.
+
+## MCP Output-Schema Normaliser (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Normalises an MCP tool's `outputSchema` field so downstream code that only inspects `.properties` continues to work regardless of what the server declared:
+
+| Input shape | Output |
+|-------------|--------|
+| `undefined` / `null` / primitive (`string`, `number`, `boolean`) | `undefined` |
+| `{ type: 'object', properties: {...} }` | the schema verbatim |
+| `{ properties: {...} }` (no explicit `type`) | the schema verbatim |
+| `{ type: 'array', items: ... }` | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+| `{ type: 'string' }` and other primitive-root schemas | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+| `{ anyOf: [...] }` / `{ oneOf: [...] }` / `{ allOf: [...] }` | `{ type: 'object', properties: { result: <schema> }, required: ['result'] }` |
+
+Call sites spread the result safely onto a tool definition: `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing. See [docs/ARCHITECTURE.md — MCP Output-Schema Normalisation](ARCHITECTURE.md#mcp-output-schema-normalisation-srcmcpclientts) for the full dispatch flowchart.
+
+## MCP Client Manager Connect Semantics (`src/mcp/client.ts`)
+
+The `McpClientManager.connect(config, options)` public method keeps its existing signature but now de-duplicates concurrent calls for the same `config.name` (2026-10-23 upstream sync, ports opencode `8ecd6ad`). A caller that invokes `connect` while a prior call for the same server name is still in flight joins the first promise instead of spawning a parallel transport.
+
+```typescript
+class McpClientManager {
+  async connect(
+    config: McpServerConfig,
+    options?: McpConnectOptions
+  ): Promise<McpConnection>;
+
+  async disconnectAll(): Promise<void>;
+  // ...
+}
+```
+
+The dedup lookup / insert happens before the handshake body (`connectImpl`), and the `.finally()` block in the public method removes the pending entry regardless of outcome so a failed connect does not leave a stale cache entry. For callers this means two legitimate behaviours:
+
+1. **Second call joins the first.** `const [a, b] = await Promise.all([mgr.connect(cfg), mgr.connect(cfg)])` resolves to the SAME `McpConnection` instance for both bindings; no second stdio child is spawned.
+2. **Subsequent calls after resolution still cache.** Once `connect` resolves the entry is removed from `pendingConnects`, but the underlying `connections` map still carries the connection — a third `connect(cfg)` after both prior calls complete returns the already-registered connection via the normal `this.connections.has(config.name)` early-return path.
+
+`disconnectAll()` now runs disconnects in parallel via `Promise.allSettled` (ports opencode `7b14ad4`). A slow or hung server cannot stall shutdown for the others; per-server errors are logged by `disconnect()` itself and never propagated through `allSettled`. See [docs/ARCHITECTURE.md — MCP Client Connect De-duplication](ARCHITECTURE.md#mcp-client-connect-de-duplication-srcmcpclientts) for the sequence diagram.
+
+## MIME / Media-Type Detection API (`src/core/mime.ts`)
+
+Added in the 2026-10-26 sync (opencode `421e44e` and `c54677b`). Four pure helpers resolve attachment media types with magic-byte disambiguation ahead of extension lookup, so a mis-extensioned or extension-less payload (iOS screenshot pastes, clipboard contents) still resolves to the correct type.
+
+```typescript
+// src/core/mime.ts
+export function mediaTypeForExtension(ext: string): string | undefined;
+export function detectMediaFromMagic(bytes: Uint8Array): string | undefined;
+export function detectMediaType(bytes: Uint8Array, filename?: string): string | undefined;
+export function getExtensionMediaTypes(): Readonly<Record<string, string>>;
+```
+
+| Helper                      | Lookup strategy                                              |
+|-----------------------------|--------------------------------------------------------------|
+| `mediaTypeForExtension`     | Case-insensitive extension table (leading dot required).     |
+| `detectMediaFromMagic`      | ISO BMFF `ftyp` box inspection of the first 12 bytes.        |
+| `detectMediaType`           | Magic bytes first, extension fallback, `undefined` otherwise.|
+| `getExtensionMediaTypes`    | Read-only view of the extension table (tests / introspection).|
+
+ISO BMFF brands recognised by `detectMediaFromMagic`:
+
+| Major brand                   | Media type        |
+|-------------------------------|-------------------|
+| `heic`, `heix`, `mif1`        | `image/heic`      |
+| `qt  ` (trailing spaces)      | `video/quicktime` |
+| `M4A `                        | `audio/mp4`       |
+| `mp4*`, `isom`, `iso2`        | `video/mp4`       |
+
+Returns `undefined` when the first 12 bytes do not carry an ftyp box or the brand is unrecognised — the caller falls through to the extension table.
+
+See [docs/ARCHITECTURE.md — Attachment MIME Detection](ARCHITECTURE.md#attachment-mime-detection-srccoremimets) for the resolution flow diagram.
+
+## Credential Refresh API (`src/providers/credential.ts`)
+
+Added in the 2026-10-26 sync (opencode `9435378`). Public helper that serialises OAuth / XSUAA token refreshes across concurrent processes behind a filesystem lock, with a cached-credential double-check after acquiring the lock. Keeps parallel SAP AI Core XSUAA pipelines from thrashing each other's tokens.
+
+```typescript
+// src/providers/credential.ts
+export interface RefreshWithLockOptions<T> {
+  credentialPath: string;
+  refresh: () => Promise<T>;
+  readCached?: () => Promise<T | undefined>;
+  staleMs?: number;      // Default: 10_000
+  maxAttempts?: number;  // Default: 50
+  minDelayMs?: number;   // Default: 50 (base poll delay)
+  maxDelayMs?: number;   // Default: 500 (upper bound on poll delay)
+}
+
+export async function refreshCredentialWithLock<T>(
+  options: RefreshWithLockOptions<T>
+): Promise<T>;
+```
+
+Guarantees:
+
+1. At most one process executes `refresh` at a time per `credentialPath`.
+2. Peers waiting on the lock re-read the cached credential after acquiring the lock and skip `refresh` if a prior holder already produced a fresh one.
+3. The lock is always released — including on `refresh` throw.
+
+The helper does NOT itself retry a transient OAuth error from `refresh` — that is the caller's concern (`ErrorBackoff`). Throws `Error('Timed out waiting for credential refresh lock after N attempts: <path>')` when `maxAttempts` is exhausted without acquiring the lock.
+
+See [docs/PROVIDERS.md — Cross-Process Credential-Refresh Coordination](PROVIDERS.md#cross-process-credential-refresh-coordination-srcproviderscredentialts) for the sequence diagram and operator-facing notes.
+
+## Provider Options API
+
+### Anthropic Prompt Cache (`src/providers/anthropic.ts`)
+
+Added in the 2026-10-26 sync (opencode `9007700`). Narrow Zod-validated surface for Anthropic prompt-cache TTL selection.
+
+```typescript
+// src/providers/anthropic.ts
+export const CachePolicySchema = z
+  .object({ ttl: z.enum(['5m', '1h']).default('5m') })
+  .optional();
+
+export type CachePolicy = z.infer<typeof CachePolicySchema>;
+
+export function anthropicCacheControl(policy?: CachePolicy): {
+  type: 'ephemeral';
+  ttl: '5m' | '1h';
+};
+
+export function anthropicCacheProviderOptions(policy?: CachePolicy): {
+  anthropic: { cacheControl: { type: 'ephemeral'; ttl: '5m' | '1h' } };
+};
+```
+
+Pass the result of `anthropicCacheProviderOptions(policy)` as the `providerOptions.anthropic` field on the orchestration request. Opt into the `1h` TTL for long-running sessions where the default `5m` would otherwise cause a cache miss on every follow-up turn.
+
+### Bedrock Converse Options (`src/providers/bedrock.ts`)
+
+Added in the 2026-10-26 sync (opencode `74556a2`). Typed options surface and pure request builder for AWS Bedrock Converse. Scope: typed surface + builder only; actual SDK call lives wherever the caller instantiates the Bedrock client.
+
+```typescript
+// src/providers/bedrock.ts
+export type BedrockReasoningEffort = 'low' | 'medium' | 'high';
+export type BedrockServiceTier = 'standard' | 'priority';
+
+export interface BedrockConverseOptions {
+  reasoningEffort?: BedrockReasoningEffort;
+  serviceTier?: BedrockServiceTier;
+  adaptiveThinking?: boolean;
+  requestMetadata?: Record<string, string>;
+  responseJsonSchema?: object;
+}
+
+export function buildConverseRequest(
+  model: string,
+  messages: BedrockConverseMessage[],
+  opts?: BedrockConverseOptions
+): BedrockConverseRequest;
+```
+
+Field → Converse request mapping is tabulated in [docs/PROVIDERS.md — Typed Bedrock Converse Options](PROVIDERS.md#typed-bedrock-converse-options-srcprovidersbedrockts). The builder omits unset fields entirely so Bedrock's request validator does not reject unknown empty fields.
+
+### Schema-Derived Provider Option Keys (`src/providers/options.ts`)
+
+Added in the 2026-10-26 sync (opencode `490456d`). Derives the valid option-key set per provider from a Zod settings schema so adding a new provider field automatically threads through the orchestrator wiring. No manual list to drift.
+
+```typescript
+// src/providers/options.ts
+export function deriveProviderOptionKeys(
+  schema: ProviderSettingsSchema
+): ReadonlyMap<string, ReadonlySet<string>>;
+
+export function filterProviderOptions(
+  providerId: string,
+  options: Readonly<Record<string, unknown>>,
+  keyMap: ReadonlyMap<string, ReadonlySet<string>>
+): Record<string, unknown>;
+```
+
+`filterProviderOptions` returns a fresh object trimmed to the keys the schema admits for `providerId`. Unknown providers pass through verbatim so a caller using a bespoke extension does not have its options stripped. The input bag is never mutated.
+
+## Session Compaction API
+
+Added / extended in the 2026-10-26 sync (opencode `33726e8`, `f523f77`; kilocode `ccf958a1d`). Pure helpers shared by the compaction manager and the per-session prompt builder.
+
+```typescript
+// src/core/session/compaction.ts
+export interface Usage { ratio: number; tokens: number; }
+
+export function shouldCompact(
+  usage: Usage,
+  threshold: number,
+  lastCompactionAtTokens?: number
+): boolean;
+
+export function effectiveCompactionBudget(
+  contextWindow: number,
+  buffer: number,
+  used: number
+): number;
+
+export interface SessionCompactionConfig {
+  threshold?: number;
+  buffer?: number;
+  background_compaction?: boolean;
+  precompute_compaction?: boolean; // @deprecated
+}
+
+export function resolveBackgroundCompaction(cfg: SessionCompactionConfig): boolean;
+
+// src/core/session/prompt.ts
+export interface SessionCompactionState {
+  lastCompactionAtTokens?: number;
+}
+
+export function recordCompactionRun(
+  state: SessionCompactionState,
+  compactedTokens: number
+): SessionCompactionState;
+```
+
+The matching changes on the compaction manager keep the loop-guard contract when the caller goes through the richer interface:
+
+```typescript
+// src/compaction/index.ts
+class CompactionManager {
+  needsCompaction(
+    messages: Message[],
+    options?: CompactionCheckOptions,
+    lastCompactionAtTokens?: number
+  ): boolean;
+}
+
+export function shouldCompact(
+  messages: Message[],
+  maxTokens?: number,
+  lastCompactionAtTokens?: number
+): boolean;
+```
+
+Caller contract:
+
+- Persist `lastCompactionAtTokens` on the session after a successful compaction (`recordCompactionRun`).
+- Pass it to the next `shouldCompact` / `needsCompaction` call so a stuck summariser cannot be invoked twice on the same input.
+- Reset to `undefined` after the summary itself leaves the preserve-last-N window.
+
+See [docs/CONFIGURATION.md — Compaction Loop Guard](CONFIGURATION.md#compaction-loop-guard) and [docs/ARCHITECTURE.md — Compaction Loop Guard and Session Helpers](ARCHITECTURE.md#compaction-loop-guard-and-session-helpers-srccoresessioncompactionts).
+
+## Model-Request Hook API (`src/core/session/model-request.ts`)
+
+Added in the 2026-10-26 sync (opencode `d1cf7dd` and `91b5a7c`). Hook plumbing that avoids copying the request body through the hook event when the hook was a no-op, and avoids pinning the payload reference for the lifetime of any running tool.
+
+```typescript
+// src/core/session/model-request.ts
+export interface ModelRequestLike { readonly [key: string]: unknown; }
+export interface RequestHookResult<Req extends ModelRequestLike> { request?: Req; }
+export type RequestHook<Req extends ModelRequestLike> = (ctx: { request: Req }) =>
+  | Promise<RequestHookResult<Req> | void>
+  | RequestHookResult<Req>
+  | void;
+
+export async function dispatchRequestHook<Req extends ModelRequestLike>(
+  request: Req,
+  hook: RequestHook<Req> | undefined
+): Promise<Req>;
+
+export interface HookPayloadEnvelope<T = unknown> { hookPayload?: T; }
+
+export async function runWithRequestHookPayload<T, R>(
+  envelope: HookPayloadEnvelope<T>,
+  payload: T,
+  run: () => Promise<R>
+): Promise<R>;
+
+export function clearHookPayload(envelope: HookPayloadEnvelope): void;
+```
+
+`dispatchRequestHook` returns the ORIGINAL request reference when:
+
+1. No hook was supplied (`!hook`).
+2. The hook returned `undefined` or an object with no `request` (no-op signal).
+3. The hook returned `result.request === request` (identity short-circuit).
+4. The hook returned a fresh object that is structurally identical to the input (`deepEqual` fallback).
+
+Only when the hook produced a *different* request does the dispatcher accept the replacement. `runWithRequestHookPayload` stashes a payload on the caller-owned envelope and clears it in `finally` so long-running tools do not pin the original request body.
+
+Deliberately decoupled from the general hooks surface in `src/hooks/index.ts` (shell / http / script side-effects) so the two surfaces evolve independently. See [docs/ARCHITECTURE.md — Model-Request Hook Plumbing](ARCHITECTURE.md#model-request-hook-plumbing-srccoresessionmodel-requestts) for the dispatch sequence diagram.

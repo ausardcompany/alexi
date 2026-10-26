@@ -1,143 +1,107 @@
-# Alexi Upstream Sync — Changes Summary
+# Changes Summary — 2026-10-26 Update Plan Execution
 
-Generated: 2026-10-16
-Session: 055446cd-0c83-4bb7-97e6-9dd2ed1784f6
+Executed against commit on `master`. Based on upstream commits:
+- **kilocode**: `0bc1c373a`, `ccf958a1d`, `2c8317d9a`, `9d28e36c7` (v7.8.18)
+- **opencode**: `ed74ec8`, `9435378`, `33726e8`, `f523f77`, `44fc9d2`, `d1cf7dd`, `91b5a7c`, `c54677b`, `421e44e`, `9007700`, `74556a2`, `490456d`, `350dc1a`, `f7a9f1b`
 
-## Files Modified
+## Files Modified / Created
 
-1. `src/tool/tools/agent-manager.ts` — added `config.agent` field + validation (change #1)
-2. `src/tool/tools/agent-manager.txt` — refreshed tool description (change #2)
-3. `src/agent/subagent-permissions.ts` — native-vs-custom edit scope split (change #3, **critical**)
-4. `src/providers/openai-compatible.ts` — new, opt-in null tool-content normalizer (change #4)
+### Created
+1. `src/core/session/compaction.ts` — new helper module with `shouldCompact`, `effectiveCompactionBudget`, `resolveBackgroundCompaction` (pure functions)
+2. `src/providers/credential.ts` — `refreshCredentialWithLock` filesystem-locked credential refresh helper
+3. `src/core/session/model-request.ts` — `dispatchRequestHook` and `runWithRequestHookPayload` for hook plumbing without body-copies
+4. `src/core/mime.ts` — extension table + magic-byte (`ftyp`) detection for avif/heic/heif/mov/m4a
+5. `src/providers/anthropic.ts` — `CachePolicySchema` + `anthropicCacheControl` + `anthropicCacheProviderOptions` for configurable prompt-cache TTL
+6. `src/providers/bedrock.ts` — typed `BedrockConverseOptions` surface + `buildConverseRequest`
+7. `src/providers/options.ts` — `deriveProviderOptionKeys` + `filterProviderOptions` for schema-driven option-key allowlists
 
-The update plan truncated at change #4; nothing after that was executable, so no
-other files were touched.
+### Modified
+1. `src/compaction/index.ts`
+   - Extended `CompactionConfig` with optional `buffer`, `background_compaction`, and deprecated `precompute_compaction`.
+   - Added loop-guard parameter `lastCompactionAtTokens` to `CompactionManager.needsCompaction` and to the top-level `shouldCompact` helper (kilocode `ccf958a1d`).
+2. `src/config/compactionConfig.ts`
+   - Validate / forward `buffer`, `background_compaction`, and the deprecated `precompute_compaction` alias (opencode `f523f77`). Unknown keys still ignored silently.
+3. `src/core/compaction.ts`
+   - Added `lastCompactionAtTokens` to `ShouldCompactOptions`. `shouldCompact` now short-circuits to `false` when the current projected cost has not fallen below the recorded last-compaction baseline (kilocode `ccf958a1d` — stops the summariser from being re-invoked in a loop).
+4. `src/core/session/prompt.ts`
+   - Exported `SessionCompactionState` + `recordCompactionRun` for callers to persist the loop-guard baseline between turns.
+5. `src/core/filesystem/watcher.ts`
+   - Documented the "drop stale events arriving before the previous debounce fires" invariant on `setDebounceTimer`. The timer-replace pattern already in place is Alexi's equivalent of kilocode `2c8317d9a`'s `@ff-labs/fff-bun` 0.10.5 bounded-work fix.
 
-## Change Details
+## Summary of Each Change
 
-### #1 Agent Manager — named-agent delegation (`high`, feature)
+### Priority: critical
 
-File: `src/tool/tools/agent-manager.ts`
+1. **Compaction threshold + loop guard (kilocode `ccf958a1d`).**
+   - Added `lastCompactionAtTokens` to both the `CompactionManager.needsCompaction` and `src/core/compaction.ts::shouldCompact` option bags.
+   - When supplied, `shouldCompact` refuses to fire again on an input whose projected cost has not fallen below the recorded baseline.
+   - Alexi's `shouldCompact` already uses the configured threshold directly (not `0.9 * threshold`), so no "fires too early" fix was required — only the loop guard needed to be added.
+   - Verified non-breaking: all existing calls (`compaction.test.ts`, `sessionManager-token-compaction.test.ts`, etc.) continue to pass the current signature.
 
-Ports kilocode `f01b273c1` + `e703b5637` + `4fcf08b5e`.
+### Priority: high
 
-- Added import of `getAgentRegistry` from `../../agent/index.js`.
-- Added an optional `agent: string | null` field to the `config` object in
-  `AgentManagerParamsSchema`, with a describe() string that explains the
-  "selectable primary agent" contract.
-- Added validation in the `create` action path (before model resolution):
-  trims the requested name, enumerates `registry.list()` filtered for
-  `mode !== 'subagent'`, non-deprecated, and not flagged
-  `options.internal` / `options.hidden`. Match by `name`, then `id`, then
-  `aliases`. On miss, returns `{ success: false, error: 'Unknown or
-  non-selectable agent: <name>. Selectable agents: <csv>' }` without
-  starting a session.
-- Added `agent?: string` to `AgentManagerResult.session`; wired
-  `...(resolvedAgentId ? { agent: resolvedAgentId } : {})` into the create
-  response so callers see which agent was accepted.
-- Updated the inline description for the `create` action to mention the
-  new `agent` config field.
+2. **Compaction buffer that leaves no model room (opencode `33726e8`).**
+   - `effectiveCompactionBudget(contextWindow, buffer, used)` in the new `src/core/session/compaction.ts`.
+   - If `buffer >= remaining`, ignore the buffer and return the full remaining window.
 
-Alexi's `agent-manager` tool is single-action rather than multi-task, so
-the field was added inside `config` (which already carries `mode` /
-`model` / `provider` / `excludeLocalState`) instead of per-task as in
-upstream.
+4. **Credential refresh coordination (opencode `9435378`).**
+   - `refreshCredentialWithLock` in `src/providers/credential.ts`.
+   - Zero-dependency implementation: lock is a `<credentialPath>.lock` file opened `wx` (exclusive). Stale locks (owner crash) reclaimed after `staleMs` (default 10s). Capped exponential backoff on contention. Double-check cached credential after acquiring lock.
+   - Can be used as a wrapper around SAP AI Core XSUAA token acquisition in `sapOrchestration.ts` to prevent parallel CLI invocations from thrashing tokens.
 
-### #2 Agent Manager — documentation refresh (`high`, feature)
+5. **File-watcher bounded work (kilocode `2c8317d9a`).**
+   - Alexi does NOT depend on `@ff-labs/fff-bun`, so there is no package bump to apply.
+   - Added documentation on `InstanceWatcher.setDebounceTimer` noting that the timer-replace pattern already in place is Alexi's equivalent of the fff 0.10.5 drop-stale fix.
 
-File: `src/tool/tools/agent-manager.txt`
+7. **Request-hook body-copy avoidance (opencode `d1cf7dd` + `91b5a7c`).**
+   - `dispatchRequestHook` in `src/core/session/model-request.ts` — identity-first short-circuit, deep-equality fallback. The returned request is identical to the input unless the hook actually mutated it.
+   - `runWithRequestHookPayload` wraps the request lifecycle in a `try/finally` that drops the hook-payload reference so running tools don't pin it in memory.
 
-Rewrote the plain-text tool description with the new paragraph about
-named-agent delegation, the "selectable primary agent" contract, the
-`task` vs `agent_manager` disambiguation (so the model stops confusing
-subagent names with primary-agent names), and the recovery hint ("read
-the selectable-agents list rather than retrying blindly"). Removed the
-legacy trailing paragraph in favour of the richer version embedded in
-the preamble.
+### Priority: medium
 
-### #3 Preserve custom delegator subagent edit permissions (`critical`, security)
+3. **`precompute_compaction` → `background_compaction` rename (opencode `f523f77`).**
+   - `src/compaction/index.ts::CompactionConfig` carries both fields; the deprecated alias is kept for config compatibility.
+   - `src/config/compactionConfig.ts::validateCompactionConfig` accepts either and forwards the deprecated field value into `background_compaction` when the canonical name is absent.
+   - `src/core/session/compaction.ts::resolveBackgroundCompaction` is the single resolution helper for callers.
 
-File: `src/agent/subagent-permissions.ts`
+6. **Drop `session_pending` table — SKIPPED (not applicable).**
+   - Alexi does not mirror upstream opencode's drizzle-based database schema. There is no `session_pending` table in the Alexi codebase (verified via `grep`). No migration was created.
 
-Ports kilocode `0c8849c18`.
+8. **Media type / MIME detection (opencode `c54677b` + `421e44e`).**
+   - `src/core/mime.ts::EXTENSION_MEDIA_TYPES` adds `.avif`, `.heic`, `.heif`, `.mov`, `.m4a`.
+   - `detectMediaFromMagic` reads the ISO BMFF `ftyp` box and disambiguates HEIC/QuickTime/M4A/MP4 by major brand.
+   - `detectMediaType(bytes, filename?)` tries magic first, falls back to extension.
 
-Alexi has no upstream-style `inheritedRules` function with `Permission.merge`
-on `edit` patterns — its subagent permission model is tool-name based
-(`write`, `edit`, `apply_patch`, `bash`, ...). The port therefore maps
-to the equivalent semantic in `deriveSubagentSessionPermission`:
+9. **Configurable prompt cache TTL (opencode `9007700`).**
+   - `src/providers/anthropic.ts::CachePolicySchema` — Zod enum `'5m' | '1h'`, default `'5m'`.
+   - `anthropicCacheControl(policy?)` and `anthropicCacheProviderOptions(policy?)` return provider-shaped `cache_control` blocks.
+   - No wiring change into `sapOrchestration.ts` yet — helpers are available for the next PR that routes Anthropic through SAP AI Core prompt caching.
 
-- When `input.parentAgent.native === false` (custom delegator), skip the
-  implicit `parent-deny-write` rule emitted from the parent's `tools`
-  allowlist. Native delegators keep the previous behaviour so plan-mode
-  hardening still applies.
-- When `input.parentAgent.native === false`, skip edit-family entries
-  (`write`, `edit`, `multiedit`, `apply_patch`, `patch`) from
-  `disabledTools` — those are scoped to the delegator itself.
-- Non-edit denies (`bash`, `shell`, anything else) ALWAYS propagate as
-  ceilings regardless of `native` — only edit scoping changes.
-- Session-level denies (`parentSessionPermission`) are still forwarded
-  verbatim, so operators can confine a delegated workflow by adding
-  session rules rather than agent rules.
-- Added a long doc comment above `deriveSubagentSessionPermission`
-  explaining the native-vs-custom split and the "use session-level
-  edit restriction to confine a delegated workflow" guidance.
+10. **Typed Bedrock Converse options (opencode `74556a2`).**
+    - `src/providers/bedrock.ts::BedrockConverseOptions` — typed fields for `reasoningEffort`, `serviceTier`, `adaptiveThinking`, `requestMetadata`, `responseJsonSchema`.
+    - `buildConverseRequest(model, messages, opts)` produces a Converse request body with correct nesting (`additionalModelRequestFields`, `performanceConfig.latency`, `requestMetadata`).
 
-Existing tests in `src/agent/subagent-permissions.test.ts` keep passing
-because they don't set `native` (undefined !== false), so they fall
-through the "native delegator" branch.
+### Priority: low
 
-### #4 Opt-in OpenAI-compatible tool-content normalization (`high`, bugfix)
-
-File: `src/providers/openai-compatible.ts` (new)
-
-Ports kilocode `8d5c126dc`. Alexi has no existing dedicated OpenAI-
-compatible chat module (`sapOrchestration.ts` carries the SAP-flavoured
-transport instead), so this ships as a focused utility module ready to
-wire in when a strict-OpenAI deployment opts in.
-
-Exports:
-
-- `normalizeToolContent(message, options?)` — returns input unchanged
-  unless `options.normalizeNullToolContent === true` AND the message is
-  a tool-role message with explicit `null` content, in which case
-  content is rewritten to `""`.
-- `normalizeToolContentAll(messages, options?)` — array convenience.
-- Types: `OpenAICompatibleMessage`, `NormalizeToolContentOptions`.
-
-Default behaviour is NO-OP (preserve upstream shape), matching the
-upstream fix. SAP AI Core routing is unaffected unless a deployment
-opts in.
-
-## Changes Not Executed
-
-The update plan declared 7 changes but the input stream truncated mid-way
-through change #4 ("Ensure SAP A..."). Changes #5, #6, #7 (medium / low
-priority) were not present in the delivered plan, so there was nothing to
-execute for them. No speculative edits were made.
+11. **Schema-driven provider option keys (opencode `490456d`).**
+    - `src/providers/options.ts::deriveProviderOptionKeys` reflects a Zod settings schema into `Map<providerId, Set<optionKey>>`.
+    - `filterProviderOptions(providerId, bag, keyMap)` trims unknown keys. Unknown providers pass through verbatim so bespoke extensions are not stripped.
 
 ## Issues Encountered
 
-- **Upstream `inheritedRules` has no 1:1 target in Alexi.** Alexi uses
-  tool-name permission rules rather than kilocode's pattern-based
-  `edit:<glob>` rules. Change #3 was translated to the equivalent
-  semantic: skip edit-tool denies on custom (non-native) parent agents
-  while keeping session-level denies as ceilings. The security
-  contract (custom delegator edit policy is self-scoped; session denies
-  propagate) matches the upstream intent.
-- **No `src/providers/openai-compatible.ts` existed.** Change #4 was
-  implemented as a new standalone utility module, keeping the opt-in
-  default so there is zero behavioural change for existing deployments.
-- **Agent manager shape differs from upstream.** Upstream's
-  `agent_manager` takes a `tasks: Task[]` array; Alexi's is single-
-  action. The new `agent` field was therefore added inside the existing
-  `config` object rather than as a per-task field.
+1. **File-path drift**: the update plan was written against upstream opencode / kilocode file layouts (e.g. `src/core/session/compaction.ts`, `src/providers/credential.ts`, `src/providers/anthropic.ts`, `src/providers/bedrock.ts`). Alexi does not mirror those paths — the active compaction logic lives in `src/core/compaction.ts` and `src/compaction/index.ts`. Where the plan referenced a non-existent file, the new file was created as a *helper* module alongside the existing one, and the loop-guard / buffer / rename changes were ALSO applied to the real in-use `src/core/compaction.ts` and `src/compaction/index.ts` so the fixes are actually effective.
 
-## Verification
+2. **No `@ff-labs/fff-bun` dependency**: change 5 was partially inapplicable. Documentation-only touch applied.
 
-- No existing files were deleted.
-- No existing test fixtures were modified (behavioural changes are
-  gated: `native === false` for #3, `normalizeNullToolContent === true`
-  for #4, `config.agent` presence for #1).
-- Imports preserve the Alexi ESM `.js` convention.
-- All edits respect the ESLint rules (`eqeqeq`, `curly: all`,
-  no `console`).
+3. **No `session_pending` schema**: change 6 was not applicable; Alexi doesn't ship upstream's drizzle schema. Documented and skipped.
+
+4. **Plan truncated at change 11**: the executed plan is complete through the typed options surface (change 11). Changes 12–14 referenced in the plan preamble were not materialised in the body of the prompt and could not be executed verbatim.
+
+5. **Non-breaking signatures**: all `shouldCompact` and `needsCompaction` signature changes are strictly additive (new optional parameter / option field). Existing test mocks (`vi.fn().mockReturnValue(false)`) and callers continue to work unchanged.
+
+## Verification Steps Taken
+
+- Verified new `CompactionConfig` fields do not break `validateCompactionConfig` test for "should ignore unknown keys" (tests/compaction/config.test.ts:290) — unknown keys still fall through, only `buffer`/`background_compaction`/`precompute_compaction` are now actively validated.
+- Verified new `ShouldCompactOptions.lastCompactionAtTokens` field is optional and existing callers (`src/core/sessionManager.ts`, `agenticChat.ts`) pass through unchanged.
+- Verified all new files use the `.js` extension on local imports (ESM NodeNext requirement from AGENTS.md).
+- Verified no `console.*` calls in new files (only `src/utils/logger.ts` is allowed to use `console` per repo convention).

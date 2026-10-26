@@ -598,12 +598,24 @@ flowchart TB
 When the LLM returns a context-length error, the agentic chat detects it via pattern matching and triggers reactive compaction:
 
 ```typescript
-// Error patterns detected:
+// Error patterns detected (curated — see src/core/contextOverflow.ts):
 const CONTEXT_OVERFLOW_PATTERNS = [
-  /context.length/i,
+  /context_length_exceeded/i,
+  /max_tokens_exceeded/i,
+  /too_many_tokens/i,
+  /context[\s_]window/i,
+  /context[\s_]limit/i,
+  /maximum[\s_]context([\s_]length)?/i,
+  /exceeds[\s_]the[\s_]context/i,
   /context.*exceeded/i,
   /token.*limit.*exceeded/i,
-  /max_tokens_exceeded/i,
+  /input.*too.long/i,
+  /request.*too.*large/i,
+  /prompt.*too.*long/i,
+  // Added 2026-10-23 (opencode `09a1db3`): some providers surface
+  // overflow as "please reduce the length of ..." in free-form error
+  // messages instead of a structured code.
+  /reduce the length/i,
   // ...
 ];
 
@@ -808,6 +820,80 @@ recordRouteOutcome(modelId, { kind: 'success' });
 **`ErrorBackoff` fatal flag.** `src/core/error-backoff.ts:210-217` recognises `ContentFilterError` alongside `FreeTierRateLimitError` in the permanent-failure branch of `recordError`, flipping `fatalNotified` so the circuit breaker short-circuits any further attempt on the same instance. The synchronous `isFatal(err?)` short-circuit (`error-backoff.ts:285-290`) returns `true` for a `ContentFilterError` on the first inspection — CLI renderers can decide synchronously whether to retry or surface the user-facing message without first calling `recordError`.
 
 **No route-health penalty, no cost under-count.** The check runs BEFORE `recordRouteOutcome(modelId, { kind: 'success' })`, so a filtered response does not spuriously reset the route failure counter. `provider.complete()` already reported usage BEFORE throwing, so the caller can still bill the prompt tokens the policy block consumed — the telemetry event carries `promptTokens` / `completionTokens` for the operator trace. The error object carries `partialText` when the model produced any output before the filter fired, so a surface that wants to show "model produced N tokens before the block" can read it off `(err as ContentFilterError & { partialText?: string }).partialText`.
+
+### Content-policy classification across provider families (issue #2134)
+
+The content-filter machinery above covers the SAP AI Core orchestration path that normalises every rejection into a `ContentFilterError` with the `content_filter` machine code. That path is sufficient for Alexi's single supported provider — but the error-backoff surface is also consumed by raw-fetch call sites, telemetry/logging helpers, and tests that stage upstream provider payloads directly. Before issue #2134 those payloads bypassed the fatal check and were retried against the same prompt until the budget was spent. `isContentPolicyError(err)` in [`src/core/error-backoff.ts:100-170`](../src/core/error-backoff.ts) closes the gap by covering four additional shapes:
+
+- **OpenAI**: `error.type === 'moderation'`, `error.code === 'content_policy_violation'`, HTTP `451` ("Unavailable For Legal Reasons" — reused by OpenAI for moderation blocks).
+- **Google (Gemini / Vertex)**: `finishReason === 'SAFETY'` or `finishReason === 'content-filter'`, and `promptFeedback.blockReason === 'SAFETY' | 'OTHER'`.
+- **Anthropic**: `error_type === 'content_policy'`, and `type === 'invalid_request_error'` with a `content_policy` message substring.
+- **Message-regex fallback** for raw string errors wrapped in bare `Error` objects without structured fields:
+
+  ```typescript
+  const CONTENT_POLICY_MESSAGE_RE =
+    /\bmoderation\b|content[_\s-]filter|content[_\s-]policy|\bsafety filter\b|\bsafety setting|safety_rating|\bsafety\b/i;
+  ```
+
+  Word boundaries bracket `moderation` and `safety` to avoid false positives on unrelated 5xx telemetry text like `safety-related` or `moderation-note`.
+
+`ErrorBackoff.recordError(statusCode?, err?)` and `ErrorBackoff.isFatal(err?)` consume `isContentPolicyError` alongside `isFreeTierRateLimitError`, so a content-policy rejection flips `fatalNotified` and short-circuits the retry loop identically regardless of which provider family staged the payload — the pre-existing `isContentFilterError` SAP-orchestration path is checked first and short-circuits before the broader detector pays any extra scan cost.
+
+```mermaid
+flowchart TB
+    Err[Provider error] --> ContentPolicy{isContentPolicyError?}
+    ContentPolicy -->|yes| Fatal1[fatal: true<br/>retryable: false<br/>type: content_policy]
+    ContentPolicy -->|no| Auth{isPermanentAuthFailure?}
+    Auth -->|yes| Fatal2[fatal: true<br/>type: auth]
+    Auth -->|no| FreeTier{isFreeTierRateLimitError?}
+    FreeTier -->|yes| Fatal3[fatal: true<br/>type: rate_limit]
+    FreeTier -->|no| Status{HTTP status?}
+    Status -->|451| Fatal1
+    Status -->|401/403| Fatal2
+    Status -->|400/422/other 4xx| Fatal4[fatal: true<br/>type: validation]
+    Status -->|429| Transient1[fatal: false<br/>type: rate_limit]
+    Status -->|5xx| Transient2[fatal: false<br/>type: network]
+    Status -->|none/other| MessageRe{NETWORK_MESSAGE_RE match?}
+    MessageRe -->|yes| Transient2
+    MessageRe -->|no| RateLimit{isRateLimitError /<br/>isXAICapacityError?}
+    RateLimit -->|yes| Transient1
+    RateLimit -->|no| Unknown[fatal: false<br/>retryable: true<br/>type: unknown]
+```
+
+**Stateless `classifyError(err): ErrorClassification` taxonomy.** `src/core/error-backoff.ts:559-617` folds any upstream error into a single `{ type, fatal, retryable, statusCode? }` record for callers that only need a one-line decision (telemetry attribution, user-facing error rendering, outer retry loops without session-level bookkeeping). The signature:
+
+```typescript
+export type ErrorType =
+  | 'network'
+  | 'content_policy'
+  | 'auth'
+  | 'validation'
+  | 'rate_limit'
+  | 'unknown';
+
+export interface ErrorClassification {
+  type: ErrorType;
+  fatal: boolean;
+  retryable: boolean;
+  statusCode?: number;
+}
+
+export function classifyError(err: unknown): ErrorClassification;
+```
+
+Precedence is most-specific first, matching the flowchart above. The function is deliberately stateless — retry-budget bookkeeping across multiple attempts stays with the `ErrorBackoff` instance. Both `ErrorType` and `ErrorClassification` are re-exported from [`src/providers/index.ts:405-410`](../src/providers/index.ts) so callers importing from the canonical providers surface get a single entry point.
+
+**Provider-attribution helpers.** Three thin wrappers in [`src/providers/index.ts:327-401`](../src/providers/index.ts) isolate the structural pattern per provider family for telemetry and logging paths that want to attribute a block to a specific provider:
+
+| Helper                            | Shapes covered                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------------ |
+| `isOpenAIContentPolicyError(err)` | HTTP `451`; `{ error: { type: 'moderation' } }`; `{ error: { code: 'content_policy_violation' } }` |
+| `isGoogleSafetyError(err)`        | `finishReason === 'SAFETY'`; `promptFeedback.blockReason === 'SAFETY'`         |
+| `isAnthropicContentPolicyError`   | `error_type === 'content_policy'`; `invalid_request_error` + `content_policy` message |
+
+All three are subsumed by the generic `isContentPolicyError` for retry decisions; they exist purely for attribution. The generic detector is the single source of truth for `ErrorBackoff` and `classifyError`.
+
+**Non-retry contract pinned by regression suite.** [`tests/core/error-classification.test.ts`](../tests/core/error-classification.test.ts) (294 lines, 32 cases across four describe blocks) locks in: (1) every `classifyError` branch, (2) every content-policy message substring and shape plus negatives, (3) every provider-specific helper branch, and (4) that `ErrorBackoff.isFatal` short-circuits for a content-policy error from any provider family *without* a prior `recordError` call (and that a transient `503` or `ECONNRESET` does NOT flip the flag). See [docs/TESTING.md — Testing content-policy classification (issue #2134)](./TESTING.md#testing-content-policy-classification-issue-2134).
 
 ### Environment Details Fence
 
@@ -2213,6 +2299,82 @@ Contract:
 - `SessionManager.addMessage(role, content, tokens?, options?)` accepts either the raw `displayRole` string or an options object (`{ displayRole }`) as its fourth argument for backwards compatibility with three-argument call sites.
 - Auto-title generation (`activeSession.metadata.title` from the first user message) skips messages carrying any `displayRole` value, so hook payloads cannot end up as the session title.
 
+### Prompt Hook Model Resolution Cache (`src/hooks/index.ts`)
+
+Introduced in commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, merged 2026-10-24; resolves issue #2143). Prompt hooks that resolve model configuration on every invocation become expensive and noisy when the same model is reused across many hook calls inside a single agent step — routing lookups, deployment-registry hits, variant selection, and capability probes are all amortizable per step but were being redone per call. The cache lives in `src/hooks/index.ts` and is driven by the agent loop in `src/core/agenticChat.ts`.
+
+```typescript
+// src/hooks/index.ts
+export type ModelConfig = Record<string, unknown>;
+
+export function getModelForHook(
+  stepId: string,
+  modelName: string,
+  resolver: () => ModelConfig
+): ModelConfig;
+
+export function clearStepCache(stepId: string): void;
+```
+
+#### Keying scheme and lifetime
+
+The module-local `modelResolutionCache: Map<string, ModelConfig>` stores entries under the composite key `${stepId}:${modelName}`. The composite is deliberate:
+
+- Two different steps that happen to use the same `modelName` do NOT share state — a mid-session routing change that redirects `gpt-4o` to a different deployment on step N+1 is visible as a cache miss, not masked by a stale entry from step N.
+- A single step can resolve multiple models (routing + fallback + auxiliary task) without evicting entries from one another. The `getModelForHook` body is `O(1)` on hit, `O(resolver)` on miss, and never evicts.
+- `ModelConfig = Record<string, unknown>` is deliberately open — hook authors can thread arbitrary provider / deployment / capability fields through the cache without coupling it to a single provider shape. Callers are expected to produce the resolved object once and reuse it; the cache stores values by reference identity, so a subsequent lookup returns `===` the first result.
+
+`clearStepCache(stepId)` drops every entry whose key starts with `${stepId}:`. The implementation iterates `modelResolutionCache.keys()` and matches on the `${stepId}:` prefix — the trailing colon is load-bearing, because the naive `startsWith(stepId)` form would collapse `step-1` into `step-10` and drop both. The dedicated regression test (`tests/hooks/model-cache.test.ts` — `does NOT confuse a step id that is a prefix of another step id`) pins the correct behaviour. The function is idempotent on an unknown step id.
+
+#### Agent loop integration
+
+The `while (iterations < maxIterations)` body in `src/core/agenticChat.ts` tracks `let previousStepId: string | undefined` and clears the previous step's entries at the TOP of each iteration — the moment control returns to the loop head, regardless of whether the previous iteration completed normally, `continue`d, or threaded through one of the inline tool-call branches. A second clear fires once after the loop exits, so every `break` path (normal completion, loop detector, mistake tracker, stop hook, malformed-tool-call guard) still releases its cached entries.
+
+```mermaid
+flowchart TD
+    Enter["agenticChat() entry<br/>previousStepId = undefined"] --> Loop{"iterations < max?"}
+    Loop -- yes --> ClearPrev{"previousStepId<br/>defined?"}
+    ClearPrev -- yes --> Clear["clearStepCache(previousStepId)"]
+    ClearPrev -- no --> AssignId["sessionIdForStep = session.id ?? 'default'<br/>previousStepId = `${sessionId}:${iterations}`"]
+    Clear --> AssignId
+    AssignId --> Body["Step body:<br/>model.complete, tool calls,<br/>hook executions, ..."]
+    Body -- continue --> Loop
+    Body -- break --> PostLoop["clearStepCache(previousStepId)"]
+    Loop -- no --> PostLoop
+    PostLoop --> Return["return finalText"]
+```
+
+The two-point clear covers every exit without wrapping the ~600-line iteration body in a `try/finally`. The `let previousStepId` closure is intentional — a `try/finally` wrapping the body would need to reach past local variables declared in that body, and the loop head is where the next iteration's step id gets assigned anyway.
+
+#### Step-id composition
+
+```typescript
+const sessionIdForStep =
+  options?.sessionManager?.getCurrentSession()?.metadata.id ?? 'default';
+previousStepId = `${sessionIdForStep}:${iterations}`;
+```
+
+The session id (when present) composed with the iteration number keeps the step id unique across concurrent sessions in the same process. Step N of session A and step N of session B therefore do NOT share cache entries — important for the server mode and for any in-process scenario where multiple agent loops run concurrently (sub-agent delegation, parallel task workers).
+
+Sessions without a bound `SessionManager` fall back to the literal `'default'` scope. This is safe within a single `agenticChat` invocation because the iteration number is monotonically increasing, so step N and step N+1 keys differ by the suffix. It is UNSAFE to run two anonymous (`'default'`-scoped) agent loops concurrently against the same cache; in practice every call site inside Alexi binds a session manager, and the anonymous path exists only for direct unit-test invocation.
+
+#### Test-only helpers (`@internal`)
+
+Two helpers are exported for tests:
+
+- `_resetModelResolutionCache(): void` — empties the full map. Used in `beforeEach` so each unit test starts from a clean slate.
+- `_modelResolutionCacheSize(): number` — returns the live entry count so tests can assert growth / eviction without peeking at module-private state.
+
+Production code must prefer `clearStepCache(stepId)` because the reset helper breaks concurrent-step isolation. The underscored names mark them as internal; agent-authored tooling should NOT depend on them.
+
+#### Hook-mock patches
+
+Four companion test files mock `../../src/hooks/index.js` and had to be updated so `agenticChat.ts`'s new `clearStepCache` import resolves against the mock surface: `tests/hooks/context-injection.test.ts`, `tests/hooks/continueOnBlock.test.ts`, `tests/hooks/markup-sanitization.test.ts`, and `tests/orchestrator-hooks.test.ts`. Each now exposes `clearStepCache: vi.fn()`. The `continueOnBlock.test.ts` mock additionally adds `getBlockCap: () => 8` to keep parity with the production module surface.
+
+#### Why not a `WeakMap` keyed by step object
+
+A `WeakMap<StepObject, Map<string, ModelConfig>>` would deliver the same lifetime guarantees without the explicit `clearStepCache` call, but it requires an actual step object to key on. The agent loop today does not materialize a `Step` struct — it tracks iteration state in locals — and introducing one just to anchor a `WeakMap` would be a larger refactor than the explicit-clear approach. The current design matches the upstream OpenCode PR and keeps the agent-loop diff to ~40 lines.
+
 ## Compaction System
 
 Context compaction manages conversation length when approaching token limits:
@@ -2492,6 +2654,155 @@ sequenceDiagram
         end
         Bus-->>TUI: setIsCompacting(false)
         Compact-->>Caller: CompactionResult
+    end
+```
+
+### Compaction Loop Guard and Session Helpers (`src/core/session/compaction.ts`)
+
+Opencode `33726e8` + `f523f77` and kilocode `ccf958a1d` are consolidated into a dedicated, dependency-free module (`src/core/session/compaction.ts`) so the compaction manager (`src/compaction/index.ts`) and the per-session prompt builder (`src/core/session/prompt.ts`) can share the same pure helpers without introducing a cycle. The module exports three primitives plus a normalised `SessionCompactionConfig` type:
+
+```typescript
+// src/core/session/compaction.ts
+export interface Usage {
+  ratio: number;  // used / contextWindow (0..1)
+  tokens: number; // absolute used tokens
+}
+
+export function shouldCompact(
+  usage: Usage,
+  threshold: number,
+  lastCompactionAtTokens?: number
+): boolean;
+
+export function effectiveCompactionBudget(
+  contextWindow: number,
+  buffer: number,
+  used: number
+): number;
+
+export function resolveBackgroundCompaction(cfg: SessionCompactionConfig): boolean;
+```
+
+Design contract:
+
+- **Threshold is the trigger — not `threshold * 0.9`.** Kilocode `ccf958a1d` fixed a latent off-by-nine where the trigger fired well before the configured threshold. The pure form here fires at `usage.ratio >= threshold` exactly.
+- **Loop guard.** When `lastCompactionAtTokens !== undefined && usage.tokens >= lastCompactionAtTokens`, `shouldCompact` returns `false`. The session persists the token count observed at the most recent successful compaction (`src/core/session/prompt.ts:30-48`, `recordCompactionRun(state, compactedTokens)`), and the summariser is NOT re-invoked until the token count has meaningfully decreased. Reset to `undefined` after the summary itself leaves the preserve-last-N window on a later turn, so a new oversized burst can trigger again.
+- **Buffer that would starve the model is ignored.** `effectiveCompactionBudget(contextWindow, buffer, used)` guards against a configured `buffer` larger than `contextWindow - used`: in that case the full remaining window is returned (opencode `33726e8`) rather than a zero or negative budget that would silently starve the next turn.
+- **Deprecated-alias precedence.** `resolveBackgroundCompaction(cfg)` honours `background_compaction` first (canonical, opencode `f523f77`) and falls back to `precompute_compaction` when the canonical field is absent. If both are present, canonical wins.
+
+```mermaid
+flowchart TD
+    Entry["shouldCompact(usage, threshold, lastCompactionAtTokens?)"]
+    Entry --> Below{"usage.ratio &lt; threshold?"}
+    Below -->|Yes| ReturnFalse["return false"]
+    Below -->|No| HaveLast{"lastCompactionAtTokens defined?"}
+    HaveLast -->|No| ReturnTrue["return true"]
+    HaveLast -->|Yes| Stuck{"usage.tokens ≥ lastCompactionAtTokens?"}
+    Stuck -->|Yes| ReturnFalseLoop["return false (loop guard)"]
+    Stuck -->|No| ReturnTrue
+```
+
+The `CompactionConfig` surface on `src/compaction/index.ts:53-73` carries the same two new fields (`buffer?: number`, `background_compaction?: boolean`, plus the `precompute_compaction?: boolean` deprecated alias) so operator-facing JSON loaded by `src/config/compactionConfig.ts` and the session helpers above describe the same contract. The validator in `validateCompactionConfig` (`src/config/compactionConfig.ts:71-96`) rejects a non-numeric or negative `buffer` and a non-boolean `background_compaction` / `precompute_compaction` at config load time, so a typo cannot silently degrade the trigger.
+
+Related loop-guard wiring: `CompactionManager.needsCompaction(messages, options?, lastCompactionAtTokens?)` (`src/compaction/index.ts:231-283`) and the module-level `shouldCompact(messages, maxTokens?, lastCompactionAtTokens?)` (`src/compaction/index.ts:733-784`) accept the same third argument so legacy callers that go through the manager interface get the same guarantee without re-plumbing to the per-session helpers.
+
+## Attachment MIME Detection (`src/core/mime.ts`)
+
+Opencode `421e44e` + `c54677b` ported here consolidate attachment media-type resolution behind three pure helpers. Resolution order is magic-byte first (so a mis-extensioned or extension-less payload still resolves), extension fallback, then `undefined`.
+
+```typescript
+// src/core/mime.ts (public surface)
+export function mediaTypeForExtension(ext: string): string | undefined;
+export function detectMediaFromMagic(bytes: Uint8Array): string | undefined;
+export function detectMediaType(bytes: Uint8Array, filename?: string): string | undefined;
+export function getExtensionMediaTypes(): Readonly<Record<string, string>>;
+```
+
+The extension table (`EXTENSION_MEDIA_TYPES`, `src/core/mime.ts:34-74`) covers images (`.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.avif`, `.heic`, `.heif`, `.svg`, `.bmp`, `.tiff/.tif`), audio (`.m4a`, `.mp3`, `.wav`, `.ogg`, `.flac`, `.aac`), video (`.mp4`, `.mov`, `.webm`, `.mkv`, `.avi`), and documents (`.pdf`, `.json`, `.xml`, `.txt`, `.md`, `.csv`, `.html`). Lookup is case-insensitive; the leading dot is required.
+
+The magic-byte path inspects the first 12 bytes for an ISO BMFF `ftyp` box (`src/core/mime.ts:98-128`). HEIC, QuickTime, M4A, and generic MP4 all share the ISO BMFF container, so a bare extension OR a bare `video/mp4` fallback misidentifies them:
+
+| ftyp major brand                | Resolved media type |
+|---------------------------------|---------------------|
+| `heic`, `heix`, `mif1`          | `image/heic`        |
+| `qt  ` (with trailing spaces)   | `video/quicktime`   |
+| `M4A `                          | `audio/mp4`         |
+| `mp4*`, `isom`, `iso2`          | `video/mp4`         |
+
+```mermaid
+flowchart TD
+    Entry["detectMediaType(bytes, filename?)"] --> Magic["detectMediaFromMagic(bytes)"]
+    Magic --> HasBox{"ftyp box recognised?"}
+    HasBox -->|Yes| ReturnMagic["return brand → media type"]
+    HasBox -->|No| HaveName{"filename has '.'?"}
+    HaveName -->|No| ReturnUndef["return undefined"]
+    HaveName -->|Yes| ExtLookup["mediaTypeForExtension(ext)"]
+    ExtLookup --> ReturnExt["return mapped type or undefined"]
+```
+
+Keeping magic-byte detection ahead of the extension table matters for iOS/macOS screenshot pastes: Preview often renames `.heic` to `.jpg` before export, and clipboard contents arrive extension-less. Reading the ftyp brand catches both cases without rejecting the attachment.
+
+## Model-Request Hook Plumbing (`src/core/session/model-request.ts`)
+
+Opencode `d1cf7dd` + `91b5a7c` ported here replace an "always copy the request through the hook event" path with an identity-first short-circuit, cutting heap pressure on long sessions with large multimodal attachments. The module is deliberately decoupled from `src/hooks/index.ts` (which handles shell/http/script side-effect hooks, not model-request transformation) so the two surfaces evolve independently.
+
+```typescript
+// src/core/session/model-request.ts
+export interface ModelRequestLike { readonly [key: string]: unknown; }
+export interface RequestHookResult<Req extends ModelRequestLike> { request?: Req; }
+export type RequestHook<Req extends ModelRequestLike> = (ctx: { request: Req }) =>
+  | Promise<RequestHookResult<Req> | void>
+  | RequestHookResult<Req>
+  | void;
+
+export async function dispatchRequestHook<Req extends ModelRequestLike>(
+  request: Req,
+  hook: RequestHook<Req> | undefined
+): Promise<Req>;
+
+export interface HookPayloadEnvelope<T = unknown> { hookPayload?: T; }
+
+export async function runWithRequestHookPayload<T, R>(
+  envelope: HookPayloadEnvelope<T>,
+  payload: T,
+  run: () => Promise<R>
+): Promise<R>;
+
+export function clearHookPayload(envelope: HookPayloadEnvelope): void;
+```
+
+`dispatchRequestHook` returns the original reference when:
+
+1. No hook was supplied (`!hook`).
+2. The hook returned `undefined` or an object with no `request` (no-op signal).
+3. The hook returned `result.request === request` (identity short-circuit — essentially free).
+4. The hook returned a fresh object that is structurally identical to the input (`deepEqual` fallback — only reached for case 3's miss).
+
+Only when the hook actually produced a different request does the dispatcher accept the replacement. The deep-equality fallback keeps the common no-op case from forcing GC to track a short-lived copy of a potentially-large multimodal payload.
+
+`runWithRequestHookPayload` is the paired lifecycle helper: it stashes the payload on a caller-owned envelope, runs the request, and clears the payload reference in `finally` so running tools do not pin the original request body for the lifetime of any long-running tool execution.
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Dispatch as dispatchRequestHook
+    participant Hook as RequestHook
+
+    Caller->>Dispatch: request, hook
+    alt hook undefined
+        Dispatch-->>Caller: original request
+    else hook present
+        Dispatch->>Hook: { request }
+        Hook-->>Dispatch: result
+        alt result empty or no .request
+            Dispatch-->>Caller: original request
+        else result.request === request
+            Dispatch-->>Caller: original request (identity)
+        else deepEqual(result.request, request)
+            Dispatch-->>Caller: original request (free the copy)
+        else different request
+            Dispatch-->>Caller: result.request (accepted)
+        end
     end
 ```
 
@@ -3248,6 +3559,147 @@ Cross-references:
 - Transient-vs-permanent contract that `isRetryableError` encodes:
   [AGENTS.md — Error classification](../AGENTS.md#error-classification-retry-vs-config-fix).
 
+### Known-throttle guard on context-overflow detection
+
+Rate-limit errors that carry an explicit `Retry-After` signal are
+classified as *known throttles* and MUST NOT trigger context-overflow
+compaction, even when the raw provider message happens to include
+tokens-related substrings (`"token limit exceeded, please slow down"`,
+`"please reduce the length of the messages"`). Compacting the context
+does nothing to resolve a throttle — the provider is throttling the
+account, not rejecting the payload — and routing the error through the
+summary pass wastes tokens on a request that just needs to wait for the
+quota window to reset.
+
+The guard is implemented in `src/core/error-backoff.ts` and consumed in
+`src/core/contextOverflow.ts`. Reference: SST OpenCode "known throttle
+overflow" fix (2026-10-25).
+
+#### Classifier (`isKnownThrottle`)
+
+```typescript
+// src/core/error-backoff.ts:398
+export function isKnownThrottle(err: unknown): boolean {
+  if (!isRateLimitError(err)) {
+    return false;
+  }
+  // Rate-limit error + at least one Retry-After signal.
+  //   retryAfterSeconds | retryAfterMs | resetAt | headers['retry-after']
+  // ...
+}
+```
+
+The function is pure, stateless, and non-throwing. The signal sources
+are checked in priority order and short-circuit on the first hit:
+
+| Source                       | Produced by                                                              |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `retryAfterSeconds` (number) | `FreeTierRateLimitError` / `ProviderRateLimitError` constructors         |
+| `retryAfterMs` (number)      | Provider adapters that already parsed the header into milliseconds       |
+| `resetAt` (`Date`)           | Free-tier reset window derived from `X-RateLimit-Reset`                  |
+| `headers['retry-after']`     | Raw header dictionary leaking through from the fetch layer (case-insensitive) |
+
+An error that carries a `Retry-After` signal but is NOT a rate-limit
+error is deliberately rejected — a random `500` with a header is not a
+throttle. An empty header value is also rejected so a provider that
+emits a blank `Retry-After:` is treated as "no signal".
+
+#### Context-overflow short-circuit
+
+`isContextOverflowError` consults `isKnownThrottle` first and returns
+`false` immediately when the error is a known throttle, regardless of
+message content:
+
+```typescript
+// src/core/contextOverflow.ts:96
+export function isContextOverflowError(error: unknown): boolean {
+  if (isKnownThrottle(error)) {
+    return false;
+  }
+  const message = getErrorMessage(error);
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(message));
+}
+```
+
+```mermaid
+flowchart TB
+    Err([Provider error]) --> Throttle{isKnownThrottle?}
+    Throttle -->|yes| Backoff[Honour Retry-After via ErrorBackoff<br/>wait for quota window<br/>NO compaction]
+    Throttle -->|no| Patterns{CONTEXT_OVERFLOW_PATTERNS<br/>message match?}
+    Patterns -->|yes| Compact[isContextOverflowError = true<br/>trigger reactive compaction]
+    Patterns -->|no| Transparent[isContextOverflowError = false<br/>surface to caller unchanged]
+    Backoff --> Caller([Caller])
+    Compact --> Caller
+    Transparent --> Caller
+```
+
+Decision matrix for the four relevant input shapes:
+
+| Error shape                                                            | `isKnownThrottle` | `isContextOverflowError` | Outcome                            |
+| ---------------------------------------------------------------------- | ----------------- | ------------------------ | ---------------------------------- |
+| `{ statusCode: 429, message: 'token limit exceeded', retry-after: 30 }` | `true`            | `false`                  | `ErrorBackoff` waits 30 s          |
+| `new Error('context_length_exceeded: 150000 tokens')`                   | `false`           | `true`                   | Reactive compaction                |
+| `{ statusCode: 429, message: 'context window exceeded' }` (no header)   | `false`           | `true`                   | Reactive compaction (fallback)     |
+| `{ statusCode: 429, retryAfterSeconds: 7, message: 'please reduce...' }` | `true`            | `false`                  | `ErrorBackoff` waits 7 s           |
+
+#### `Retry-After` parsing (`parseRetryAfterHeader`)
+
+Raw header values are run through `parseRetryAfterHeader(value, now?)`,
+the single parse point for the two RFC 9110 §10.2.3 shapes:
+
+- **Integer or decimal seconds** (`"120"`, `"1.5"`) — multiplied by
+  `1000` and floored.
+- **HTTP-date** (`"Fri, 31 Dec 1999 23:59:59 GMT"`) — parsed with
+  `Date.parse` and converted to a positive delta from the current wall
+  clock. A past timestamp collapses to `0` ("retry immediately")
+  mirroring the `getRetryAfterMs` semantics for `resetAt`.
+- **Bare `number` input** — treated as seconds for parity with provider
+  adapters that pre-parse the header.
+
+Garbage input (empty strings, `null`, `undefined`, `"nonsense"`,
+negative numbers) returns `undefined` so callers safely fall back to
+the default exponential schedule. Exported so provider adapters and
+tests share one parser instead of drifting across sites.
+
+#### `getRetryAfterMs` priority order
+
+`getRetryAfterMs(err)` is now the authoritative source for "how long
+should the retry wait?" and consults four sources in priority order:
+
+1. `retryAfterSeconds` (parsed by `RateLimitError` constructors).
+2. `retryAfterMs` (adapter shape ported from upstream commit `80b8762`).
+3. `resetAt` (`Date` from `X-RateLimit-Reset`); past timestamps collapse
+   to `0`.
+4. Raw `headers['retry-after']` entry (case-insensitive lookup, parsed
+   through `parseRetryAfterHeader`).
+
+The parsed `retryAfterSeconds` field wins over any raw header — a
+provider adapter that already normalised the header does not get
+overridden by a stale raw dictionary. A zero value is preserved so
+callers honour an "immediate retry allowed" hint rather than defaulting
+to exponential delay.
+
+#### `ErrorBackoff` integration
+
+`ErrorBackoff.recordError(statusCode, err)` honours `Retry-After` over
+the default exponential schedule when `getRetryAfterMs(err)` returns a
+value. The delay is capped at `maxDelayMs` so a malicious or
+misconfigured server cannot pin the client into an unbounded wait. A
+known throttle stays non-fatal regardless of consecutive-error count:
+the retry-budget exhaustion path (issue #1994) only fires for
+retryable errors that are NOT known throttles, so a server that keeps
+emitting `Retry-After` is treated as cooperative rather than
+exhausted.
+
+Cross-references:
+
+- Public surface and example composition:
+  [docs/API.md — Known-throttle API (`parseRetryAfterHeader`, `isKnownThrottle`)](./API.md#known-throttle-api-parseretryafterheader-isknownthrottle).
+- Regression test patterns:
+  [docs/TESTING.md — Testing the known-throttle guard](./TESTING.md#testing-the-known-throttle-guard-srccoreerror-backofftestts).
+- Port-maintenance contract for future throttle shapes:
+  [docs/CONTRIBUTING.md — Known-throttle guard contract (`isKnownThrottle`)](./CONTRIBUTING.md#known-throttle-guard-contract-isknownthrottle).
+
 ### Turn-level retry wrapper (`retryProviderCall`, issue #1737)
 
 Between the caller (`agenticChat`) and the provider-layer `ErrorBackoff`
@@ -3687,6 +4139,127 @@ class EnhancedToolRegistry {
 ```
 
 This allows tools to be dynamically resolved based on session context, agent permissions, and prompt characteristics.
+
+### Plugin Activation Gate (`src/plugin/index.ts`, `src/tool/registry.ts`)
+
+Added by commit `14b15b42 fix(core): add plugin activation gate before tool dispatch` (ports upstream opencode PR #51133, "activation gate before tool dispatch"). The gate closes a race between the agent loop and any plugin whose async `onLoad` lifecycle hook has not yet settled when the first tool call fires. Pre-fix symptom: the model emits a tool call for a plugin-provided tool (MCP command, hook-registered script, or any entry in `plugin.tools[]`), the registry has the entry live-but-unactivated, and the dispatcher returns a bare `tool not found` string. The model has no way to tell this apart from an actual typo, so it retries or hallucinates a different tool instead of waiting the few milliseconds the plugin needs to finish starting up.
+
+The fix layers three cooperating pieces so the loop never observes the half-initialised state:
+
+1. **Per-plugin activation metadata.** `interface PluginState` (`src/plugin/index.ts`) carries two internal fields:
+
+   ```typescript
+   interface PluginState {
+     // ...
+     activating: boolean;              // true while onLoad is awaited
+     activationPromise?: Promise<void>; // in-flight hook promise, shared across callers
+   }
+   ```
+
+   `PluginManager.load()` flips `activating = true` before awaiting `plugin.onLoad(state.context)` and clears the flag in a `finally` block regardless of outcome. The promise is wrapped so a thrown `onLoad` cannot leave the plugin stuck in a perpetually-activating state. `load()`'s own catch block removes the plugin from `this.plugins`, so no stale state leaks when a hook rejects.
+
+2. **Global gate at the top of the agent loop.** `src/core/agenticChat.ts` calls `await ensurePluginsActivated()` after `registerBuiltInTools()` and before entering the dispatch loop:
+
+   ```typescript
+   // src/core/agenticChat.ts
+   logger.debug('agenticChat: waiting for plugin activation');
+   await ensurePluginsActivated();
+   ```
+
+   The thin wrapper calls through to `PluginManager.ensureActivated()`:
+
+   ```typescript
+   async ensureActivated(): Promise<void> {
+     const pending: Promise<void>[] = [];
+     for (const state of this.plugins.values()) {
+       if (!state.enabled) {
+         continue; // disabled plugins are not advertised to the model
+       }
+       if (state.activating && state.activationPromise) {
+         pending.push(state.activationPromise);
+       }
+     }
+     if (pending.length === 0) {
+       return; // fast path for the common post-startup case
+     }
+     // allSettled: one failing onLoad must not block the gate for others.
+     await Promise.allSettled(pending);
+   }
+   ```
+
+   Disabled plugins are skipped — their tools are never advertised, so blocking on their activation would be a dead stall. `Promise.allSettled` (not `all`) is intentional: `load()`'s catch block has already removed a failing plugin from the registry, so the gate just needs every in-flight hook to *settle*, not to succeed.
+
+3. **Per-dispatch guard.** `executeToolCall` in `src/core/agenticChat.ts` calls `await checkToolActivation(toolCall.function.name)` before parsing arguments or invoking `tool.execute`:
+
+   ```typescript
+   // src/tool/registry.ts
+   export async function checkToolActivation(toolName: string): Promise<string | null> {
+     try {
+       const { getPluginManager } = await import('../plugin/index.js'); // lazy
+       const manager = getPluginManager();
+       const owner = manager.findPluginForTool(toolName);
+       if (!owner) {
+         return null; // built-in tool, nothing to gate on
+       }
+       if (!owner.activating) {
+         return null;
+       }
+       await manager.ensureActivated();
+       const settled = manager.findPluginForTool(toolName);
+       if (!settled || !settled.activating) {
+         return null;
+       }
+       return `Tool '${toolName}' is not ready (plugin '${owner.pluginName}' still activating)`;
+     } catch {
+       return null; // plugin module unavailable: degrade to open
+     }
+   }
+   ```
+
+   On a non-null return the dispatcher emits a `tool_end` progress event with `{ success: false, error: activationError }` so the model sees an actionable "plugin X still activating" message instead of a bogus "command not found". The plugin module is lazy-imported inside the function so the tool registry stays usable in minimal environments (unit tests, one-shot scripts) that never initialise the plugin system — the fail-safe is "do not block dispatch".
+
+**Ownership resolution.** `PluginManager.findPluginForTool(toolName)` iterates enabled plugins and matches on BOTH `state.registeredTools` (runtime registration complete) AND `state.plugin.tools?.some(t => t.name === toolName)` (declared in the manifest but awaiting registration). The second branch is exactly the race the gate guards against: the model knows the tool name because the plugin advertised it in its manifest, but the registry entry is not yet live.
+
+**Flow:**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as agenticChat
+    participant Mgr as PluginManager
+    participant Plugin as plugin.onLoad()
+    participant Exec as executeToolCall
+    participant Reg as checkToolActivation
+
+    Agent->>Mgr: registerBuiltInTools()
+    Agent->>Mgr: ensurePluginsActivated()
+    Mgr->>Plugin: await state.activationPromise (allSettled)
+    Plugin-->>Mgr: resolve / reject
+    Mgr-->>Agent: gate open
+    Agent->>Exec: tool call arrives
+    Exec->>Reg: checkToolActivation(toolName)
+    Reg->>Mgr: findPluginForTool(toolName)
+    alt built-in or no owner
+        Mgr-->>Reg: undefined
+        Reg-->>Exec: null (safe to dispatch)
+    else owner still activating
+        Reg->>Mgr: ensureActivated() (bounded wait)
+        Mgr-->>Reg: settled
+        Reg->>Mgr: findPluginForTool(toolName) (re-check)
+        alt still activating
+            Reg-->>Exec: "Tool 'X' is not ready (plugin 'Y' still activating)"
+            Exec-->>Agent: tool_end { success: false, error }
+        else now ready
+            Reg-->>Exec: null (safe to dispatch)
+        end
+    end
+```
+
+**Non-goals.**
+
+- The gate does NOT serialise tool dispatch after activation completes — once every enabled plugin's hook has settled, `ensurePluginsActivated()` is a `Promise.allSettled([])` no-op and the hot path is zero overhead.
+- The gate does NOT retry a failed `onLoad`. The plugin's `load()` catch block already removes the plugin from the registry, so the next `findPluginForTool` returns `undefined` and dispatch proceeds as if the plugin had never existed.
+- The gate does NOT emit permission prompts. It is a readiness check, not an authorisation check — the existing `getPermissionManager()` surface still gates every tool call independently.
 
 ## Session Replay
 
@@ -4487,12 +5060,16 @@ alexi/
 └── tsconfig.json
 ```
 
-The current top-level layout has grown to 35 modules (up from the
+The current top-level layout has grown to 36 modules (up from the
 original ~10). ADR 001 (`docs/adr/001-establish-adr-process.md`) records
 the layering rules these directories must respect; planned follow-up
-ADRs will backfill rationale for each newer top-level module. See
-`docs/adr/REVIEW-2026-09-14.md` for the current baseline snapshot and
-`docs/adr/REVIEW-*.md` more generally for the running architecture log.
+ADRs will backfill rationale for each newer top-level module. The
+latest top-level entry is `src/session-ui/` (added 2026-10-11, port of
+upstream opencode `f43903d8`); it currently contains only
+`timeline-links.ts` and is pending disposition under the
+`REVIEW-2026-10-26` review. See `docs/adr/REVIEW-2026-10-26.md` for
+the current baseline snapshot and `docs/adr/REVIEW-*.md` more generally
+for the running architecture log.
 
 ## Minify-Safe Patterns
 
@@ -9125,7 +9702,9 @@ Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream op
 
 ## Stream Event Classification (`src/providers/protocols/stream-events.ts`)
 
-Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
+Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream opencode PR #56286 "fix(ai): tolerate unknown and untyped stream events"). Extended in commit `a482d950` (ports SST OpenCode #58596 / #58608 / #58609) to cover the normalised-chunk shape consumed by the streaming orchestrator, not only raw SSE event decoders.
+
+SAP AI Core proxies multiple upstream providers (Anthropic, OpenAI, Gemini, Mistral, Bedrock); each one occasionally introduces a new SSE event kind — image deltas, speech deltas, custom finish reasons — without a corresponding client-side handler. Crashing on `Unknown stream event: <type>` turns a benign forward-rolled server into a hard failure for every Alexi caller.
 
 ### Public surface
 
@@ -9133,12 +9712,48 @@ Introduced in the 2026-10-17 upstream sync (commit `29cc2eca`, ports upstream op
 - `isTypedStreamEvent(event): event is TypedStreamEvent` — narrows an arbitrary SSE payload; returns `false` for `null`, non-objects, and objects whose `type` field is missing or not a non-empty string.
 - `StreamEventClassification = 'known' | 'unknown' | 'untyped'`.
 - `classifyStreamEvent(event, knownTypes: ReadonlySet<string>): StreamEventClassification` — non-throwing classifier against a caller-supplied known set.
+- `KNOWN_STREAM_CHUNK_FIELDS: ReadonlySet<string>` — authoritative list of normalised `StreamChunk` fields the orchestrator knows how to handle today: `text`, `toolCalls`, `finishReason`, `usage`, `images`. Kept in sync with the `StreamChunk` interface at `src/providers/sapOrchestration.ts:238-250`.
+- `isRecognizedStreamChunk(chunk: unknown): boolean` — non-throwing, returns `true` iff the chunk is a non-null object carrying at least one field from `KNOWN_STREAM_CHUNK_FIELDS`.
+
+### Two-layer forward-compat net
+
+The module backs a two-layer net against forward-rolled provider SDKs:
+
+1. **Provider-level getter-dispatch guard (`src/providers/sapOrchestration.ts:1997-2019`).** The SAP AI SDK's `chunk.getDeltaContent()` and `chunk.getDeltaToolCalls()` dispatch internally on `event.type` and may throw when the current client version does not recognise a new event kind. The provider wraps both getter calls in a per-chunk `try/catch`; on decode error it emits `logger.warn('Unknown streaming event, skipping chunk (<model>): <formatError>')` and `continue`s to the next SDK chunk. One new event kind cannot abort the whole turn. Caller-visible errors (rate limit, auth, network) still escape via the outer `try/catch` because they surface on the iterator pull itself, not on getter dispatch.
+2. **Consumer-level recognised-chunk guard (`src/core/streamingOrchestrator.ts:546-561`).** When the SDK succeeds at normalising a chunk but the normalised shape carries only fields the orchestrator does not yet understand (e.g. a `StreamChunk` widened with an `audio` channel the renderer has not learned about), `isRecognizedStreamChunk(chunk)` returns `false`. The orchestrator logs `logger.warn('Unknown streaming chunk shape, skipping: <JSON>', { modelUsed })` and returns `{ value: { text: '' }, done: false }` so `for await` consumers naturally advance to the next pull.
+
+### Forward-compat flow
+
+```mermaid
+flowchart LR
+    SDK[SAP AI SDK chunk]
+    GetterTry{getDeltaContent / getDeltaToolCalls throws?}
+    WarnDecode[logger.warn 'Unknown streaming event, skipping chunk']
+    Continue[continue to next SDK chunk]
+    Normalised[Normalised StreamChunk]
+    RecognisedGuard{isRecognizedStreamChunk?}
+    WarnShape[logger.warn 'Unknown streaming chunk shape, skipping']
+    EmptyYield[yield text:'' passthrough]
+    Known[Accumulate fullText / usage]
+    Yield[Yield StreamChunk to consumer]
+
+    SDK --> GetterTry
+    GetterTry -->|throws| WarnDecode
+    WarnDecode --> Continue
+    GetterTry -->|returns| Normalised
+    Normalised --> RecognisedGuard
+    RecognisedGuard -->|false| WarnShape
+    WarnShape --> EmptyYield
+    RecognisedGuard -->|true| Known
+    Known --> Yield
+```
 
 ### Design notes
 
-- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `debug` and continue so the stream stays open for the next event.
+- Non-throwing by contract. Callers that get `false` from `isTypedStreamEvent` / `isRecognizedStreamChunk` or `'unknown'`/`'untyped'` from `classifyStreamEvent` log at `warn` / `debug` and continue so the stream stays open for the next event.
 - Replaces the old `throw new Error('Unknown stream event: ...')` at every stream decoder.
 - Structural shape so the guard is portable across providers — no provider-specific `type` enumeration leaks into this module.
+- The `KNOWN_STREAM_CHUNK_FIELDS` snapshot is pinned by `tests/core/streaming-events.test.ts` so adding a new normalised channel (e.g. `audio`, `reasoning`) requires updating both the `StreamChunk` interface and the snapshot together — forgetting one half surfaces as a test failure instead of a silent miss.
 
 ## Transport Retry Classifier (`src/utils/retry.ts`)
 
@@ -9894,4 +10509,97 @@ flowchart TD
 ### Resource embed shape
 
 The embedded `resource` field in the formatter's input type was widened to `{ uri?: string; mimeType?: string; text?: string }` so the formatter can inline a `text/*` resource's body directly when the server supplies it. Non-text, non-image resources (e.g. `application/pdf`) render as a placeholder — the model knows the file exists without the orchestration layer rejecting the whole request.
+
+## MCP Output-Schema Normalisation (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `c41c3a0`). MCP servers in the wild emit a mix of `outputSchema` shapes — root `object` schemas with `properties`, union `anyOf` schemas, bare `array` schemas, primitives (`type: "string"`, `type: "number"`), or no `outputSchema` at all. Downstream code that only inspects `.properties` would previously silently drop tools whose output schema was anything other than a root object. `normalizeOutputSchema` wraps non-object roots in a stable `{ type: 'object', properties: { result: <original> }, required: ['result'] }` shape so the runtime always has a `.properties` field to inspect, regardless of what the server declared.
+
+### Signature
+
+```typescript
+export function normalizeOutputSchema(
+  schema: unknown
+): { type?: string; properties?: Record<string, unknown>; required?: string[] } | undefined;
+```
+
+Re-exported from `src/mcp/index.ts` so plugin consumers do not have to deep-import from `./client.js`.
+
+### Dispatch
+
+```mermaid
+flowchart TD
+    In["schema: unknown"] --> NotObj{"typeof schema === 'object' && schema !== null?"}
+    NotObj -- no --> Undef["return undefined"]
+    NotObj -- yes --> AlreadyObject{"type === 'object'<br/>OR properties !== undefined?"}
+    AlreadyObject -- yes --> Passthrough["return schema verbatim"]
+    AlreadyObject -- no --> Wrap["return { type: 'object',<br/>properties: { result: schema },<br/>required: ['result'] }"]
+```
+
+### Why return `undefined` for non-object input
+
+Returning `undefined` for `null` / `string` / `number` / `undefined` input is deliberate: it lets call sites spread the result safely onto a tool definition — `{ ...toolDef, outputSchema: normalizeOutputSchema(raw) }` either carries the normalised schema or nothing, never a bogus wrapper. A `{}` fallback would misleadingly advertise an empty object schema to the model.
+
+### Why wrap under `properties.result` instead of `properties.value` or `properties.data`
+
+The literal key `result` was chosen to match opencode `c41c3a0` so a cross-project operator reading an MCP log sees the same wrapper on both sides. A matching `required: ['result']` is emitted alongside so JSON Schema consumers that treat `required` as the source of truth for mandatory fields see the wrapper as a non-optional field, not an opt-in extension.
+
+## MCP Client Connect De-duplication (`src/mcp/client.ts`)
+
+Introduced in the 2026-10-23 upstream sync (ports opencode `8ecd6ad` for the dedup and `7b14ad4` for the parallel teardown). The `McpClientManager` kept a `connections: Map<string, McpConnection>` but had no guard against two concurrent `connect(config)` calls for the same server name — a config-change event that fired while `connectFromConfig()` was still running could spawn a second stdio child for the same server, resulting in zombie processes and double-register notifications. The fix adds an in-flight promise map keyed by server name; a second caller joins the first promise instead of spawning a parallel transport.
+
+### Internal state
+
+```typescript
+class McpClientManager {
+  private connections: Map<string, McpConnection> = new Map();
+  private toolCache: Map<string, ToolCache> = new Map();
+  /**
+   * In-flight connect() promises keyed by server name. Entry lifecycle:
+   * added when connect() begins, removed in its finally block regardless
+   * of outcome (resolve, reject, cancel).
+   */
+  private pendingConnects: Map<string, Promise<McpConnection>> = new Map();
+  // ...
+}
+```
+
+### `connect()` dispatch
+
+```mermaid
+sequenceDiagram
+    participant A as Caller A (startup)
+    participant B as Caller B (config observer)
+    participant Mgr as McpClientManager
+    participant Impl as connectImpl (handshake)
+
+    A->>Mgr: connect({ name: 'playwright', ... })
+    Mgr->>Mgr: pendingConnects.get('playwright') -> undefined
+    Mgr->>Impl: connectImpl(config, options)
+    Mgr->>Mgr: pendingConnects.set('playwright', task)
+    Mgr-->>A: Promise<McpConnection> (pending)
+
+    B->>Mgr: connect({ name: 'playwright', ... }) (concurrent)
+    Mgr->>Mgr: pendingConnects.get('playwright') -> inFlight
+    Mgr-->>B: return inFlight (SAME promise)
+
+    Impl-->>Mgr: resolves / rejects
+    Mgr->>Mgr: pendingConnects.delete('playwright') (finally)
+    Mgr-->>A: McpConnection
+    Mgr-->>B: McpConnection (same instance)
+```
+
+The public `connect()` method keeps its existing signature; the handshake body was extracted into a private `connectImpl(config, options)` so the dedup bookkeeping is a single-screen read instead of a nested `if` wrapped around ~400 lines of handshake. A `.finally()` block in the public method removes the pending entry on resolve, reject, and cancel paths alike, so a failed connect does not leave a stale cache entry.
+
+### `disconnectAll()` parallel teardown
+
+A sequential `for ... await disconnect(name)` loop was observed to add multi-second latency on exit when any one stdio child was slow to acknowledge `SIGTERM` — one hung server blocked every other server's teardown behind it. The loop is now:
+
+```typescript
+async disconnectAll(): Promise<void> {
+  const names = Array.from(this.connections.keys());
+  await Promise.allSettled(names.map((name) => this.disconnect(name)));
+}
+```
+
+`Promise.allSettled` is deliberate: a per-server teardown error should NOT propagate as a top-level rejection, because the caller is almost always on the shutdown path and surfacing a stray server misbehaviour there would mask the process exit code. Per-server errors are still logged by `disconnect()` itself; this layer is pure best-effort.
 
