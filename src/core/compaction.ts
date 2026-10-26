@@ -97,6 +97,17 @@ export interface ShouldCompactOptions {
    * not slip past the trigger.
    */
   toolContentTokens?: number;
+  /**
+   * Compaction loop-guard (kilocode `ccf958a1d`). When supplied, the caller
+   * is claiming "I already compacted at this token count"; `shouldCompact`
+   * refuses to fire again until the current projected cost drops *below*
+   * `lastCompactionAtTokens`. Prevents a stuck summariser from being
+   * re-invoked on the same oversized input turn after turn, which would
+   * burn provider budget with no forward progress. Reset to `undefined`
+   * after the summary itself is dropped from history (e.g. because the
+   * next user turn pushed it out of the preserve-last-N window).
+   */
+  lastCompactionAtTokens?: number;
 }
 
 export interface CompactionResult {
@@ -265,7 +276,22 @@ export function shouldCompact(
 
   const thresholdTokens = (triggerTokens * thresholdPercent) / 100;
 
-  return currentTokens >= thresholdTokens;
+  if (currentTokens < thresholdTokens) {
+    return false;
+  }
+
+  // Loop guard (kilocode `ccf958a1d`): if we already compacted at a given
+  // token count and the projected cost has NOT meaningfully decreased,
+  // refuse to compact again — the summariser would just spin in place.
+  if (
+    typeof opts.lastCompactionAtTokens === 'number' &&
+    opts.lastCompactionAtTokens > 0 &&
+    currentTokens >= opts.lastCompactionAtTokens
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 // Global LLM function for summarization

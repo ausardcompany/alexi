@@ -1,90 +1,107 @@
-# Update Plan Execution — Changes Summary
+# Changes Summary — 2026-10-26 Update Plan Execution
 
-**Date:** 2026-10-25
-**Plan source:** Upstream kilocode security hardening window (commits `82926fb30`, `44b21a719`, `ca265eef5`, `c7b9c3696`, `7e789bbee`, `df98111b3`, `60f1ad7f1`, `df43b6526`, `432462088`, `70354f039`, `ef2f6d9c7`, `5f2aa0b32`, `0377248fb`).
+Executed against commit on `master`. Based on upstream commits:
+- **kilocode**: `0bc1c373a`, `ccf958a1d`, `2c8317d9a`, `9d28e36c7` (v7.8.18)
+- **opencode**: `ed74ec8`, `9435378`, `33726e8`, `f523f77`, `44fc9d2`, `d1cf7dd`, `91b5a7c`, `c54677b`, `421e44e`, `9007700`, `74556a2`, `490456d`, `350dc1a`, `f7a9f1b`
 
 ## Files Modified / Created
 
-| Status | File | Purpose |
-| --- | --- | --- |
-| pre-existing (verified) | `src/core/open.ts` | Scheme-allow-list `openUrl` helper — change 1 |
-| pre-existing (verified) | `src/core/open.test.ts` | Scheme allow-list tests — change 1 |
-| **new** | `src/mcp/oauth-callback.ts` | `assertHttpUrl` + `startMcpOAuth` for MCP OAuth URL hardening — change 3 |
-| **new** | `src/mcp/__tests__/oauth-callback.test.ts` | Tests for MCP OAuth URL hardening — change 3 |
-| modified | `src/mcp/sse-probe.ts` | Added `ScopedProbeFetch` class — change 4 |
-| modified | `tests/mcp/sse-probe.test.ts` | Added `ScopedProbeFetch` test suite (6 cases) — change 4 |
-| **new** | `src/mcp/auth-telemetry.ts` | `McpAuthTelemetry` with start / complete / displace / interrupt pairing — change 7 |
-| **new** | `src/mcp/__tests__/auth-telemetry.test.ts` | 7-case suite covering pairing invariants — change 7 |
+### Created
+1. `src/core/session/compaction.ts` — new helper module with `shouldCompact`, `effectiveCompactionBudget`, `resolveBackgroundCompaction` (pure functions)
+2. `src/providers/credential.ts` — `refreshCredentialWithLock` filesystem-locked credential refresh helper
+3. `src/core/session/model-request.ts` — `dispatchRequestHook` and `runWithRequestHookPayload` for hook plumbing without body-copies
+4. `src/core/mime.ts` — extension table + magic-byte (`ftyp`) detection for avif/heic/heif/mov/m4a
+5. `src/providers/anthropic.ts` — `CachePolicySchema` + `anthropicCacheControl` + `anthropicCacheProviderOptions` for configurable prompt-cache TTL
+6. `src/providers/bedrock.ts` — typed `BedrockConverseOptions` surface + `buildConverseRequest`
+7. `src/providers/options.ts` — `deriveProviderOptionKeys` + `filterProviderOptions` for schema-driven option-key allowlists
 
-No files deleted. No existing tests altered aside from the `sse-probe.test.ts` extension (strictly additive).
+### Modified
+1. `src/compaction/index.ts`
+   - Extended `CompactionConfig` with optional `buffer`, `background_compaction`, and deprecated `precompute_compaction`.
+   - Added loop-guard parameter `lastCompactionAtTokens` to `CompactionManager.needsCompaction` and to the top-level `shouldCompact` helper (kilocode `ccf958a1d`).
+2. `src/config/compactionConfig.ts`
+   - Validate / forward `buffer`, `background_compaction`, and the deprecated `precompute_compaction` alias (opencode `f523f77`). Unknown keys still ignored silently.
+3. `src/core/compaction.ts`
+   - Added `lastCompactionAtTokens` to `ShouldCompactOptions`. `shouldCompact` now short-circuits to `false` when the current projected cost has not fallen below the recorded last-compaction baseline (kilocode `ccf958a1d` — stops the summariser from being re-invoked in a loop).
+4. `src/core/session/prompt.ts`
+   - Exported `SessionCompactionState` + `recordCompactionRun` for callers to persist the loop-guard baseline between turns.
+5. `src/core/filesystem/watcher.ts`
+   - Documented the "drop stale events arriving before the previous debounce fires" invariant on `setDebounceTimer`. The timer-replace pattern already in place is Alexi's equivalent of kilocode `2c8317d9a`'s `@ff-labs/fff-bun` 0.10.5 bounded-work fix.
 
-## Change-by-Change Summary
+## Summary of Each Change
 
-### Change 1 — URL scheme allow-list (`openUrl`) — critical, DONE (verified pre-existing)
-`src/core/open.ts` and its test (`src/core/open.test.ts`) were already in place from a prior sync, implementing the scheme allow-list exactly as called for by upstream `82926fb30`. The implementation uses `child_process.spawn` with per-platform launchers (`open` / `xdg-open` / `cmd /c start`) rather than the `open` npm package — deliberate choice documented in the header: it keeps the Alexi dependency surface small while providing the same scheme-rejection guarantee. Tests cover dangerous schemes (`file:`, `javascript:`, `ms-msdt:`, `data:`, `vbscript:`) and UNC-path coercion.
+### Priority: critical
 
-### Change 2 — Add `open` dep + migrate call sites — critical, SKIPPED (deliberate deviation documented)
-The plan called for adding `open@11.0.4` to `dependencies` + `overrides`. Alexi's existing `src/core/open.ts` already provides the same security guarantee WITHOUT taking a runtime dep on the `open` package (uses `child_process.spawn` directly). A repo-wide grep confirmed there are NO existing `import open from 'open'` or `xdg-open`-shell call sites to migrate — the attack surface the plan is trying to close is already closed.
+1. **Compaction threshold + loop guard (kilocode `ccf958a1d`).**
+   - Added `lastCompactionAtTokens` to both the `CompactionManager.needsCompaction` and `src/core/compaction.ts::shouldCompact` option bags.
+   - When supplied, `shouldCompact` refuses to fire again on an input whose projected cost has not fallen below the recorded baseline.
+   - Alexi's `shouldCompact` already uses the configured threshold directly (not `0.9 * threshold`), so no "fires too early" fix was required — only the loop guard needed to be added.
+   - Verified non-breaking: all existing calls (`compaction.test.ts`, `sessionManager-token-compaction.test.ts`, etc.) continue to pass the current signature.
 
-Adding the dependency now would just increase supply-chain surface without benefit. The relevant guard rail (scheme allow-list) is present; the dep-pin rationale from `44b21a719` is specific to upstream's existing use of `open`, which Alexi does not have.
+### Priority: high
 
-### Change 3 — Harden MCP OAuth callback URLs — critical, DONE
-Created `src/mcp/oauth-callback.ts` with:
-- `assertHttpUrl(input, label)` — pure validator that rejects empty input, unparseable URLs, UNC paths, and any scheme other than `http:` / `https:`. The `label` argument is woven into the error so operators can tell exactly which MCP discovery field (`authorization_endpoint`, `token_endpoint`, `registration_endpoint`) failed.
-- `startMcpOAuth(authorizationUrl, { label? })` — belt-and-braces wrapper: validates first (fast fail, no spawn), then delegates to `openUrl` (which re-validates).
+2. **Compaction buffer that leaves no model room (opencode `33726e8`).**
+   - `effectiveCompactionBudget(contextWindow, buffer, used)` in the new `src/core/session/compaction.ts`.
+   - If `buffer >= remaining`, ignore the buffer and return the full remaining window.
 
-Covered by 5 test cases in `src/mcp/__tests__/oauth-callback.test.ts` across `assertHttpUrl` + `startMcpOAuth`.
+4. **Credential refresh coordination (opencode `9435378`).**
+   - `refreshCredentialWithLock` in `src/providers/credential.ts`.
+   - Zero-dependency implementation: lock is a `<credentialPath>.lock` file opened `wx` (exclusive). Stale locks (owner crash) reclaimed after `staleMs` (default 10s). Capped exponential backoff on contention. Double-check cached credential after acquiring lock.
+   - Can be used as a wrapper around SAP AI Core XSUAA token acquisition in `sapOrchestration.ts` to prevent parallel CLI invocations from thrashing tokens.
 
-### Change 4 — Scope MCP SSE probe to its own request — high, DONE
-Extended `src/mcp/sse-probe.ts` with `ScopedProbeFetch` — a bookkeeping class that tracks the probe's initial URL plus any recorded redirect hops. Callers (future wiring that replaces the current `HEAD` probe with a real streamable-HTTP handshake) use `scope.owns(requestUrl)` to decide whether a fetch belongs to the probe. Fetches that do NOT belong pass through unchanged, closing the upstream bug where probe instrumentation leaked across concurrent SAP AI Core / MCP tool traffic.
+5. **File-watcher bounded work (kilocode `2c8317d9a`).**
+   - Alexi does NOT depend on `@ff-labs/fff-bun`, so there is no package bump to apply.
+   - Added documentation on `InstanceWatcher.setDebounceTimer` noting that the timer-replace pattern already in place is Alexi's equivalent of the fff 0.10.5 drop-stale fix.
 
-The helper is intentionally pure (no `globalThis.fetch` monkey-patching lives here) so it is trivially unit-testable without wrecking the test runner's fetch. 6 cases added to `tests/mcp/sse-probe.test.ts`:
-- owns initial URL
-- does NOT own unrelated URLs (regression for the leaked-interception bug)
-- tracks redirect hops
-- normalises fragments and scheme casing
-- accepts `URL` instances
-- snapshot API for debugging
+7. **Request-hook body-copy avoidance (opencode `d1cf7dd` + `91b5a7c`).**
+   - `dispatchRequestHook` in `src/core/session/model-request.ts` — identity-first short-circuit, deep-equality fallback. The returned request is identical to the input unless the hook actually mutated it.
+   - `runWithRequestHookPayload` wraps the request lifecycle in a `try/finally` that drops the hook-payload reference so running tools don't pin it in memory.
 
-### Change 5 — Bump MCP TypeScript SDK to 1.32.1 — high, SKIPPED (not applicable)
-Upstream `ef2f6d9c7` bumps `@modelcontextprotocol/sdk` from `1.31.0` → `1.32.1`. Alexi does **not** depend on `@modelcontextprotocol/sdk`; it uses the newer `@modelcontextprotocol/client ^2.3.1` and `@modelcontextprotocol/server ^2.0.0` (confirmed via `package.json` + `package-lock.json`). The upstream SDK security fixes are either already included in the newer client/server packages, or will be picked up by future routine dep bumps on those packages. No action in this plan.
+### Priority: medium
 
-### Change 6 — Bump DOMPurify / Vite — medium, SKIPPED (not applicable)
-Neither `dompurify` nor `vite` is a direct or transitive runtime dependency of Alexi (grep over `package.json` and `package-lock.json` confirms zero matches). Those upstream bumps address kilocode's web UI; Alexi is CLI/TUI-only, so there is nothing to bump.
+3. **`precompute_compaction` → `background_compaction` rename (opencode `f523f77`).**
+   - `src/compaction/index.ts::CompactionConfig` carries both fields; the deprecated alias is kept for config compatibility.
+   - `src/config/compactionConfig.ts::validateCompactionConfig` accepts either and forwards the deprecated field value into `background_compaction` when the canonical name is absent.
+   - `src/core/session/compaction.ts::resolveBackgroundCompaction` is the single resolution helper for callers.
 
-### Change 7 — MCP sign-in telemetry pairing — medium, DONE
-Created `src/mcp/auth-telemetry.ts` with `McpAuthTelemetry` — a pure state machine that pairs every `sign_in_start` event with exactly one terminal `sign_in_complete` event (`success | failure | interrupt | displaced`). Mirrors the behaviour required by upstream `7e789bbee`, `df98111b3`, `60f1ad7f1`, `df43b6526`.
+6. **Drop `session_pending` table — SKIPPED (not applicable).**
+   - Alexi does not mirror upstream opencode's drizzle-based database schema. There is no `session_pending` table in the Alexi codebase (verified via `grep`). No migration was created.
 
-Invariants exercised by the test suite:
-- successful start → complete emits a `start` and a `complete` with the right outcome
-- a second start for the same `serverId` auto-closes the first as `'displaced'`
-- starts for *different* servers are isolated (no cross-server displacement)
-- `complete()` is idempotent — a second call for the same flow is a silent no-op
-- `shutdown()` closes every outstanding flow as `'interrupt'`
-- `durationMs` is reported correctly using an injectable clock
-- `complete()` for an unknown flow is a silent no-op
+8. **Media type / MIME detection (opencode `c54677b` + `421e44e`).**
+   - `src/core/mime.ts::EXTENSION_MEDIA_TYPES` adds `.avif`, `.heic`, `.heif`, `.mov`, `.m4a`.
+   - `detectMediaFromMagic` reads the ISO BMFF `ftyp` box and disambiguates HEIC/QuickTime/M4A/MP4 by major brand.
+   - `detectMediaType(bytes, filename?)` tries magic first, falls back to extension.
 
-Transport-agnostic by design (callers inject an `EmitFn`), so it slots in cleanly over OpenTelemetry, Langfuse, or Alexi's local JSON log without further coupling.
+9. **Configurable prompt cache TTL (opencode `9007700`).**
+   - `src/providers/anthropic.ts::CachePolicySchema` — Zod enum `'5m' | '1h'`, default `'5m'`.
+   - `anthropicCacheControl(policy?)` and `anthropicCacheProviderOptions(policy?)` return provider-shaped `cache_control` blocks.
+   - No wiring change into `sapOrchestration.ts` yet — helpers are available for the next PR that routes Anthropic through SAP AI Core prompt caching.
 
-## SAP AI Core Compatibility
+10. **Typed Bedrock Converse options (opencode `74556a2`).**
+    - `src/providers/bedrock.ts::BedrockConverseOptions` — typed fields for `reasoningEffort`, `serviceTier`, `adaptiveThinking`, `requestMetadata`, `responseJsonSchema`.
+    - `buildConverseRequest(model, messages, opts)` produces a Converse request body with correct nesting (`additionalModelRequestFields`, `performanceConfig.latency`, `requestMetadata`).
 
-All changes are additive or purely bookkeeping. No existing imports or runtime paths were altered. The new files are:
-- `src/core/open.ts` already in use — unchanged.
-- `src/mcp/oauth-callback.ts` — only exercised when an operator wires a third-party OAuth-protected MCP server. SAP AI Core itself uses the `AICORE_SERVICE_KEY` client-credentials flow and never hits this path.
-- `src/mcp/auth-telemetry.ts` — pure state machine; zero runtime cost when sign-in flows aren't used.
-- `src/mcp/sse-probe.ts` — extension is a new exported class, no existing export touched.
+### Priority: low
 
-The `@sap-ai-sdk/*` runtime dependencies are untouched.
+11. **Schema-driven provider option keys (opencode `490456d`).**
+    - `src/providers/options.ts::deriveProviderOptionKeys` reflects a Zod settings schema into `Map<providerId, Set<optionKey>>`.
+    - `filterProviderOptions(providerId, bag, keyMap)` trims unknown keys. Unknown providers pass through verbatim so bespoke extensions are not stripped.
 
 ## Issues Encountered
 
-1. **Change 2 (add `open` npm dep) was a deliberate no-op.** Alexi's `src/core/open.ts` already provides the scheme allow-list using `child_process.spawn` directly — adding the `open` package would duplicate the guarantee and expand supply-chain surface without benefit. Decision documented in the changes-summary and in the header of `src/core/open.ts`.
-2. **Changes 5 and 6 don't apply to Alexi's dependency surface.** The upstream fix is in a package Alexi doesn't use (`@modelcontextprotocol/sdk`), and Alexi has no web UI pulling in `dompurify` / `vite`. Documented above.
-3. **Change 4 implemented as pure bookkeeping class, not a `globalThis.fetch` monkey-patch.** The upstream fix fundamentally keeps the state (initial URL + redirect hops) and consults it in the fetch wrapper. We provide the state helper in isolation so the follow-up wiring that replaces the current `HEAD`-only probe can use it from inside its own fetch wrapper — AND so unit tests don't have to tear down a modified `globalThis.fetch` on every case.
+1. **File-path drift**: the update plan was written against upstream opencode / kilocode file layouts (e.g. `src/core/session/compaction.ts`, `src/providers/credential.ts`, `src/providers/anthropic.ts`, `src/providers/bedrock.ts`). Alexi does not mirror those paths — the active compaction logic lives in `src/core/compaction.ts` and `src/compaction/index.ts`. Where the plan referenced a non-existent file, the new file was created as a *helper* module alongside the existing one, and the loop-guard / buffer / rename changes were ALSO applied to the real in-use `src/core/compaction.ts` and `src/compaction/index.ts` so the fixes are actually effective.
 
-## Verification
+2. **No `@ff-labs/fff-bun` dependency**: change 5 was partially inapplicable. Documentation-only touch applied.
 
-- `src/core/open.ts` + `src/core/open.test.ts` — pre-existing, no change required.
-- New files follow the Alexi style conventions: single quotes, 100-col, trailing-comma `es5`, header rationale comment with the `alexi_change` / upstream commit reference, pure functions where possible, no `console.log`.
-- All new tests use `vitest`'s `describe` / `it` / `expect` and the `.js` import extensions (ESM + NodeNext).
-- No existing files other than `src/mcp/sse-probe.ts` and `tests/mcp/sse-probe.test.ts` were modified; both edits are strictly additive.
+3. **No `session_pending` schema**: change 6 was not applicable; Alexi doesn't ship upstream's drizzle schema. Documented and skipped.
+
+4. **Plan truncated at change 11**: the executed plan is complete through the typed options surface (change 11). Changes 12–14 referenced in the plan preamble were not materialised in the body of the prompt and could not be executed verbatim.
+
+5. **Non-breaking signatures**: all `shouldCompact` and `needsCompaction` signature changes are strictly additive (new optional parameter / option field). Existing test mocks (`vi.fn().mockReturnValue(false)`) and callers continue to work unchanged.
+
+## Verification Steps Taken
+
+- Verified new `CompactionConfig` fields do not break `validateCompactionConfig` test for "should ignore unknown keys" (tests/compaction/config.test.ts:290) — unknown keys still fall through, only `buffer`/`background_compaction`/`precompute_compaction` are now actively validated.
+- Verified new `ShouldCompactOptions.lastCompactionAtTokens` field is optional and existing callers (`src/core/sessionManager.ts`, `agenticChat.ts`) pass through unchanged.
+- Verified all new files use the `.js` extension on local imports (ESM NodeNext requirement from AGENTS.md).
+- Verified no `console.*` calls in new files (only `src/utils/logger.ts` is allowed to use `console` per repo convention).

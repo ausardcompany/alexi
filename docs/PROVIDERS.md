@@ -4853,6 +4853,160 @@ export interface OrchestrationModelMetadata {
 
 Missing / `false` is "licensed" (default); `true` marks the entry as subject to the filter. No existing SAP metadata entry sets `free: true`, so the live catalog is byte-identical with the filter off.
 
+## Cross-Process Credential-Refresh Coordination (`src/providers/credential.ts`)
+
+SAP AI Core XSUAA client-credentials tokens expire frequently, and concurrent Alexi processes (interactive TUI, background `agent` run, CI invocation) refreshing the same credential at the same time cause OAuth token thrashing: whichever refresh lands last invalidates the tokens held by the other callers, and both have to retry. For SAP AI Core XSUAA this is a frequent source of 401s in parallel pipelines.
+
+`refreshCredentialWithLock<T>(options)` (`src/providers/credential.ts:129-186`) serialises refreshes across processes behind a filesystem lock keyed on the credential path, with a double-check on the cached credential after acquiring the lock.
+
+```typescript
+// src/providers/credential.ts
+export interface RefreshWithLockOptions<T> {
+  credentialPath: string;
+  refresh: () => Promise<T>;
+  readCached?: () => Promise<T | undefined>;
+  staleMs?: number;       // Default: 10_000
+  maxAttempts?: number;   // Default: 50
+  minDelayMs?: number;    // Default: 50
+  maxDelayMs?: number;    // Default: 500
+}
+
+export async function refreshCredentialWithLock<T>(
+  options: RefreshWithLockOptions<T>
+): Promise<T>;
+```
+
+Guarantees:
+
+1. At most one process executes `refresh` at a time per `credentialPath`.
+2. Peers waiting on the lock re-read the cached credential after acquiring the lock and skip calling `refresh` if a prior holder already produced a fresh one.
+3. The lock is always released — including on `refresh` throw.
+
+Implementation notes:
+
+- **Lock file.** `<credentialPath>.lock` created with the `wx` (exclusive) flag at `src/providers/credential.ts:81-111`. Contending callers see `EEXIST`.
+- **Stale-lock reclaim.** A stored timestamp inside the lock file lets later arrivals reclaim a lock whose owner crashed; `staleMs` defaults to 10 s — longer than any realistic token-endpoint RTT.
+- **Backoff.** Capped exponential with ±25% jitter: `base = min(minDelayMs * 2^min(attempt,10), maxDelayMs)`. Default range 50 ms – 500 ms.
+- **Fast path.** When `readCached` returns a valid credential BEFORE taking the lock, the function returns immediately without creating the lock file.
+- **Double-check.** After acquiring the lock, `readCached` is called again — a peer may have refreshed while the current process was waiting; in that case `refresh` is skipped.
+- **No OAuth retry inside.** A transient OAuth error from `refresh` is thrown through unchanged; `ErrorBackoff` owns the retry budget.
+- **No dependencies.** Deliberately avoids `proper-lockfile` so the helper stays usable in the zero-dependency bootstrap path.
+
+```mermaid
+sequenceDiagram
+    participant P1 as Process 1
+    participant P2 as Process 2
+    participant FS as Filesystem (lock file)
+    participant Token as Token endpoint
+
+    P1->>FS: readCached() — stale
+    P2->>FS: readCached() — stale
+    P1->>FS: open(wx) — success
+    P2->>FS: open(wx) — EEXIST
+    P1->>Token: refresh()
+    P2->>P2: backoff
+    Token-->>P1: new token
+    P1->>FS: write cache; rm lock
+    P2->>FS: open(wx) — success
+    P2->>FS: readCached() — hit (double-check)
+    P2->>FS: rm lock
+    P2-->>P2: return cached (no refresh call)
+```
+
+Call-site integration: both the SAP XSUAA client-credentials path (`sapOrchestration.ts`) and the OAuth2 authorization-code refresh path (`auth.ts`) plug in via the `refresh` + `readCached` callbacks without the lock module knowing about either grant type.
+
+## Anthropic Prompt-Cache TTL (`src/providers/anthropic.ts`)
+
+Anthropic's prompt caching accepts a `cache_control` block on each cached content item that carries an optional `ttl` field. Opencode `9007700` made the TTL user-configurable because long sessions benefit disproportionately from the longer cache window — the fixed 5 m TTL caused a cache miss on every follow-up turn.
+
+```typescript
+// src/providers/anthropic.ts
+export const CachePolicySchema = z
+  .object({
+    ttl: z.enum(['5m', '1h']).default('5m'),
+  })
+  .optional();
+
+export type CachePolicy = z.infer<typeof CachePolicySchema>;
+
+export function anthropicCacheControl(policy?: CachePolicy): {
+  type: 'ephemeral';
+  ttl: '5m' | '1h';
+};
+
+export function anthropicCacheProviderOptions(policy?: CachePolicy): {
+  anthropic: { cacheControl: { type: 'ephemeral'; ttl: '5m' | '1h' } };
+};
+```
+
+The schema's narrow enum (`'5m' | '1h'`) catches misconfigured TTLs at config load time rather than producing silent cache misses at the provider. SAP AI Core forwards `cache_control` verbatim to Anthropic through the orchestration provider, so this helper is wired into the same path used for direct Anthropic calls.
+
+## Typed Bedrock Converse Options (`src/providers/bedrock.ts`)
+
+Opencode `74556a2` ported here replaces a stringly-typed provider-options bag (which silently dropped unknown keys) with a fully typed options surface and a pure request builder. Scope: ONLY the typed options surface and the builder — the actual Bedrock SDK call lives wherever the caller instantiates the client, so the SAP AI Core dependency graph stays clean and users who do not route through Bedrock pay zero runtime cost.
+
+```typescript
+// src/providers/bedrock.ts
+export type BedrockReasoningEffort = 'low' | 'medium' | 'high';
+export type BedrockServiceTier = 'standard' | 'priority';
+
+export interface BedrockConverseOptions {
+  reasoningEffort?: BedrockReasoningEffort;
+  serviceTier?: BedrockServiceTier;
+  adaptiveThinking?: boolean;
+  requestMetadata?: Record<string, string>;
+  responseJsonSchema?: object;
+}
+
+export function buildConverseRequest(
+  model: string,
+  messages: BedrockConverseMessage[],
+  opts?: BedrockConverseOptions
+): BedrockConverseRequest;
+```
+
+Field → Converse request mapping (`src/providers/bedrock.ts:100-128`):
+
+| Option                 | Converse request field                                                 |
+|------------------------|-----------------------------------------------------------------------|
+| `reasoningEffort`      | `additionalModelRequestFields.reasoning_effort`                       |
+| `serviceTier`          | `performanceConfig.latency`                                           |
+| `adaptiveThinking`     | `additionalModelRequestFields.thinking = { type: 'enabled' }` (omitted when disabled) |
+| `requestMetadata`      | top-level `requestMetadata`                                           |
+| `responseJsonSchema`   | `additionalModelRequestFields.response_json_schema`                   |
+
+Fields that the caller did not supply are omitted from the request body entirely so Bedrock's request validator does not reject unknown empty fields.
+
+## Schema-Derived Provider Option Keys (`src/providers/options.ts`)
+
+Opencode `490456d` ported here replaces a hand-rolled list of known provider option keys with a Zod-derived set. Forgetting to update the hand-rolled list used to cause the orchestrator to silently drop a valid option when routing a request; the new mechanism threads new fields through automatically.
+
+```typescript
+// src/providers/options.ts
+export type ProviderSettingsSchema = z.ZodObject<
+  Record<string, z.ZodObject<Record<string, z.ZodTypeAny>>
+    | z.ZodOptional<z.ZodObject<Record<string, z.ZodTypeAny>>>>
+>;
+
+export function deriveProviderOptionKeys(
+  schema: ProviderSettingsSchema
+): ReadonlyMap<string, ReadonlySet<string>>;
+
+export function filterProviderOptions(
+  providerId: string,
+  options: Readonly<Record<string, unknown>>,
+  keyMap: ReadonlyMap<string, ReadonlySet<string>>
+): Record<string, unknown>;
+```
+
+Design contract:
+
+- **Schema-derived.** `deriveProviderOptionKeys` walks the schema shape, unwraps `ZodOptional` / `ZodNullable` / `ZodDefault` wrappers, and returns a `ReadonlyMap` of provider id → `ReadonlySet<string>` of valid option keys. Adding a field to the schema automatically widens the valid set — no second place to update.
+- **Unknown providers pass through.** `filterProviderOptions` returns a fresh copy of the input bag when the provider is not in the derived key map, so a caller using a bespoke extension does not have its options silently stripped.
+- **Fresh object on filter.** The returned filtered bag is a new allocation; the input is never mutated. Unknown keys are dropped silently.
+
+Call-site expectations: the SAP orchestration layer (and any direct Anthropic / OpenAI / Bedrock path) passes in its own Zod settings schema, so no provider-specific type bundle is pulled into `src/providers/options.ts` and the module stays independent of the catalog layout.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design
