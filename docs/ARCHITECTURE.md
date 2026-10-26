@@ -2657,6 +2657,155 @@ sequenceDiagram
     end
 ```
 
+### Compaction Loop Guard and Session Helpers (`src/core/session/compaction.ts`)
+
+Opencode `33726e8` + `f523f77` and kilocode `ccf958a1d` are consolidated into a dedicated, dependency-free module (`src/core/session/compaction.ts`) so the compaction manager (`src/compaction/index.ts`) and the per-session prompt builder (`src/core/session/prompt.ts`) can share the same pure helpers without introducing a cycle. The module exports three primitives plus a normalised `SessionCompactionConfig` type:
+
+```typescript
+// src/core/session/compaction.ts
+export interface Usage {
+  ratio: number;  // used / contextWindow (0..1)
+  tokens: number; // absolute used tokens
+}
+
+export function shouldCompact(
+  usage: Usage,
+  threshold: number,
+  lastCompactionAtTokens?: number
+): boolean;
+
+export function effectiveCompactionBudget(
+  contextWindow: number,
+  buffer: number,
+  used: number
+): number;
+
+export function resolveBackgroundCompaction(cfg: SessionCompactionConfig): boolean;
+```
+
+Design contract:
+
+- **Threshold is the trigger — not `threshold * 0.9`.** Kilocode `ccf958a1d` fixed a latent off-by-nine where the trigger fired well before the configured threshold. The pure form here fires at `usage.ratio >= threshold` exactly.
+- **Loop guard.** When `lastCompactionAtTokens !== undefined && usage.tokens >= lastCompactionAtTokens`, `shouldCompact` returns `false`. The session persists the token count observed at the most recent successful compaction (`src/core/session/prompt.ts:30-48`, `recordCompactionRun(state, compactedTokens)`), and the summariser is NOT re-invoked until the token count has meaningfully decreased. Reset to `undefined` after the summary itself leaves the preserve-last-N window on a later turn, so a new oversized burst can trigger again.
+- **Buffer that would starve the model is ignored.** `effectiveCompactionBudget(contextWindow, buffer, used)` guards against a configured `buffer` larger than `contextWindow - used`: in that case the full remaining window is returned (opencode `33726e8`) rather than a zero or negative budget that would silently starve the next turn.
+- **Deprecated-alias precedence.** `resolveBackgroundCompaction(cfg)` honours `background_compaction` first (canonical, opencode `f523f77`) and falls back to `precompute_compaction` when the canonical field is absent. If both are present, canonical wins.
+
+```mermaid
+flowchart TD
+    Entry["shouldCompact(usage, threshold, lastCompactionAtTokens?)"]
+    Entry --> Below{"usage.ratio &lt; threshold?"}
+    Below -->|Yes| ReturnFalse["return false"]
+    Below -->|No| HaveLast{"lastCompactionAtTokens defined?"}
+    HaveLast -->|No| ReturnTrue["return true"]
+    HaveLast -->|Yes| Stuck{"usage.tokens ≥ lastCompactionAtTokens?"}
+    Stuck -->|Yes| ReturnFalseLoop["return false (loop guard)"]
+    Stuck -->|No| ReturnTrue
+```
+
+The `CompactionConfig` surface on `src/compaction/index.ts:53-73` carries the same two new fields (`buffer?: number`, `background_compaction?: boolean`, plus the `precompute_compaction?: boolean` deprecated alias) so operator-facing JSON loaded by `src/config/compactionConfig.ts` and the session helpers above describe the same contract. The validator in `validateCompactionConfig` (`src/config/compactionConfig.ts:71-96`) rejects a non-numeric or negative `buffer` and a non-boolean `background_compaction` / `precompute_compaction` at config load time, so a typo cannot silently degrade the trigger.
+
+Related loop-guard wiring: `CompactionManager.needsCompaction(messages, options?, lastCompactionAtTokens?)` (`src/compaction/index.ts:231-283`) and the module-level `shouldCompact(messages, maxTokens?, lastCompactionAtTokens?)` (`src/compaction/index.ts:733-784`) accept the same third argument so legacy callers that go through the manager interface get the same guarantee without re-plumbing to the per-session helpers.
+
+## Attachment MIME Detection (`src/core/mime.ts`)
+
+Opencode `421e44e` + `c54677b` ported here consolidate attachment media-type resolution behind three pure helpers. Resolution order is magic-byte first (so a mis-extensioned or extension-less payload still resolves), extension fallback, then `undefined`.
+
+```typescript
+// src/core/mime.ts (public surface)
+export function mediaTypeForExtension(ext: string): string | undefined;
+export function detectMediaFromMagic(bytes: Uint8Array): string | undefined;
+export function detectMediaType(bytes: Uint8Array, filename?: string): string | undefined;
+export function getExtensionMediaTypes(): Readonly<Record<string, string>>;
+```
+
+The extension table (`EXTENSION_MEDIA_TYPES`, `src/core/mime.ts:34-74`) covers images (`.png`, `.jpg/.jpeg`, `.gif`, `.webp`, `.avif`, `.heic`, `.heif`, `.svg`, `.bmp`, `.tiff/.tif`), audio (`.m4a`, `.mp3`, `.wav`, `.ogg`, `.flac`, `.aac`), video (`.mp4`, `.mov`, `.webm`, `.mkv`, `.avi`), and documents (`.pdf`, `.json`, `.xml`, `.txt`, `.md`, `.csv`, `.html`). Lookup is case-insensitive; the leading dot is required.
+
+The magic-byte path inspects the first 12 bytes for an ISO BMFF `ftyp` box (`src/core/mime.ts:98-128`). HEIC, QuickTime, M4A, and generic MP4 all share the ISO BMFF container, so a bare extension OR a bare `video/mp4` fallback misidentifies them:
+
+| ftyp major brand                | Resolved media type |
+|---------------------------------|---------------------|
+| `heic`, `heix`, `mif1`          | `image/heic`        |
+| `qt  ` (with trailing spaces)   | `video/quicktime`   |
+| `M4A `                          | `audio/mp4`         |
+| `mp4*`, `isom`, `iso2`          | `video/mp4`         |
+
+```mermaid
+flowchart TD
+    Entry["detectMediaType(bytes, filename?)"] --> Magic["detectMediaFromMagic(bytes)"]
+    Magic --> HasBox{"ftyp box recognised?"}
+    HasBox -->|Yes| ReturnMagic["return brand → media type"]
+    HasBox -->|No| HaveName{"filename has '.'?"}
+    HaveName -->|No| ReturnUndef["return undefined"]
+    HaveName -->|Yes| ExtLookup["mediaTypeForExtension(ext)"]
+    ExtLookup --> ReturnExt["return mapped type or undefined"]
+```
+
+Keeping magic-byte detection ahead of the extension table matters for iOS/macOS screenshot pastes: Preview often renames `.heic` to `.jpg` before export, and clipboard contents arrive extension-less. Reading the ftyp brand catches both cases without rejecting the attachment.
+
+## Model-Request Hook Plumbing (`src/core/session/model-request.ts`)
+
+Opencode `d1cf7dd` + `91b5a7c` ported here replace an "always copy the request through the hook event" path with an identity-first short-circuit, cutting heap pressure on long sessions with large multimodal attachments. The module is deliberately decoupled from `src/hooks/index.ts` (which handles shell/http/script side-effect hooks, not model-request transformation) so the two surfaces evolve independently.
+
+```typescript
+// src/core/session/model-request.ts
+export interface ModelRequestLike { readonly [key: string]: unknown; }
+export interface RequestHookResult<Req extends ModelRequestLike> { request?: Req; }
+export type RequestHook<Req extends ModelRequestLike> = (ctx: { request: Req }) =>
+  | Promise<RequestHookResult<Req> | void>
+  | RequestHookResult<Req>
+  | void;
+
+export async function dispatchRequestHook<Req extends ModelRequestLike>(
+  request: Req,
+  hook: RequestHook<Req> | undefined
+): Promise<Req>;
+
+export interface HookPayloadEnvelope<T = unknown> { hookPayload?: T; }
+
+export async function runWithRequestHookPayload<T, R>(
+  envelope: HookPayloadEnvelope<T>,
+  payload: T,
+  run: () => Promise<R>
+): Promise<R>;
+
+export function clearHookPayload(envelope: HookPayloadEnvelope): void;
+```
+
+`dispatchRequestHook` returns the original reference when:
+
+1. No hook was supplied (`!hook`).
+2. The hook returned `undefined` or an object with no `request` (no-op signal).
+3. The hook returned `result.request === request` (identity short-circuit — essentially free).
+4. The hook returned a fresh object that is structurally identical to the input (`deepEqual` fallback — only reached for case 3's miss).
+
+Only when the hook actually produced a different request does the dispatcher accept the replacement. The deep-equality fallback keeps the common no-op case from forcing GC to track a short-lived copy of a potentially-large multimodal payload.
+
+`runWithRequestHookPayload` is the paired lifecycle helper: it stashes the payload on a caller-owned envelope, runs the request, and clears the payload reference in `finally` so running tools do not pin the original request body for the lifetime of any long-running tool execution.
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Dispatch as dispatchRequestHook
+    participant Hook as RequestHook
+
+    Caller->>Dispatch: request, hook
+    alt hook undefined
+        Dispatch-->>Caller: original request
+    else hook present
+        Dispatch->>Hook: { request }
+        Hook-->>Dispatch: result
+        alt result empty or no .request
+            Dispatch-->>Caller: original request
+        else result.request === request
+            Dispatch-->>Caller: original request (identity)
+        else deepEqual(result.request, request)
+            Dispatch-->>Caller: original request (free the copy)
+        else different request
+            Dispatch-->>Caller: result.request (accepted)
+        end
+    end
+```
+
 ## Rewind Command
 
 The `/rewind` command (`src/command/rewind.ts`) provides conversation history manipulation by allowing users to navigate to a specific turn boundary and either discard or summarize messages:

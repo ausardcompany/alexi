@@ -190,6 +190,21 @@ npm run test:coverage  # Run tests with coverage report
 - Trailing commas (ES5 style)
 - LF line endings
 
+Run `npm run format` before pushing. The dedicated `format:check` CI job
+runs independently from `lint` and `typecheck`, and it will fail a PR on
+any formatting drift — including the long-signature line-wrap issues that
+the pre-commit `lint-staged` hook corrects on staged files but which can
+sneak past when a file is modified outside the staged set (e.g. by an
+IDE refactor on an untracked branch). The 2026-10-26 auto-fix on
+`src/providers/credential.ts` and `src/providers/options.ts` (CHANGELOG
+`### Changed`, commit `db071ab9`) is a reference case: a 100-column
+overrun on a single generic argument blocked CI until the formatter
+reflowed the signature. New provider helpers that declare a
+discriminated-union generic argument (`ProviderSettingsSchema` is the
+canonical example) MUST reflow the generic across lines rather than fight
+the ceiling with an inline cast; the reflowed shape is also easier to
+diff on review.
+
 ### Import Conventions
 
 ```typescript
@@ -4639,6 +4654,32 @@ Introduced by commit `89e7cb7b test(tests): add integration test for mcp paralle
 - Are the five regression cases in `tests/mcp/parallel-shutdown.test.ts` still green? (Concurrency, fault tolerance, idempotency, empty-map, repeated-disconnect.)
 - Does the mock in `tests/mcp/__mocks__/slow-server.ts` stay independent of `@modelcontextprotocol/client`?
 
+## Per-server shutdown timeout (`McpClientManager.disconnect`)
+
+Introduced by commit `d9d7142e feat(core): per-server shutdown timeout for MCP disconnect` (resolves issue #2160). Companion to the parallel-teardown contract above: `disconnectAll` makes shutdown best-effort ACROSS SERVERS (`Promise.allSettled` + up-front name snapshot), and the new `DISCONNECT_TIMEOUT_MS = 5000` bound in `src/mcp/client.ts:62` + the race inside `disconnect` at `src/mcp/client.ts:1794-1830` makes shutdown bounded WITHIN each server. Together, the whole tear-down is bounded by the slowest per-server deadline, not by the slowest server's actual `close()`. Regression suite: [`src/mcp/__tests__/shutdown.test.ts`](TESTING.md#testing-the-per-server-shutdown-timeout-srcmcp__tests__shutdowntestts-issue-2160).
+
+### Port-maintenance invariants
+
+- **The timeout lives inside `disconnect`, not inside `disconnectAll`.** A direct `disconnect(name)` call (the TUI "disconnect this server" menu, a Doctor sweep, a one-off test teardown) must get the same bounded cleanup as the bulk `disconnectAll` path — a stuck transport is just as damaging to a single-server unmount as it is to a full tear-down. Moving the race up into `disconnectAll` would also widen the surface area of the parallel-teardown method, which is deliberately kept trivial (`Promise.allSettled` over the name snapshot). The 12-line JSDoc on `disconnect` names the location choice explicitly.
+- **`DISCONNECT_TIMEOUT_MS` is an exported constant, not a magic number.** The constant lives at `src/mcp/client.ts:62` and is re-used verbatim both in the production `raceWithTimeout` call and in the regression suite's `expect(DISCONNECT_TIMEOUT_MS).toBe(5000)` guard. Future callers that need a bounded close (e.g. a hypothetical `restart(name)` method) should import and reuse the same deadline rather than hard-coding a second magic number — a deadline rewrite should land in ONE place.
+- **The timer MUST be cleared in a `finally` block in both race outcomes.** `raceWithTimeout` (`src/mcp/client.ts:81-98`) wraps `Promise.race` in `try { return await ... } finally { clearTimeout(timer) }`. The timer handle leak on the "slow but eventually successful close" branch would otherwise multiply across every parallel per-server disconnect — a ten-server tear-down means ten orphaned timers against an event loop that is already trying to exit. Removing the `finally` is a regression even though the happy path "still works" visually.
+- **The sentinel `DisconnectTimeoutError` is `instanceof`-matched, not string-matched.** The `disconnect` catch block uses `error instanceof DisconnectTimeoutError` to split the warning message into the timeout line (`` `MCP server <name> close() exceeded <ms>ms, forcing cleanup` ``) and the generic SDK-error line (`` `Error closing MCP client <name>: <formatError(error)>` ``). Converting to a `message.includes('timeout')` string match would misclassify a real SDK error whose message happens to contain "timeout" (e.g. a Zod `startup timeout` validation failure). Keep the `instanceof` dispatch.
+- **The two warn messages exist for a reason — do not collapse them.** Log scrapers that already grep for `Error closing MCP client` continue to work verbatim because that line is only emitted on NON-timeout errors; a new grep on `exceeded .*ms, forcing cleanup` catches the stuck-transport case specifically. Collapsing both branches into a single `logger.warn('Failed to close MCP client ...')` line destroys the scraper distinction and would silently hide the "transport hung forever, we forced cleanup" signal operators look for.
+- **Forced cleanup MUST run after the race, regardless of outcome.** The `connection.process?.kill()`, `this.connections.delete(name)`, and `forgetCodemodeSupport(name)` calls sit AFTER the `try`/`catch`, not inside the `try`. The semantic contract is "the manager must forget this server" — a hung child is still killed, the entry is still dropped from the connection map, and any cached codemode-support verdict is still invalidated. Moving the cleanup inside the `try` block would skip it on the timeout branch, which is the exact regression this feature exists to prevent.
+- **Short-circuit on `ms <= 0`.** `raceWithTimeout` returns the input promise unraced when `ms <= 0`. The unit tests do not depend on this today, but keeping the branch means a future caller that explicitly wants to disable the deadline (e.g. a debug-mode toggle) can pass `0` without a dedicated code path. Removing the branch is a cosmetic cleanup that locks out a legitimate escape hatch.
+- **No new dependencies.** `raceWithTimeout` is 18 lines of standard-library code (`Promise.race` + `setTimeout` + `clearTimeout`). Resist the temptation to pull in `p-timeout` or `promise-timeout` for a 20-line helper — the dependency surface of the MCP module is intentionally small and the review burden of a new transitive dependency is not worth the saved lines.
+- **Idempotency contract preserved.** After a timeout-driven cleanup, `this.connections.has(name) === false` and `forgetCodemodeSupport(name)` has run. A subsequent `disconnect(name)` early-returns at the `if (!connection) return` guard (`src/mcp/client.ts:1795-1796`), so a double-disconnect from racing shutdown signals is still a no-op. This is what makes the pairing with `disconnectAll` safe: the parallel suite's "repeated disconnect(name) after cleanup is a no-op" case continues to pass unchanged.
+- **The deadline is a bound, not a strict wall-time guarantee.** `raceWithTimeout` cannot interrupt a synchronous CPU-bound `close()` — if the SDK's close implementation ever goes synchronous for 10 s on the main thread, the race's deadline fires only when the event loop next runs. In practice every SDK `close()` is I/O-bound (socket shutdown, pipe flush, child-process wait), so the event loop will always resume quickly enough to honor the 5 s budget. If a future SDK upgrade introduces a synchronous close path, the fix is at the SDK layer, not here.
+
+### Reviewer checklist
+
+- Does the PR preserve `DISCONNECT_TIMEOUT_MS = 5000` as an exported constant?
+- Does `raceWithTimeout` clear its timer in a `finally` block in both outcomes?
+- Does the `disconnect` catch block still split the warn message into the two branches on `instanceof DisconnectTimeoutError`?
+- Does the forced cleanup (`process.kill`, `connections.delete`, `forgetCodemodeSupport`) still run AFTER the race regardless of outcome?
+- Does the suite in `src/mcp/__tests__/shutdown.test.ts` still cover the six cases (constant guard, timeout + forced cleanup, non-blocking peer, kill-on-timeout, no spurious timeout, warn message)?
+- Does the timeout path still log `exceeded .*ms, forcing cleanup`?
+
 ## Step-scoped caches must be cleared from BOTH the top-of-loop AND post-loop paths
 
 Introduced by commit `5b2a00e5 perf(core): cache prompt hook model resolution per step` (ports SST OpenCode PR #58601, issue #2143). The prompt-hook model resolution cache in `src/hooks/index.ts` is the first per-step cache wired into the `agenticChat` iteration loop. The pattern it uses is deliberate and should be reused verbatim by any future step-scoped cache.
@@ -4805,6 +4846,55 @@ The `CONTEXT_OVERFLOW_PATTERNS` list in `src/core/contextOverflow.ts:27-50` is t
 - **Prefer narrow, distinctive phrases over generic catch-alls.** `/reduce the length/i` is distinctive enough to be low-false-positive; something like `/too long/i` would match thousands of unrelated error messages and start triggering compaction on validation errors. If a candidate phrase feels like it would match generic validation output, do NOT merge it.
 
 Companion contract: `maxTokensRecovery` (`src/core/maxTokensRecovery.ts`) handles the complementary case where the overflow is caused by the response budget, not the prompt. Free-form phrases like `prompt too long` are deliberately routed through `isContextOverflowError` (compaction), NOT through `maxTokensRecovery` (which only handles `413` / `max_tokens_exceeded` / `context_length_exceeded` structural markers). Do not add free-form patterns to the maxTokens classifier.
+
+## Dependency-free pure helper modules
+
+The 2026-10-26 sync added four modules that intentionally stay dependency-free so they can be used from both the compaction manager and the per-session prompt builder without introducing a cycle, or so they stay usable from the zero-dependency bootstrap path. When adding similar helpers, keep three rules:
+
+- **No imports from `src/core/` into the helper itself.** `src/core/session/compaction.ts` and `src/core/mime.ts` are the templates: they import `node:fs` / `node:path` / `zod` at most. If you need a type from `src/core/`, add it to the helper's own public surface (`SessionCompactionConfig`, `Usage`, etc.) and let the caller map between the two shapes.
+- **Pure functions, not classes with mutable state.** The compaction helpers are pure (`shouldCompact`, `effectiveCompactionBudget`, `resolveBackgroundCompaction`), the MIME helpers are pure (`detectMediaType`, `mediaTypeForExtension`), and the credential helper is a one-shot async function that owns no state across calls. State lives on the caller's session record.
+- **Validation on the loader boundary, not inside the helper.** `src/config/compactionConfig.ts:71-96` validates the new `buffer` / `background_compaction` / `precompute_compaction` fields at JSON load time and raises a prefixed `Error('compaction.<field> must be ...')`. The helper then trusts its typed input. A caller that constructs a `SessionCompactionConfig` programmatically must apply the same validation OR document that the construction site is already type-safe.
+
+## Compaction loop-guard contract (`lastCompactionAtTokens`)
+
+Ported from kilocode `ccf958a1d` in the 2026-10-26 sync. When extending the compaction surface, preserve the loop-guard semantics:
+
+- **Persist the token count observed at the LAST successful compaction**, not the token count that triggered compaction and not the current turn's count. The guard compares the current projected cost against the stored value and refuses to fire again when the former has not decreased.
+- **Reset to `undefined` after the summary itself leaves the preserve-last-N window.** A new oversized burst must be able to trigger compaction again. A session that keeps `lastCompactionAtTokens` set forever would never compact again — the opposite of what the guard is for.
+- **The guard is advisory, not a lock.** `shouldCompact` returning `false` is the only observable effect; nothing is scheduled or marked "in progress". Callers that need concurrency control (background compaction, parallel tool calls) must add their own serialisation.
+
+Reference call-site: `src/core/session/prompt.ts:30-48` (`SessionCompactionState`, `recordCompactionRun`). Pure helper: `src/core/session/compaction.ts:40-56` (`shouldCompact(usage, threshold, lastCompactionAtTokens?)`). Manager-side forward: `src/compaction/index.ts:231-283` (`CompactionManager.needsCompaction`, module-level `shouldCompact`).
+
+## Cross-process credential lock contract (`refreshCredentialWithLock`)
+
+Ported from opencode `9435378` in the 2026-10-26 sync. When wiring a new credential path into `refreshCredentialWithLock`, preserve four invariants:
+
+- **The `credentialPath` is the deduplication key.** Two call sites that refresh the same credential MUST pass identical paths. Normalise relative paths and `~` expansions before calling the helper, otherwise two processes end up with sibling locks and race each other.
+- **`readCached` must be fast and side-effect free.** It is called at least twice per refresh (fast path before lock, double-check after lock). A reader that touches the network or triggers a sub-refresh would defeat the point of the lock.
+- **`refresh` must throw on fatal error, not silently return a stale credential.** The helper does not retry; `ErrorBackoff` on the caller side classifies transient vs permanent. A silent-fallback refresh breaks the "at most one process executes refresh at a time" guarantee because peers would never see the real failure.
+- **Stale-lock reclaim is bounded by `staleMs` (default 10 s).** Do not raise this past 30 s without a strong reason — the lock exists to serialise a token endpoint call, which should complete in under a second. A long stale window converts a crashed process into a 30-second stall for every peer.
+
+Reference module: `src/providers/credential.ts`. Lock file layout: `<credentialPath>.lock` with a plain-ASCII integer timestamp body.
+
+## Provider options derivation (`deriveProviderOptionKeys` / `filterProviderOptions`)
+
+Ported from opencode `490456d` in the 2026-10-26 sync. When adding a new provider or a new field to an existing provider's settings schema:
+
+- **Add the field to the Zod settings schema, not to a side list.** `deriveProviderOptionKeys` walks the schema shape at runtime — the new field automatically becomes a valid option key. Do NOT reintroduce a hand-rolled list.
+- **Unknown providers pass through verbatim.** `filterProviderOptions` returns a fresh copy of the input when the provider id is not in the derived key map, so a bespoke extension does not get its options stripped. If you want strict filtering for a specific provider, add it to the schema; do not special-case the filter.
+- **The filter mutates nothing.** It returns a new object. If a reviewer sees `filterProviderOptions(...)` with the result discarded, that is a bug — the point of the filter is to produce the trimmed object that gets passed to the request builder.
+
+Reference module: `src/providers/options.ts`.
+
+## Model-request hook identity short-circuit
+
+Ported from opencode `d1cf7dd` and `91b5a7c` in the 2026-10-26 sync. When wiring a model-request hook, keep the semantics `dispatchRequestHook` enforces:
+
+- **A no-op hook MUST return either `undefined` or `{ request: originalRequest }`.** Returning a fresh object that happens to carry the same payload still works (the `deepEqual` fallback catches it), but costs an extra structural comparison on every call. Prefer the identity short-circuit.
+- **A transforming hook MUST return a different object.** Mutating the input and returning the same reference is treated as a no-op by `dispatchRequestHook` — the request body change would be silently discarded on the identity check.
+- **Attach payloads via `HookPayloadEnvelope`, not by patching the request body.** `runWithRequestHookPayload(envelope, payload, run)` clears the payload reference in `finally` so a long-running tool does not pin the payload. Stashing on the request itself defeats the cleanup.
+
+Reference module: `src/core/session/model-request.ts`.
 
 ## License
 

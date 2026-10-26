@@ -54,6 +54,47 @@ import {
 const RUNTIME_TIMEOUT_MIN_MS = 1000;
 const RUNTIME_TIMEOUT_MAX_MS = 300000;
 
+/**
+ * Per-server shutdown deadline (ms) applied inside {@link
+ * McpClientManager.disconnect}. A stdio child that never acknowledges
+ * `SIGTERM` or a stuck HTTP keep-alive cannot block cleanup for
+ * longer than this. On expiry we drop the entry and move on; the
+ * surrounding `disconnectAll` continues with the remaining servers
+ * (which it already runs in parallel via `Promise.allSettled`).
+ */
+export const DISCONNECT_TIMEOUT_MS = 5000;
+
+/** Sentinel thrown by {@link raceWithTimeout} when the deadline wins. */
+class DisconnectTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`disconnect timeout after ${ms}ms`);
+    this.name = 'DisconnectTimeoutError';
+  }
+}
+
+/**
+ * Race `p` against a `ms` deadline. Resolves with `p`'s result on win;
+ * rejects with {@link DisconnectTimeoutError} on timeout. The timer is
+ * cleared in both outcomes so a slow-but-eventually-successful close
+ * does not leak a handle after the race has already settled.
+ */
+async function raceWithTimeout<T>(p: Promise<T> | T, ms: number): Promise<T> {
+  if (ms <= 0) return p;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race<T>([
+      Promise.resolve(p),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new DisconnectTimeoutError(ms)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export interface McpToolInfo {
   /** Tool name (raw short name as advertised by the server) */
   name: string;
@@ -1735,7 +1776,20 @@ export class McpClientManager {
   }
 
   /**
-   * Disconnect from an MCP server
+   * Disconnect from an MCP server.
+   *
+   * `client.close()` is raced against a {@link DISCONNECT_TIMEOUT_MS}
+   * deadline so a stuck transport (e.g. a stdio child that never
+   * acknowledges `SIGTERM`, or a hung HTTP keep-alive) cannot stall
+   * shutdown indefinitely. On timeout we log a warning, hard-kill any
+   * spawned child process, and drop the entry from the connection map
+   * — the goal of this path is "the manager must forget this server",
+   * not "the SDK must acknowledge a clean close".
+   *
+   * This per-server timeout is intentionally applied HERE, inside
+   * `disconnect`, rather than in `disconnectAll`. See
+   * `docs/CONTRIBUTING.md` — "Parallel teardown in `disconnectAll` is
+   * deliberate".
    */
   async disconnect(name: string): Promise<void> {
     const connection = this.connections.get(name);
@@ -1753,9 +1807,15 @@ export class McpClientManager {
     }
 
     try {
-      await connection.client.close();
+      await raceWithTimeout(connection.client.close(), DISCONNECT_TIMEOUT_MS);
     } catch (error) {
-      logger.warn(`Error closing MCP client ${name}: ${formatError(error)}`);
+      if (error instanceof DisconnectTimeoutError) {
+        logger.warn(
+          `MCP server ${name} close() exceeded ${DISCONNECT_TIMEOUT_MS}ms, forcing cleanup`
+        );
+      } else {
+        logger.warn(`Error closing MCP client ${name}: ${formatError(error)}`);
+      }
     }
 
     if (connection.process) {
