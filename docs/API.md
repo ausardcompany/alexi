@@ -9834,3 +9834,244 @@ The dedup lookup / insert happens before the handshake body (`connectImpl`), and
 2. **Subsequent calls after resolution still cache.** Once `connect` resolves the entry is removed from `pendingConnects`, but the underlying `connections` map still carries the connection — a third `connect(cfg)` after both prior calls complete returns the already-registered connection via the normal `this.connections.has(config.name)` early-return path.
 
 `disconnectAll()` now runs disconnects in parallel via `Promise.allSettled` (ports opencode `7b14ad4`). A slow or hung server cannot stall shutdown for the others; per-server errors are logged by `disconnect()` itself and never propagated through `allSettled`. See [docs/ARCHITECTURE.md — MCP Client Connect De-duplication](ARCHITECTURE.md#mcp-client-connect-de-duplication-srcmcpclientts) for the sequence diagram.
+
+## MIME / Media-Type Detection API (`src/core/mime.ts`)
+
+Added in the 2026-10-26 sync (opencode `421e44e` and `c54677b`). Four pure helpers resolve attachment media types with magic-byte disambiguation ahead of extension lookup, so a mis-extensioned or extension-less payload (iOS screenshot pastes, clipboard contents) still resolves to the correct type.
+
+```typescript
+// src/core/mime.ts
+export function mediaTypeForExtension(ext: string): string | undefined;
+export function detectMediaFromMagic(bytes: Uint8Array): string | undefined;
+export function detectMediaType(bytes: Uint8Array, filename?: string): string | undefined;
+export function getExtensionMediaTypes(): Readonly<Record<string, string>>;
+```
+
+| Helper                      | Lookup strategy                                              |
+|-----------------------------|--------------------------------------------------------------|
+| `mediaTypeForExtension`     | Case-insensitive extension table (leading dot required).     |
+| `detectMediaFromMagic`      | ISO BMFF `ftyp` box inspection of the first 12 bytes.        |
+| `detectMediaType`           | Magic bytes first, extension fallback, `undefined` otherwise.|
+| `getExtensionMediaTypes`    | Read-only view of the extension table (tests / introspection).|
+
+ISO BMFF brands recognised by `detectMediaFromMagic`:
+
+| Major brand                   | Media type        |
+|-------------------------------|-------------------|
+| `heic`, `heix`, `mif1`        | `image/heic`      |
+| `qt  ` (trailing spaces)      | `video/quicktime` |
+| `M4A `                        | `audio/mp4`       |
+| `mp4*`, `isom`, `iso2`        | `video/mp4`       |
+
+Returns `undefined` when the first 12 bytes do not carry an ftyp box or the brand is unrecognised — the caller falls through to the extension table.
+
+See [docs/ARCHITECTURE.md — Attachment MIME Detection](ARCHITECTURE.md#attachment-mime-detection-srccoremimets) for the resolution flow diagram.
+
+## Credential Refresh API (`src/providers/credential.ts`)
+
+Added in the 2026-10-26 sync (opencode `9435378`). Public helper that serialises OAuth / XSUAA token refreshes across concurrent processes behind a filesystem lock, with a cached-credential double-check after acquiring the lock. Keeps parallel SAP AI Core XSUAA pipelines from thrashing each other's tokens.
+
+```typescript
+// src/providers/credential.ts
+export interface RefreshWithLockOptions<T> {
+  credentialPath: string;
+  refresh: () => Promise<T>;
+  readCached?: () => Promise<T | undefined>;
+  staleMs?: number;      // Default: 10_000
+  maxAttempts?: number;  // Default: 50
+  minDelayMs?: number;   // Default: 50 (base poll delay)
+  maxDelayMs?: number;   // Default: 500 (upper bound on poll delay)
+}
+
+export async function refreshCredentialWithLock<T>(
+  options: RefreshWithLockOptions<T>
+): Promise<T>;
+```
+
+Guarantees:
+
+1. At most one process executes `refresh` at a time per `credentialPath`.
+2. Peers waiting on the lock re-read the cached credential after acquiring the lock and skip `refresh` if a prior holder already produced a fresh one.
+3. The lock is always released — including on `refresh` throw.
+
+The helper does NOT itself retry a transient OAuth error from `refresh` — that is the caller's concern (`ErrorBackoff`). Throws `Error('Timed out waiting for credential refresh lock after N attempts: <path>')` when `maxAttempts` is exhausted without acquiring the lock.
+
+See [docs/PROVIDERS.md — Cross-Process Credential-Refresh Coordination](PROVIDERS.md#cross-process-credential-refresh-coordination-srcproviderscredentialts) for the sequence diagram and operator-facing notes.
+
+## Provider Options API
+
+### Anthropic Prompt Cache (`src/providers/anthropic.ts`)
+
+Added in the 2026-10-26 sync (opencode `9007700`). Narrow Zod-validated surface for Anthropic prompt-cache TTL selection.
+
+```typescript
+// src/providers/anthropic.ts
+export const CachePolicySchema = z
+  .object({ ttl: z.enum(['5m', '1h']).default('5m') })
+  .optional();
+
+export type CachePolicy = z.infer<typeof CachePolicySchema>;
+
+export function anthropicCacheControl(policy?: CachePolicy): {
+  type: 'ephemeral';
+  ttl: '5m' | '1h';
+};
+
+export function anthropicCacheProviderOptions(policy?: CachePolicy): {
+  anthropic: { cacheControl: { type: 'ephemeral'; ttl: '5m' | '1h' } };
+};
+```
+
+Pass the result of `anthropicCacheProviderOptions(policy)` as the `providerOptions.anthropic` field on the orchestration request. Opt into the `1h` TTL for long-running sessions where the default `5m` would otherwise cause a cache miss on every follow-up turn.
+
+### Bedrock Converse Options (`src/providers/bedrock.ts`)
+
+Added in the 2026-10-26 sync (opencode `74556a2`). Typed options surface and pure request builder for AWS Bedrock Converse. Scope: typed surface + builder only; actual SDK call lives wherever the caller instantiates the Bedrock client.
+
+```typescript
+// src/providers/bedrock.ts
+export type BedrockReasoningEffort = 'low' | 'medium' | 'high';
+export type BedrockServiceTier = 'standard' | 'priority';
+
+export interface BedrockConverseOptions {
+  reasoningEffort?: BedrockReasoningEffort;
+  serviceTier?: BedrockServiceTier;
+  adaptiveThinking?: boolean;
+  requestMetadata?: Record<string, string>;
+  responseJsonSchema?: object;
+}
+
+export function buildConverseRequest(
+  model: string,
+  messages: BedrockConverseMessage[],
+  opts?: BedrockConverseOptions
+): BedrockConverseRequest;
+```
+
+Field → Converse request mapping is tabulated in [docs/PROVIDERS.md — Typed Bedrock Converse Options](PROVIDERS.md#typed-bedrock-converse-options-srcprovidersbedrockts). The builder omits unset fields entirely so Bedrock's request validator does not reject unknown empty fields.
+
+### Schema-Derived Provider Option Keys (`src/providers/options.ts`)
+
+Added in the 2026-10-26 sync (opencode `490456d`). Derives the valid option-key set per provider from a Zod settings schema so adding a new provider field automatically threads through the orchestrator wiring. No manual list to drift.
+
+```typescript
+// src/providers/options.ts
+export function deriveProviderOptionKeys(
+  schema: ProviderSettingsSchema
+): ReadonlyMap<string, ReadonlySet<string>>;
+
+export function filterProviderOptions(
+  providerId: string,
+  options: Readonly<Record<string, unknown>>,
+  keyMap: ReadonlyMap<string, ReadonlySet<string>>
+): Record<string, unknown>;
+```
+
+`filterProviderOptions` returns a fresh object trimmed to the keys the schema admits for `providerId`. Unknown providers pass through verbatim so a caller using a bespoke extension does not have its options stripped. The input bag is never mutated.
+
+## Session Compaction API
+
+Added / extended in the 2026-10-26 sync (opencode `33726e8`, `f523f77`; kilocode `ccf958a1d`). Pure helpers shared by the compaction manager and the per-session prompt builder.
+
+```typescript
+// src/core/session/compaction.ts
+export interface Usage { ratio: number; tokens: number; }
+
+export function shouldCompact(
+  usage: Usage,
+  threshold: number,
+  lastCompactionAtTokens?: number
+): boolean;
+
+export function effectiveCompactionBudget(
+  contextWindow: number,
+  buffer: number,
+  used: number
+): number;
+
+export interface SessionCompactionConfig {
+  threshold?: number;
+  buffer?: number;
+  background_compaction?: boolean;
+  precompute_compaction?: boolean; // @deprecated
+}
+
+export function resolveBackgroundCompaction(cfg: SessionCompactionConfig): boolean;
+
+// src/core/session/prompt.ts
+export interface SessionCompactionState {
+  lastCompactionAtTokens?: number;
+}
+
+export function recordCompactionRun(
+  state: SessionCompactionState,
+  compactedTokens: number
+): SessionCompactionState;
+```
+
+The matching changes on the compaction manager keep the loop-guard contract when the caller goes through the richer interface:
+
+```typescript
+// src/compaction/index.ts
+class CompactionManager {
+  needsCompaction(
+    messages: Message[],
+    options?: CompactionCheckOptions,
+    lastCompactionAtTokens?: number
+  ): boolean;
+}
+
+export function shouldCompact(
+  messages: Message[],
+  maxTokens?: number,
+  lastCompactionAtTokens?: number
+): boolean;
+```
+
+Caller contract:
+
+- Persist `lastCompactionAtTokens` on the session after a successful compaction (`recordCompactionRun`).
+- Pass it to the next `shouldCompact` / `needsCompaction` call so a stuck summariser cannot be invoked twice on the same input.
+- Reset to `undefined` after the summary itself leaves the preserve-last-N window.
+
+See [docs/CONFIGURATION.md — Compaction Loop Guard](CONFIGURATION.md#compaction-loop-guard) and [docs/ARCHITECTURE.md — Compaction Loop Guard and Session Helpers](ARCHITECTURE.md#compaction-loop-guard-and-session-helpers-srccoresessioncompactionts).
+
+## Model-Request Hook API (`src/core/session/model-request.ts`)
+
+Added in the 2026-10-26 sync (opencode `d1cf7dd` and `91b5a7c`). Hook plumbing that avoids copying the request body through the hook event when the hook was a no-op, and avoids pinning the payload reference for the lifetime of any running tool.
+
+```typescript
+// src/core/session/model-request.ts
+export interface ModelRequestLike { readonly [key: string]: unknown; }
+export interface RequestHookResult<Req extends ModelRequestLike> { request?: Req; }
+export type RequestHook<Req extends ModelRequestLike> = (ctx: { request: Req }) =>
+  | Promise<RequestHookResult<Req> | void>
+  | RequestHookResult<Req>
+  | void;
+
+export async function dispatchRequestHook<Req extends ModelRequestLike>(
+  request: Req,
+  hook: RequestHook<Req> | undefined
+): Promise<Req>;
+
+export interface HookPayloadEnvelope<T = unknown> { hookPayload?: T; }
+
+export async function runWithRequestHookPayload<T, R>(
+  envelope: HookPayloadEnvelope<T>,
+  payload: T,
+  run: () => Promise<R>
+): Promise<R>;
+
+export function clearHookPayload(envelope: HookPayloadEnvelope): void;
+```
+
+`dispatchRequestHook` returns the ORIGINAL request reference when:
+
+1. No hook was supplied (`!hook`).
+2. The hook returned `undefined` or an object with no `request` (no-op signal).
+3. The hook returned `result.request === request` (identity short-circuit).
+4. The hook returned a fresh object that is structurally identical to the input (`deepEqual` fallback).
+
+Only when the hook produced a *different* request does the dispatcher accept the replacement. `runWithRequestHookPayload` stashes a payload on the caller-owned envelope and clears it in `finally` so long-running tools do not pin the original request body.
+
+Deliberately decoupled from the general hooks surface in `src/hooks/index.ts` (shell / http / script side-effects) so the two surfaces evolve independently. See [docs/ARCHITECTURE.md — Model-Request Hook Plumbing](ARCHITECTURE.md#model-request-hook-plumbing-srccoresessionmodel-requestts) for the dispatch sequence diagram.

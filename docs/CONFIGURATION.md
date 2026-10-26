@@ -1135,10 +1135,97 @@ interface CompactionConfig {
   warningThreshold?: number;     // Default: 0.8 (80% of maxTokens)
   strategy?: CompactionStrategy; // Default: 'sliding'
   preserveRecent?: number;       // Default: 4 (messages to always keep)
+
+  /**
+   * Reserve this many tokens for the next model reply before triggering
+   * compaction. When the configured value would starve the model
+   * (buffer >= remaining context), it is silently ignored —
+   * `effectiveCompactionBudget` in `src/core/session/compaction.ts`
+   * returns the full remaining window instead of a zero or negative
+   * budget. Opencode `33726e8`.
+   */
+  buffer?: number;
+
+  /**
+   * Run compaction eagerly in the background so a cross-threshold
+   * check does not block the next turn. Canonical name introduced by
+   * opencode `f523f77`.
+   */
+  background_compaction?: boolean;
+
+  /** @deprecated use background_compaction */
+  precompute_compaction?: boolean;
 }
 
 type CompactionStrategy = 'truncate' | 'summarize' | 'sliding' | 'smart';
 ```
+
+### `buffer`
+
+Added in the 2026-10-26 sync (opencode `33726e8`). Reserves tokens for the next model reply before compaction fires. The validator in `validateCompactionConfig` (`src/config/compactionConfig.ts:71-76`) enforces a finite non-negative number and applies `Math.floor` so fractional values do not leak into comparisons. Validation errors raise `Error('compaction.buffer must be a non-negative number')`.
+
+Example — reserve 4 KB of the context window for the model's own reply:
+
+```json
+{
+  "compaction": {
+    "maxTokens": 100000,
+    "warningThreshold": 0.8,
+    "buffer": 4096
+  }
+}
+```
+
+Effective budget calculation (`src/core/session/compaction.ts:85-96`):
+
+```text
+remaining = contextWindow - used
+budget    = (buffer >= remaining) ? remaining : remaining - buffer
+```
+
+The "would starve the model" fallback (`buffer >= remaining`) returns the full remaining window silently. Downstream code must never see a zero or negative budget from this helper.
+
+### `background_compaction` and the `precompute_compaction` alias
+
+Added in the 2026-10-26 sync (opencode `f523f77`). When `true`, compaction runs eagerly in the background so the next model turn does not pay the summariser wall-time. The validator (`src/config/compactionConfig.ts:78-96`) enforces a boolean and raises `Error('compaction.background_compaction must be a boolean')` on a type mismatch.
+
+`precompute_compaction` is accepted as a deprecated alias for the same flag so existing configs continue to work. Precedence (`resolveBackgroundCompaction` in `src/core/session/compaction.ts:112-121`):
+
+1. If `background_compaction` is set, it wins — the alias is ignored even if also present.
+2. If only `precompute_compaction` is set, the resolver forwards it as the effective value.
+3. If neither is set, the default is `false`.
+
+The config loader forwards the alias into both fields so downstream readers inspecting either field see a consistent value:
+
+```typescript
+// src/config/compactionConfig.ts
+if (obj.precompute_compaction !== undefined) {
+  config.precompute_compaction = obj.precompute_compaction;
+  if (config.background_compaction === undefined) {
+    config.background_compaction = obj.precompute_compaction;
+  }
+}
+```
+
+### Compaction Loop Guard
+
+Added in the 2026-10-26 sync (kilocode `ccf958a1d`). The loop guard is not a config field; it is a per-session runtime value, but it affects when a `shouldCompact` check returns `true` and therefore how often the summariser runs.
+
+Sessions should persist `lastCompactionAtTokens` (the token count observed at the most recent successful compaction) between turns and feed it to `shouldCompact` on the next check. When the current projected cost has NOT meaningfully decreased since that last compaction, `shouldCompact` returns `false` instead of invoking the summariser a second time on the same input — which would otherwise burn provider budget with no forward progress.
+
+```typescript
+// src/core/session/prompt.ts
+export interface SessionCompactionState {
+  lastCompactionAtTokens?: number;
+}
+
+export function recordCompactionRun(
+  state: SessionCompactionState,
+  compactedTokens: number
+): SessionCompactionState;
+```
+
+Reset `lastCompactionAtTokens` to `undefined` after the summary itself falls out of the preserve-last-N window — a new oversized burst must be able to trigger compaction again.
 
 ### Strategies
 

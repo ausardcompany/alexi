@@ -4744,6 +4744,55 @@ The `CONTEXT_OVERFLOW_PATTERNS` list in `src/core/contextOverflow.ts:27-50` is t
 
 Companion contract: `maxTokensRecovery` (`src/core/maxTokensRecovery.ts`) handles the complementary case where the overflow is caused by the response budget, not the prompt. Free-form phrases like `prompt too long` are deliberately routed through `isContextOverflowError` (compaction), NOT through `maxTokensRecovery` (which only handles `413` / `max_tokens_exceeded` / `context_length_exceeded` structural markers). Do not add free-form patterns to the maxTokens classifier.
 
+## Dependency-free pure helper modules
+
+The 2026-10-26 sync added four modules that intentionally stay dependency-free so they can be used from both the compaction manager and the per-session prompt builder without introducing a cycle, or so they stay usable from the zero-dependency bootstrap path. When adding similar helpers, keep three rules:
+
+- **No imports from `src/core/` into the helper itself.** `src/core/session/compaction.ts` and `src/core/mime.ts` are the templates: they import `node:fs` / `node:path` / `zod` at most. If you need a type from `src/core/`, add it to the helper's own public surface (`SessionCompactionConfig`, `Usage`, etc.) and let the caller map between the two shapes.
+- **Pure functions, not classes with mutable state.** The compaction helpers are pure (`shouldCompact`, `effectiveCompactionBudget`, `resolveBackgroundCompaction`), the MIME helpers are pure (`detectMediaType`, `mediaTypeForExtension`), and the credential helper is a one-shot async function that owns no state across calls. State lives on the caller's session record.
+- **Validation on the loader boundary, not inside the helper.** `src/config/compactionConfig.ts:71-96` validates the new `buffer` / `background_compaction` / `precompute_compaction` fields at JSON load time and raises a prefixed `Error('compaction.<field> must be ...')`. The helper then trusts its typed input. A caller that constructs a `SessionCompactionConfig` programmatically must apply the same validation OR document that the construction site is already type-safe.
+
+## Compaction loop-guard contract (`lastCompactionAtTokens`)
+
+Ported from kilocode `ccf958a1d` in the 2026-10-26 sync. When extending the compaction surface, preserve the loop-guard semantics:
+
+- **Persist the token count observed at the LAST successful compaction**, not the token count that triggered compaction and not the current turn's count. The guard compares the current projected cost against the stored value and refuses to fire again when the former has not decreased.
+- **Reset to `undefined` after the summary itself leaves the preserve-last-N window.** A new oversized burst must be able to trigger compaction again. A session that keeps `lastCompactionAtTokens` set forever would never compact again — the opposite of what the guard is for.
+- **The guard is advisory, not a lock.** `shouldCompact` returning `false` is the only observable effect; nothing is scheduled or marked "in progress". Callers that need concurrency control (background compaction, parallel tool calls) must add their own serialisation.
+
+Reference call-site: `src/core/session/prompt.ts:30-48` (`SessionCompactionState`, `recordCompactionRun`). Pure helper: `src/core/session/compaction.ts:40-56` (`shouldCompact(usage, threshold, lastCompactionAtTokens?)`). Manager-side forward: `src/compaction/index.ts:231-283` (`CompactionManager.needsCompaction`, module-level `shouldCompact`).
+
+## Cross-process credential lock contract (`refreshCredentialWithLock`)
+
+Ported from opencode `9435378` in the 2026-10-26 sync. When wiring a new credential path into `refreshCredentialWithLock`, preserve four invariants:
+
+- **The `credentialPath` is the deduplication key.** Two call sites that refresh the same credential MUST pass identical paths. Normalise relative paths and `~` expansions before calling the helper, otherwise two processes end up with sibling locks and race each other.
+- **`readCached` must be fast and side-effect free.** It is called at least twice per refresh (fast path before lock, double-check after lock). A reader that touches the network or triggers a sub-refresh would defeat the point of the lock.
+- **`refresh` must throw on fatal error, not silently return a stale credential.** The helper does not retry; `ErrorBackoff` on the caller side classifies transient vs permanent. A silent-fallback refresh breaks the "at most one process executes refresh at a time" guarantee because peers would never see the real failure.
+- **Stale-lock reclaim is bounded by `staleMs` (default 10 s).** Do not raise this past 30 s without a strong reason — the lock exists to serialise a token endpoint call, which should complete in under a second. A long stale window converts a crashed process into a 30-second stall for every peer.
+
+Reference module: `src/providers/credential.ts`. Lock file layout: `<credentialPath>.lock` with a plain-ASCII integer timestamp body.
+
+## Provider options derivation (`deriveProviderOptionKeys` / `filterProviderOptions`)
+
+Ported from opencode `490456d` in the 2026-10-26 sync. When adding a new provider or a new field to an existing provider's settings schema:
+
+- **Add the field to the Zod settings schema, not to a side list.** `deriveProviderOptionKeys` walks the schema shape at runtime — the new field automatically becomes a valid option key. Do NOT reintroduce a hand-rolled list.
+- **Unknown providers pass through verbatim.** `filterProviderOptions` returns a fresh copy of the input when the provider id is not in the derived key map, so a bespoke extension does not get its options stripped. If you want strict filtering for a specific provider, add it to the schema; do not special-case the filter.
+- **The filter mutates nothing.** It returns a new object. If a reviewer sees `filterProviderOptions(...)` with the result discarded, that is a bug — the point of the filter is to produce the trimmed object that gets passed to the request builder.
+
+Reference module: `src/providers/options.ts`.
+
+## Model-request hook identity short-circuit
+
+Ported from opencode `d1cf7dd` and `91b5a7c` in the 2026-10-26 sync. When wiring a model-request hook, keep the semantics `dispatchRequestHook` enforces:
+
+- **A no-op hook MUST return either `undefined` or `{ request: originalRequest }`.** Returning a fresh object that happens to carry the same payload still works (the `deepEqual` fallback catches it), but costs an extra structural comparison on every call. Prefer the identity short-circuit.
+- **A transforming hook MUST return a different object.** Mutating the input and returning the same reference is treated as a no-op by `dispatchRequestHook` — the request body change would be silently discarded on the identity check.
+- **Attach payloads via `HookPayloadEnvelope`, not by patching the request body.** `runWithRequestHookPayload(envelope, payload, run)` clears the payload reference in `finally` so a long-running tool does not pin the payload. Stashing on the request itself defeats the cleanup.
+
+Reference module: `src/core/session/model-request.ts`.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
