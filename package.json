@@ -126,7 +126,7 @@
     "lint-staged": "^17.6.0",
     "prettier": "^3.9.9",
     "tsc-files": "^1.1.4",
-    "tsx": "^4.23.13",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "vitest": "^5.0.5"
   },
