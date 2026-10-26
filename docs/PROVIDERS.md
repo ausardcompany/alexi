@@ -4853,6 +4853,193 @@ export interface OrchestrationModelMetadata {
 
 Missing / `false` is "licensed" (default); `true` marks the entry as subject to the filter. No existing SAP metadata entry sets `free: true`, so the live catalog is byte-identical with the filter off.
 
+## Cross-process Credential Refresh (`src/providers/credential.ts`)
+
+Alexi's provider layer may hold a cached OAuth / XSUAA credential on disk (see
+`src/providers/sapOrchestration.ts` for the SAP AI Core XSUAA client-credentials
+flow and `src/providers/auth.ts` for the OAuth2 authorization-code refresh path
+used by some proxy backends). When multiple Alexi processes run concurrently —
+an interactive TUI, a background `agent` run, a CI invocation — they can all
+decide to refresh the same credential at the same time, and whichever refresh
+lands last invalidates the tokens held by the earlier callers. For SAP AI Core
+XSUAA this is a frequent source of 401s in parallel pipelines.
+
+`src/providers/credential.ts` exposes a small cross-process coordinator that
+serialises refreshes behind a filesystem lock keyed on the credential path, so
+every refresh call either waits for a peer's result or performs the refresh
+itself. The implementation is deliberately zero-dependency (no
+`proper-lockfile`) so it stays usable in the bootstrap path.
+
+### Public API
+
+```typescript
+// src/providers/credential.ts
+
+export interface RefreshWithLockOptions<T> {
+  /** Absolute path identifying the credential being refreshed. */
+  credentialPath: string;
+  /** Perform the actual refresh (OAuth token endpoint, XSUAA, ...). */
+  refresh: () => Promise<T>;
+  /**
+   * Return a cached credential if one is already on disk and still
+   * valid. Called twice: once before taking the lock (fast path) and
+   * once after taking the lock (double-check). Returning `undefined`
+   * signals "no valid cached credential, call refresh".
+   */
+  readCached?: () => Promise<T | undefined>;
+  /** Milliseconds after which an orphaned lock may be reclaimed. Default: 10_000. */
+  staleMs?: number;
+  /** Max attempts to acquire the lock before giving up. Default: 50. */
+  maxAttempts?: number;
+  /** Base poll delay in ms, grown exponentially with jitter. Default: 50. */
+  minDelayMs?: number;
+  /** Upper bound on the poll delay. Default: 500. */
+  maxDelayMs?: number;
+}
+
+export async function refreshCredentialWithLock<T>(
+  options: RefreshWithLockOptions<T>
+): Promise<T>;
+```
+
+### Guarantees
+
+1. **At most one in-flight refresh per `credentialPath`.** Contending callers
+   get `EEXIST` on the lock file and poll with capped exponential backoff
+   (`minDelayMs * 2^attempt`, jittered ±25%, capped at `maxDelayMs`).
+2. **Peers waiting on the lock re-read the cached credential after acquiring
+   it and skip calling `refresh` if a prior holder already produced a fresh
+   value.** This is the double-check that makes concurrent refreshes safe.
+3. **The lock is always released**, including on a `refresh` throw — the
+   `finally` block removes the lock file whether the refresh succeeded or
+   not.
+4. **Stale locks are reclaimable.** The lock file stores a timestamp; a later
+   arrival whose age exceeds `staleMs` (default 10 s) removes the orphan and
+   retries, so a crashed owner cannot wedge the system.
+5. **Transient `refresh` failures are the caller's concern.** `ErrorBackoff`
+   (`src/core/error-backoff.ts`) wraps the `refresh` callback upstream; the
+   lock helper itself never retries the refresh.
+
+### Call-flow
+
+```mermaid
+sequenceDiagram
+    participant A as Process A
+    participant B as Process B
+    participant FS as Filesystem lock
+    participant OAuth as OAuth / XSUAA endpoint
+
+    A->>FS: readCached()
+    FS-->>A: undefined
+    A->>FS: open(lock, 'wx')
+    FS-->>A: ok (acquired)
+    B->>FS: readCached()
+    FS-->>B: undefined
+    B->>FS: open(lock, 'wx')
+    FS-->>B: EEXIST
+    B->>B: sleep (backoff, jittered)
+    A->>OAuth: refresh()
+    OAuth-->>A: fresh credential
+    A->>FS: rm(lock)
+    B->>FS: open(lock, 'wx')
+    FS-->>B: ok (acquired)
+    B->>FS: readCached() (double-check)
+    FS-->>B: fresh credential (from A)
+    B->>FS: rm(lock)
+    B-->>B: return cached (no refresh)
+```
+
+### Formatting discipline
+
+The exported `refreshCredentialWithLock` signature wraps `options` on the
+same line as the function name so Prettier's 100-column rule is honoured
+without an argument-per-line split. Keep this form when adding fields to
+`RefreshWithLockOptions<T>` — the signature does not change shape.
+
+## Provider Option Key Derivation (`src/providers/options.ts`)
+
+Alexi's request builder threads provider-specific options (for example
+`providerOptions.anthropic.cacheControl`, `providerOptions.openai.cacheBreakpoint`,
+`providerOptions.bedrock.reasoning_effort`) through to the SAP AI Core
+Orchestration request. Historically the valid key set was a hand-rolled list
+in the orchestrator; every new provider feature required a touch to that list,
+and forgetting it caused the orchestrator to silently drop the option before
+the request was sent.
+
+`src/providers/options.ts` derives the valid key set from the Zod settings
+schema instead, so adding a new field to a provider's settings schema
+automatically threads it through the wiring layer.
+
+### Public API
+
+```typescript
+// src/providers/options.ts
+import { z } from 'zod';
+
+/**
+ * Settings-schema shape: a Zod object whose fields are themselves Zod
+ * object schemas. The outer keys are provider ids; the inner keys are
+ * the valid option names for that provider.
+ */
+export type ProviderSettingsSchema = z.ZodObject<
+  Record<
+    string,
+    | z.ZodObject<Record<string, z.ZodTypeAny>>
+    | z.ZodOptional<z.ZodObject<Record<string, z.ZodTypeAny>>>
+  >
+>;
+
+/** Derive provider-id -> valid-option-keys map from a Zod settings schema. */
+export function deriveProviderOptionKeys(
+  schema: ProviderSettingsSchema
+): ReadonlyMap<string, ReadonlySet<string>>;
+
+/** Trim a provider-options bag down to the keys the schema admits. */
+export function filterProviderOptions(
+  providerId: string,
+  options: Readonly<Record<string, unknown>>,
+  keyMap: ReadonlyMap<string, ReadonlySet<string>>
+): Record<string, unknown>;
+```
+
+### Semantics
+
+- `deriveProviderOptionKeys(schema)` walks the outer object's shape, peels
+  `ZodOptional` / `ZodNullable` / `ZodDefault` wrappers via the internal
+  `unwrapObjectSchema` helper (so a caller can declare `openai:
+  openaiSettings.optional()` or `openai: openaiSettings` interchangeably),
+  and returns a read-only map of provider id to the set of its valid inner
+  keys. Non-object entries at the outer level are skipped silently.
+- `filterProviderOptions(providerId, options, keyMap)` returns a fresh
+  object containing only the entries whose key is in `keyMap.get(providerId)`.
+  The input bag is never mutated. When `providerId` has no entry in the
+  derived map (an unknown provider, e.g. a bespoke extension that was not
+  threaded through the schema), the full input is returned verbatim — the
+  helper does not strip options for providers it does not know about.
+- No runtime schema is defined in this module; callers (SAP orchestration,
+  direct Anthropic / OpenAI / Bedrock paths, test fixtures) pass in their
+  own schema so the module stays independent of provider-specific type
+  bundles.
+
+### Why `unwrapObjectSchema` matters
+
+Settings schemas routinely declare the top-level provider slot as optional
+so a user config does not have to mention every provider. The derivation
+MUST reach the inner object regardless of how the caller wrote the slot,
+or the derived key set is empty and every option for that provider gets
+filtered out at request time. The helper peels `ZodOptional`, `ZodNullable`,
+and `ZodDefault` wrappers in a `while` loop; a bespoke wrapper that is none
+of these causes the slot to be skipped (fail-closed — unknown wrapping is
+preferable to incorrectly admitting arbitrary keys).
+
+### Formatting discipline
+
+`ProviderSettingsSchema` and `unwrapObjectSchema` are wrapped per Prettier's
+100-column rule so the discriminated-union generic argument renders over
+multiple lines rather than a single long one. Keep this form when adding
+new provider slots to the outer schema — a long single-line generic
+argument will fail `format:check` in CI.
+
 ## Related Documentation
 
 - [Architecture](ARCHITECTURE.md) - System architecture and design

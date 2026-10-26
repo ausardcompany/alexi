@@ -190,6 +190,21 @@ npm run test:coverage  # Run tests with coverage report
 - Trailing commas (ES5 style)
 - LF line endings
 
+Run `npm run format` before pushing. The dedicated `format:check` CI job
+runs independently from `lint` and `typecheck`, and it will fail a PR on
+any formatting drift — including the long-signature line-wrap issues that
+the pre-commit `lint-staged` hook corrects on staged files but which can
+sneak past when a file is modified outside the staged set (e.g. by an
+IDE refactor on an untracked branch). The 2026-10-26 auto-fix on
+`src/providers/credential.ts` and `src/providers/options.ts` (CHANGELOG
+`### Changed`, commit `db071ab9`) is a reference case: a 100-column
+overrun on a single generic argument blocked CI until the formatter
+reflowed the signature. New provider helpers that declare a
+discriminated-union generic argument (`ProviderSettingsSchema` is the
+canonical example) MUST reflow the generic across lines rather than fight
+the ceiling with an inline cast; the reflowed shape is also easier to
+diff on review.
+
 ### Import Conventions
 
 ```typescript
